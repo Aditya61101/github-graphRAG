@@ -1,0 +1,263 @@
+{
+  "files": [
+    {
+      "path": "backend/.gitignore",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Utility file, not directly architectural but may contain ignore patterns.",
+      "language": null
+    },
+    {
+      "path": "backend/alembic.ini",
+      "action": "include",
+      "chunk_strategy": "whole_file",
+      "reason": "Database migration configuration, defines DB connection and settings.",
+      "language": null
+    },
+    {
+      "path": "backend/installation.txt",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Installation instructions, generally procedural.",
+      "language": null
+    },
+    {
+      "path": "backend/notes.txt",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Free‑form notes, may contain architectural hints but not core code.",
+      "language": null
+    },
+    {
+      "path": "backend/requirements.txt",
+      "action": "include",
+      "chunk_strategy": "whole_file",
+      "reason": "Lists Python dependencies, important for understanding runtime components.",
+      "language": null
+    },
+    {
+      "path": "backend/alembic/README",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Documentation for Alembic, not core code.",
+      "language": null
+    },
+    {
+      "path": "backend/alembic/env.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Alembic environment script, defines migration context.",
+      "language": "python"
+    },
+    {
+      "path": "backend/alembic/script.py.mako",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Template file, not directly part of runtime logic.",
+      "language": null
+    },
+    {
+      "path": "backend/alembic/versions/1648d6bc1fbf_initial_finalized_schema.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Initial DB schema migration, defines data model.",
+      "language": "python"
+    },
+    {
+      "path": "backend/alembic/versions/426afa44a040_is_active_replaced_doc_id_cols.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Subsequent migration altering schema, relevant to data model.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api.rest",
+      "action": "low_priority",
+      "chunk_strategy": "whole_file",
+      "reason": "Potential API description, but format unknown; keep for reference.",
+      "language": null
+    },
+    {
+      "path": "backend/app/main.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Application entry point, defines service startup.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/setup.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Package setup script, may expose entry points and dependencies.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/internal_verification_agent/internal_verification_agent.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Agent implementation, part of orchestration logic.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/internal_verification_agent/utils/helpers.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Utility helpers used by internal verification agent.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/validation_agent/validation_agent.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Validation agent core logic.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/validation_agent/utils/helper.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Helper functions for validation agent.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/validation_agent/utils/llm_filler.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "LLM integration helper, part of validation workflow.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/agents/validation_agent/utils/requirements.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Defines runtime requirements for validation agent.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/auth.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Authentication endpoint definitions.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/claims.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Claims API routes, core business functionality.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/documents.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Document handling API routes.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/hospitals.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Hospital‑related API endpoints.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/policies.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Policy management API routes.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/api/users.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "User management API routes.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/core/database.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Database connection and ORM setup.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/core/jwt.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "JWT handling utilities for auth.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/core/security.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Security utilities, e.g., password hashing.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/core/security_utils.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Additional security helper functions.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/base.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Base class for raw unstructured extractors.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/docx_extractor.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Extractor for DOCX files.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/extract_router.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Routing logic for raw extractors.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/image_extractor.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Image extraction component.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/image_preprocessing.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Pre‑processing steps for image data.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/pdf_extractor.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "PDF extraction logic.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/raw_unstructured/txt_extractor.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Plain‑text extraction component.",
+      "language": "python"
+    },
+    {
+      "path": "backend/app/extraction/structured/bill_extractor.py",
+      "action": "include",
+      "chunk_strategy": "symbol",
+      "reason": "Extractor for structured bill documents.",
+      "language": "python"
+    }
+  ]
+}

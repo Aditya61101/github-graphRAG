@@ -20,10 +20,10 @@ from github_graphrag.graphdb_driver import CreateDriver
 from github_graphrag.communities_operations import detect_communities, ensure_projection, get_communities, save_community
 from github_graphrag.embed_entities import create_entity_embeddings
 
+from neo4j_graphrag.llm import GeminiLLM
 from neo4j_graphrag.embeddings import GeminiEmbedder
 from neo4j_graphrag.exceptions import LLMGenerationError
 from neo4j_graphrag.experimental.pipeline.kg_builder import SimpleKGPipeline
-from neo4j_graphrag.llm import GeminiLLM
 
 
 ROOT: Final = Path(__file__).resolve().parent

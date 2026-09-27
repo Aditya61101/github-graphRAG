@@ -160,7 +160,6 @@ def create_ingestion_plan(
         architectural_objective=architectural_objective,
         manifest=manifest,
     )
-
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -187,5 +186,4 @@ def create_ingestion_plan(
     plan = IngestionPlan.model_validate_json(
         response.choices[0].message.content
     )
-    
     return plan
