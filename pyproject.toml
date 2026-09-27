@@ -1,7 +1,7 @@
 [project]
 name = "github-graphrag"
 version = "0.1.0"
-description = "Add your description here"
+description = "GraphRAG over code repositories and their documentation (Neo4j)"
 readme = "README.md"
 authors = [
     { name = "Aditya Kumar", email = "adityakumarsanni.2001@gmail.com" }
@@ -17,12 +17,24 @@ dependencies = [
     "neo4j-graphrag[google-genai]>=1.19.0",
     "proto-schema-parser>=2.1.0",
     "python-dotenv>=1.2.3",
+    "python-docx>=1.1.2",
+    "python-pptx>=1.0.2",
     "sentence-transformers>=6.1.0",
     "treesitter-chunker>=4.0.0",
 ]
 
 [project.scripts]
 github-graphrag = "github_graphrag:main"
+codegraph = "github_graphrag.codegraph.cli:main"
+
+[dependency-groups]
+dev = [
+    "falkordblite>=0.1.0",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
