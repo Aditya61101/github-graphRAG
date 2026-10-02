@@ -1,15 +1,9 @@
-from neo4j_graphrag.components.text_splitters.base import TextSplitter
-from neo4j_graphrag.components.types import TextChunk, TextChunks
+from .base import whole_file_chunks
 
 
-class WholeFileSplitter(TextSplitter):
-
-    async def run(self, text: str) -> TextChunks:
-        return TextChunks(
-            chunks=[
-                TextChunk(
-                    text=text,
-                    index=0,
-                )
-            ]
-        )
+def split_whole_file(text: str, metadata: dict | None = None):
+    return whole_file_chunks(
+        text,
+        strategy="whole_file",
+        metadata=metadata,
+    )

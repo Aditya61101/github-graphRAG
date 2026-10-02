@@ -14,6 +14,7 @@ dependencies = [
     "langchain-openai>=1.6.6",
     "langchain-text-splitters>=1.1.2",
     "llama-index-core>=0.14.25",
+    "markdown-it-py>=4.2.0",
     "neo4j-graphrag[google-genai]>=1.19.0",
     "proto-schema-parser>=2.1.0",
     "python-dotenv>=1.2.3",

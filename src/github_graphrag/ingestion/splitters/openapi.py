@@ -1,22 +1,10 @@
-from collections.abc import Iterator
-
-from neo4j_graphrag.components.text_splitters.base import TextSplitter
-from neo4j_graphrag.components.types import TextChunk, TextChunks
+from .base import whole_file_chunks
 
 
-class OpenAPITextSplitter(TextSplitter):
-    """
-    Temporary integration implementation.
-
-    Replace the internals with OpenAPI path/operation-aware splitting.
-    """
-
-    async def run(self, text: str) -> TextChunks:
-        return TextChunks(
-            chunks=[
-                TextChunk(
-                    text=text,
-                    index=0,
-                )
-            ]
-        )
+def split_openapi(text: str, metadata: dict | None = None):
+    # TODO: parse OpenAPI paths -> methods and emit one chunk per operation.
+    return whole_file_chunks(
+        text,
+        strategy="openapi_operation",
+        metadata=metadata,
+    )
