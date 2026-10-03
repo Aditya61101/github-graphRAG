@@ -7,7 +7,7 @@ load_dotenv()
 from neo4j import GraphDatabase
 
 from github_graphrag.ingestion.git_tree import get_head_commit
-from github_graphrag.rkg.builders.repo_ingestion_pipeline import build_repository_ingestion_pipeline
+from github_graphrag.ingestion.rkg.builders.repo_ingestion_pipeline import build_repository_ingestion_pipeline
 from github_graphrag.ingestion.read_write_plan import load_plan
 from github_graphrag.tests.test_ingestion import repo
 

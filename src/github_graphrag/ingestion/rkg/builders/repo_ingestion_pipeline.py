@@ -4,9 +4,9 @@ from pathlib import Path
 from chunker import LanguageDetectorImpl
 from neo4j import Driver
 
-from github_graphrag.rkg.ingestion_pipeline import RepositoryIngestionPipeline
-from github_graphrag.rkg.neo4j_writer import Neo4jRepositoryWriter
-from github_graphrag.rkg.splitters import RepositoryTextSplitter
+from github_graphrag.ingestion.rkg.ingestion_pipeline import RepositoryIngestionPipeline
+from github_graphrag.ingestion.rkg.neo4j_writer import Neo4jRepositoryWriter
+from github_graphrag.ingestion.rkg.splitters import RepositoryTextSplitter
 from .knowledge_pipeline import build_knowledge_pipeline
 
 
