@@ -5,7 +5,7 @@ from enum import Enum
 from hashlib import sha256
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChunkStrategy(str, Enum):
@@ -72,6 +72,13 @@ class ExtractedEntity(BaseModel):
     properties: dict[str, Neo4jPropertyValue] = Field(default_factory=dict)
     source_chunk_ids: list[str] = Field(default_factory=list)
 
+    @field_validator("label", "name", mode="before")
+    @classmethod
+    def require_nonempty_identity(cls, value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Entity label and name must be non-empty strings.")
+        return value.strip()
+
 
 class ExtractedRelationship(BaseModel):
     source_label: str
@@ -98,6 +105,7 @@ class CanonicalEntity(BaseModel):
     properties: dict[str, Neo4jPropertyValue] = Field(default_factory=dict)
     aliases: list[str] = Field(default_factory=list)
     evidence_chunk_ids: list[str] = Field(default_factory=list)
+    embedding: list[float] | None = None
 
 
 class RelationshipCandidate(BaseModel):

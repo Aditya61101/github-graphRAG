@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+from github_graphrag.ingestion.rkg.models import CanonicalEntity
+
 # from .models import EvidenceChunk, RelationshipCandidate, ValidatedRelationship
 
 
@@ -19,6 +21,7 @@ class CrossChunkReasoner:
     ):
         candidates = list(candidates)
         semaphore = asyncio.Semaphore(max(1, self.max_concurrency))
+        entities_by_id = entities.entities
 
         async def validate_one(candidate):
             evidence = [
@@ -26,7 +29,17 @@ class CrossChunkReasoner:
                 for cid in candidate.evidence_chunk_ids
                 if cid in chunks_by_id
             ]
+            source_entity = entities_by_id.get(candidate.source_id)
+            target_entity = entities_by_id.get(candidate.target_id)
 
+            if source_entity is None or target_entity is None:
+                print(
+                    "REJECT: missing entity mapping",
+                    candidate.source_id,
+                    candidate.relationship_type,
+                    candidate.target_id,
+                )
+                return None
             async with semaphore:
                 source_neighborhood = await graph_neighborhood_loader(candidate.source_id)
                 target_neighborhood = await graph_neighborhood_loader(candidate.target_id)
@@ -38,6 +51,8 @@ class CrossChunkReasoner:
                 )
                 return await self.validator.validate(
                     candidate,
+                    source_entity=source_entity,
+                    target_entity=target_entity,
                     evidence=evidence,
                     neighborhood=neighborhood,
                 )

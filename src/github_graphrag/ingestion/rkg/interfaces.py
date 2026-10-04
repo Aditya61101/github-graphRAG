@@ -21,6 +21,8 @@ class RelationshipValidator(Protocol):
         self,
         candidate: RelationshipCandidate,
         *,
+        source_entity,
+        target_entity,
         evidence: Sequence[EvidenceChunk],
         neighborhood: str,
     ) -> ValidatedRelationship | None: ...

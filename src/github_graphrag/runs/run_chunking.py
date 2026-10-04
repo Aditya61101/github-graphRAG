@@ -9,7 +9,7 @@ from neo4j import GraphDatabase
 from github_graphrag.ingestion.git_tree import get_head_commit
 from github_graphrag.ingestion.rkg.builders.repo_ingestion_pipeline import build_repository_ingestion_pipeline
 from github_graphrag.ingestion.read_write_plan import load_plan
-from github_graphrag.tests.test_ingestion import repo
+from github_graphrag.runs.run_ingestion import repo
 
 ingestion_plan = load_plan()
 
@@ -36,9 +36,9 @@ async def main():
         candidates_path=".state/candidates.jsonl",
         examples=''
     )
-    result = await pipeline.ingest(
+    await pipeline.ingest(
         ingestion_plan.files
     )
-    print("ingestion result:", result)
+    # print("ingestion result:", result)
 if __name__ == "__main__":
     asyncio.run(main())

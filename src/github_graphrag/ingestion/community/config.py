@@ -34,7 +34,7 @@ class CommunityConfig(BaseModel):
         description="Time-to-live for the GDS projected graph (ISO-8601 duration).",
     )
     entity_label: str = Field(
-        default="__Entity__",
+        default="Entity",
         description="Neo4j node label identifying architectural entities.",
     )
     temporary_gds_property: str = Field(

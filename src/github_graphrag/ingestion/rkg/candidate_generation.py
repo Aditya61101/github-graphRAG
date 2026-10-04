@@ -1,4 +1,5 @@
 from .models import RelationshipCandidate
+from .canonicalization import normalized_entity_key
 
 
 class RelationshipCandidateGenerator:
@@ -8,12 +9,10 @@ class RelationshipCandidateGenerator:
         result = {}
         for knowledge in candidates:
             for rel in knowledge.relationships:
-                source_id = extracted_to_canonical.get(
-                    f"{rel.source_label}:{rel.source_name}"
-                )
-                target_id = extracted_to_canonical.get(
-                    f"{rel.target_label}:{rel.target_name}"
-                )
+                source_key = normalized_entity_key(rel.source_label, rel.source_name)
+                target_key = normalized_entity_key(rel.target_label, rel.target_name)
+                source_id = extracted_to_canonical.get(source_key) if source_key else None
+                target_id = extracted_to_canonical.get(target_key) if target_key else None
                 if not source_id or not target_id or source_id == target_id:
                     continue
 

@@ -551,11 +551,23 @@ The output must contain:
 CROSS_CHUNK_USER_PROMPT = """
 Validate the following candidate relationship.
 
-Candidate:
-source_id: {source_id}
-target_id: {target_id}
+Source entity:
+id: {source_id}
+label: {source_label}
+name: {source_name}
+aliases: {source_aliases}
+
+Candidate relationship:
 relationship_type: {relationship_type}
-reason: {reason}
+
+Target entity:
+id: {target_id}
+label: {target_label}
+name: {target_name}
+aliases: {target_aliases}
+
+Reason:
+{reason}
 
 Source evidence:
 {evidence}
@@ -563,7 +575,21 @@ Source evidence:
 Existing graph neighborhood:
 {neighborhood}
 
-Determine whether the EXACT candidate is supported by the source evidence.
+The source_id and target_id are opaque canonical identifiers. Use the
+provided source and target entity metadata to identify the exact entities
+being evaluated.
+
+Determine whether the source evidence supports the EXACT candidate
+relationship between these exact source and target entities.
+
+The evidence does not need to contain the opaque entity IDs. Match the
+concrete entity names, labels, and aliases in the evidence to the supplied
+source and target entities.
+
+Do not substitute different entities, relationship types, or relationship
+directions. Do not infer a relationship merely because the entities are
+architecturally related. Reject the candidate if the evidence does not
+sufficiently support the exact relationship.
 
 Return only the requested validation result.
 """

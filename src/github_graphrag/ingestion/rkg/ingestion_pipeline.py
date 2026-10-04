@@ -60,7 +60,9 @@ class RepositoryIngestionPipeline:
 
         # Persist source chunks and canonical entities BEFORE relationship
         # validation so the validator can inspect the current graph context.
-        self.neo4j_writer.initialize_constraints()
+        self.neo4j_writer.initialize_constraints(
+            embedding_dimensions=self.knowledge_pipeline.embedding_dimensions,
+        )
         self.neo4j_writer.write_source(
             repository=self.repository_name,
             commit=self.commit,
@@ -69,12 +71,28 @@ class RepositoryIngestionPipeline:
         self.neo4j_writer.write_entities(entities.entities.values())
 
         chunks_by_id = {chunk.chunk_id: chunk for chunk in processed_chunks}
+        
+        print("=== RELATIONSHIP DEBUG ===")
+        print("Extracted relationships:", sum(len(k.relationships) for k in candidate_knowledge))
+        print("Relationship candidates:", len(relationship_candidates))
+        
         validated_relationships = await self.cross_chunk_reasoner.validate_all(
             relationship_candidates,
             entities=entities,
             chunks_by_id=chunks_by_id,
             graph_neighborhood_loader=self.graph_neighborhood_loader,
         )
+        
+        print("Validated relationships:", len(validated_relationships))
+
+        # for r in validated_relationships:
+        #     print(
+        #         r.source_id,
+        #         r.relationship_type,
+        #         r.target_id,
+        #         r.confidence,
+        #         r.rationale,
+        #     )
 
         self.neo4j_writer.write_relationships(validated_relationships)
 

@@ -3,24 +3,29 @@ load_dotenv()
 
 def expand_entities(
     driver,
-    entity_names: list[str],
+    entity_ids: list[str],
     database: str | None,
 ) -> list[dict]:
+    """Return directed one-hop architectural edges adjacent to canonical IDs."""
+    if not entity_ids:
+        return []
 
     records, _, _ = driver.execute_query(
         """
-        MATCH (source:__Entity__)
-        WHERE source.name IN $entity_names
-
-        OPTIONAL MATCH (source)-[r]-(target:__Entity__)
+        MATCH (source:Entity)-[r]->(target:Entity)
+        WHERE source.id IN $entity_ids OR target.id IN $entity_ids
 
         RETURN
+            source.id AS source_id,
+            source.label AS source_label,
             source.name AS source,
             type(r) AS relationship,
-            neighbor.name AS neighbor
-        ORDER BY source, relationship, neighbor
+            target.id AS target_id,
+            target.label AS target_label,
+            target.name AS target
+        ORDER BY source, relationship, target
         """,
-        entity_names=entity_names,
+        entity_ids=list(dict.fromkeys(entity_ids)),
         database_=database,
     )
 

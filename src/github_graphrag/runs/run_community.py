@@ -49,7 +49,7 @@ def detect_entity_label(driver, database: str | None) -> str:
             continue
 
     # Default fallback
-    return "__Entity__"
+    return "Entity"
 
 
 async def main() -> None:

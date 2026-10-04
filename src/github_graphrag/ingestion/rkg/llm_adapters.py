@@ -224,6 +224,8 @@ class AzureOpenAIRelationshipValidator(RelationshipValidator):
         candidate: RelationshipCandidate,
         *,
         evidence: Sequence[EvidenceChunk],
+        source_entity,
+        target_entity,
         neighborhood: str,
     ) -> ValidatedRelationship | None:
         evidence_text = "\n\n".join(
@@ -233,6 +235,12 @@ class AzureOpenAIRelationshipValidator(RelationshipValidator):
         prompt = CROSS_CHUNK_USER_PROMPT.format(
             source_id=candidate.source_id,
             target_id=candidate.target_id,
+            source_label=source_entity.label,
+            source_name=source_entity.name,
+            source_aliases=source_entity.aliases,
+            target_label=target_entity.label,
+            target_name=target_entity.name,
+            target_aliases=target_entity.aliases,
             relationship_type=candidate.relationship_type,
             reason=candidate.reason,
             evidence=evidence_text,
@@ -250,9 +258,31 @@ class AzureOpenAIRelationshipValidator(RelationshipValidator):
         )
 
         parsed = response.choices[0].message.parsed
-        if parsed is None or not parsed.supported:
+        if parsed is None:
+            print(
+                "REJECT: parsed=None",
+                candidate.source_id,
+                candidate.relationship_type,
+                candidate.target_id,
+            )
             return None
+
+        if not parsed.supported:
+            print(
+                "REJECT: unsupported",
+                candidate.relationship_type,
+                parsed.confidence,
+                parsed.rationale,
+            )
+            return None
+
         if parsed.confidence < self.minimum_confidence:
+            print(
+                "REJECT: low-confidence",
+                candidate.relationship_type,
+                parsed.confidence,
+                parsed.rationale,
+            )
             return None
 
         return ValidatedRelationship(

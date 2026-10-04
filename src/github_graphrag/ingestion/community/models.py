@@ -23,7 +23,7 @@ class CommunityMember(BaseModel):
     def primary_label(self) -> str:
         """Return the most specific semantic label, filtering out generic internal labels."""
         for lbl in self.labels:
-            if lbl not in {"__Entity__", "__KGBuilder__"}:
+            if lbl not in {"__Entity__", "__KGBuilder__", "Entity"}:
                 return lbl
         return self.labels[0] if self.labels else "Entity"
 

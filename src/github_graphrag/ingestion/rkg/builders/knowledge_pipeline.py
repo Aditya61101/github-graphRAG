@@ -29,26 +29,6 @@ def _required_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
 
-
-
-def _validate_structured_output_api_version(version: str) -> None:
-    # Azure structured outputs require API versions that support JSON schema
-    # structured outputs. Keep this check explicit so an old deployment fails
-    # before any repository LLM calls are made.
-    minimum = (2024, 8, 1)
-    raw = version.replace("-preview", "")
-    try:
-        parts = tuple(int(part) for part in raw.split("-")[:3])
-    except ValueError as exc:
-        raise RuntimeError(
-            f"Unsupported AZURE_OPENAI_API_VERSION for structured outputs: {version}"
-        ) from exc
-    if parts < minimum:
-        raise RuntimeError(
-            "AZURE_OPENAI_API_VERSION must be at least 2024-08-01-preview "
-            f"for structured outputs; got {version}"
-        )
-
 def build_extractor(azure_llm: AzureOpenAILLM):
     return AzureOpenAIExtractor(azure_llm)
 
@@ -72,10 +52,18 @@ def build_knowledge_pipeline(candidates_path: str | Path, examples: str = ""):
         deployment=_required_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
     )
     
+    embedding_dimensions = int(
+        os.environ.get("AZURE_OPENAI_EMBEDDING_DIMENSIONS", "3072")
+    )
+    if embedding_dimensions <= 0:
+        raise RuntimeError(
+            "AZURE_OPENAI_EMBEDDING_DIMENSIONS must be a positive integer."
+        )
+
     embedder = AzureOpenAIEmbedder(
         client,
         deployment=_required_env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
-        dimensions=3072,
+        dimensions=embedding_dimensions,
         batch_size=128,
     )
 
@@ -95,5 +83,8 @@ def build_knowledge_pipeline(candidates_path: str | Path, examples: str = ""):
             rough_token_count,
             BatchConfig(max_tokens=12_000, max_chunks=32),
         ),
-        config=PipelineConfig(examples=examples),
+        config=PipelineConfig(
+            examples=examples,
+            embedding_dimensions=embedding_dimensions,
+        ),
     )
