@@ -1,0 +1,23 @@
+import { useEffect } from "react";
+import { useNavigate } from "react-router";
+
+import { useAuth } from "@/components/providers/auth-provider";
+import { LoadingScreen } from "@/components/loading-screen";
+
+export default function AuthSuccess() {
+  const navigate = useNavigate();
+  const { login } = useAuth();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    const token = params.get("token");
+
+    if (token) {
+      login(token);
+      navigate("/dashboard");
+    }
+  }, [login, navigate]);
+
+  return <LoadingScreen loadingText="Logging you in, please wait..." />;
+}
