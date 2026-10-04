@@ -1,4 +1,3 @@
-from github_graphrag.retrievers.hybrid_retrievers import hybrid_retrieve
 import argparse
 import asyncio
 import json
@@ -8,6 +7,7 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from openai import AsyncAzureOpenAI
 
+from github_graphrag.retrievers.hybrid_retrievers import hybrid_retrieve
 from github_graphrag.embeddings.azure_openai import AzureOpenAIEmbedder
 from github_graphrag.ingestion.rkg.llm_adapters import AzureOpenAILLM
 from github_graphrag.retrievers.retriever_factory import create_retrievers
@@ -24,6 +24,7 @@ The context may contain:
 - Relevant communities and their summaries
 - Community membership
 - Graph relationships
+- Direct source-code chunks and provenance (file paths, chunk IDs, excerpts)
 
 Rules:
 1. Do not invent entities, relationships, files, or architectural details.
@@ -33,6 +34,8 @@ Rules:
 5. If the retrieved context is insufficient to answer the question, say so.
 6. Prefer concrete component names and relationships over vague explanations.
 7. Give a concise but useful architectural explanation.
+8. When source evidence is provided, use it to ground concrete claims.
+9. Do not invent file paths, chunk IDs, or source citations.
 """
 
 def require_env(name: str) -> str:
@@ -68,6 +71,7 @@ async def query_graph_rag(
     embedder,
     entity_retriever,
     community_retriever,
+    chunk_retriever,
     llm,
 ):
     retrieval = await hybrid_retrieve(
@@ -77,8 +81,10 @@ async def query_graph_rag(
         embedder=embedder,
         entity_retriever=entity_retriever,
         community_retriever=community_retriever,
+        chunk_retriever=chunk_retriever,
         entity_top_k=5,
         community_top_k=3,
+        chunk_top_k=5,
     )
     answer = await answer_query(
         query=query,
@@ -120,7 +126,7 @@ async def main() -> None:
         )
 
         driver.verify_connectivity()
-        entity_retriever, community_retriever = create_retrievers(
+        entity_retriever, community_retriever, chunk_retriever = create_retrievers(
             driver=driver,
             database=database,
         )
@@ -131,10 +137,11 @@ async def main() -> None:
             embedder=embedder,
             entity_retriever=entity_retriever,
             community_retriever=community_retriever,
+            chunk_retriever=chunk_retriever,
             llm=llm,
         )
 
-        print("\nAnswer:\n" + result["answer"])
+        # print("\nAnswer:\n" + result["answer"])
         print("\nSources:\n" + json.dumps(result["sources"], indent=2))
     finally:
         driver.close()

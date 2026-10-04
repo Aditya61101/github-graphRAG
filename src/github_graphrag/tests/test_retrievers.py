@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from github_graphrag.runs.run_retrieval import answer_query
-from github_graphrag.graph_expansion import expand_entities
+from github_graphrag.retrievers.graph_expansion import expand_entities
 from github_graphrag.retrievers.hybrid_retrievers import hybrid_retrieve
 from github_graphrag.retrievers.retriever_factory import entity_result_formatter
 
