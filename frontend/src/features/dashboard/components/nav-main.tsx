@@ -15,6 +15,7 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
+import { Link } from "react-router";
 
 type NavMainProps = {
   items: {
@@ -56,9 +57,9 @@ export function NavMain({ items }: NavMainProps) {
                       <SidebarMenuSubItem key={subItem.title}>
                         <SidebarMenuSubButton
                           render={
-                            <a href={subItem.url}>
+                            <Link to={subItem.url}>
                               <span>{subItem.title}</span>
-                            </a>
+                            </Link>
                           }
                         />
                       </SidebarMenuSubItem>
