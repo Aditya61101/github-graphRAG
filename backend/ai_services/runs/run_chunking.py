@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 load_dotenv()
 from neo4j import GraphDatabase
 
-from ai_services.ingestion.git_tree import get_head_commit
+from backend.ai_services.ingestion.discovery.git_tree import get_head_commit
 from ai_services.ingestion.rkg.builders.repo_ingestion_pipeline import build_repository_ingestion_pipeline
-from ai_services.ingestion.read_write_plan import load_plan
+from backend.ai_services.ingestion.discovery.read_write_plan import load_plan
 from ai_services.runs.run_ingestion import repo
 
 ingestion_plan = load_plan()

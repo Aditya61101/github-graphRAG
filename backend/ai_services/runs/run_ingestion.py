@@ -3,12 +3,12 @@ from dotenv import load_dotenv
 from groq import Groq
 load_dotenv()
 
-from ai_services.ingestion.read_write_plan import save_manifest, save_plan
+from backend.ai_services.ingestion.discovery.read_write_plan import save_manifest, save_plan
 
-from ai_services.ingestion.planner import create_ingestion_plan
-from ai_services.ingestion.repo import Repository
-from ai_services.ingestion.git_tree import get_head_commit, get_repository_files
-from ai_services.ingestion.repo_manifest import build_repository_manifest
+from backend.ai_services.ingestion.discovery.planner import create_ingestion_plan
+from backend.ai_services.ingestion.discovery.repo import Repository
+from backend.ai_services.ingestion.discovery.git_tree import get_head_commit, get_repository_files
+from backend.ai_services.ingestion.discovery.repo_manifest import build_repository_manifest
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 repo = Repository.from_path(r"E:\Studies\Dev\Projects\claimIQ")
