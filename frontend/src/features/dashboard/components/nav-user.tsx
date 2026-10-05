@@ -23,7 +23,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { useAuth } from "@/components/providers/auth-provider";
+import { useAuth } from "@/contexts/auth-context";
 import { useNavigate } from "react-router";
 
 export function NavUser() {

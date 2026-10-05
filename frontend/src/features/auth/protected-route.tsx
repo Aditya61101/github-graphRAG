@@ -1,6 +1,6 @@
 import { Navigate, Outlet } from "react-router";
 
-import { useAuth } from "@/components/providers/auth-provider";
+import { useAuth } from "@/contexts/auth-context";
 import { LoadingScreen } from "@/components/loading-screen";
 
 export default function ProtectedRoute() {
