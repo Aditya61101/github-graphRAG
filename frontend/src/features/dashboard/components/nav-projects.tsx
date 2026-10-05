@@ -23,6 +23,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { Link } from "react-router";
 
 type NavProjectsProps = {
   projects: {
@@ -43,10 +44,10 @@ export function NavProjects({ projects }: NavProjectsProps) {
           <SidebarMenuItem key={item.name}>
             <SidebarMenuButton
               render={
-                <a href={item.url}>
+                <Link to={item.url}>
                   <item.icon />
                   <span>{item.name}</span>
-                </a>
+                </Link>
               }
             />
             <DropdownMenu>
