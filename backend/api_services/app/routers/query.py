@@ -1,17 +1,26 @@
 from __future__ import annotations
-from fastapi import APIRouter
+
+from fastapi import APIRouter, Request
 
 from api_services.app.utils.query_response_mapper import build_api_response
-
-from api_services.app.models.query import APIResponse, QueryPreparationResult, QueryRequest
+from api_services.app.models.query import APIResponse, QueryRequest
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 
 router = APIRouter()
 
-@router.post("/query", response_model=APIResponse)
-def prepare_query(request: QueryRequest) -> QueryPreparationResult:
-    rag_agent = RAGQueryAgent()
-    result = rag_agent.prepare(
+
+def get_rag_agent(request: Request) -> RAGQueryAgent:
+    return request.app.state.rag_agent
+
+
+@router.post("", response_model=APIResponse)
+async def query(
+    request: QueryRequest,
+    http_request: Request,
+) -> APIResponse:
+    rag_agent = get_rag_agent(http_request)
+
+    result = await rag_agent.query(
         conversation_id=request.conversation_id,
         query=request.query,
     )
@@ -20,4 +29,3 @@ def prepare_query(request: QueryRequest) -> QueryPreparationResult:
         result=result,
         conversation_id=request.conversation_id,
     )
-

@@ -9,6 +9,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+from backend.shared.utils.env_helper import require_env
+
 
 load_dotenv()
 
@@ -77,11 +79,11 @@ class DriveClient:
         """Build the Google OAuth client configuration from environment variables."""
 
         required_variables = {
-            "GOOGLE_CLIENT_ID": os.getenv("GOOGLE_CLIENT_ID"),
-            "GOOGLE_CLIENT_SECRET": os.getenv("GOOGLE_CLIENT_SECRET"),
-            "GOOGLE_AUTH_URI": os.getenv("GOOGLE_AUTH_URI"),
-            "GOOGLE_TOKEN_URI": os.getenv("GOOGLE_TOKEN_URI"),
-            "GOOGLE_REDIRECT_URI": os.getenv("GOOGLE_REDIRECT_URI"),
+            "GOOGLE_CLIENT_ID": require_env("GOOGLE_CLIENT_ID"),
+            "GOOGLE_CLIENT_SECRET": require_env("GOOGLE_CLIENT_SECRET"),
+            "GOOGLE_AUTH_URI": require_env("GOOGLE_AUTH_URI"),
+            "GOOGLE_TOKEN_URI": require_env("GOOGLE_TOKEN_URI"),
+            "GOOGLE_REDIRECT_URI": require_env("GOOGLE_REDIRECT_URI"),
         }
 
         missing_variables = [

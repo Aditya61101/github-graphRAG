@@ -1,4 +1,8 @@
-from langchain.tools import tool
+from __future__ import annotations
+
+from langchain.tools import ToolRuntime, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from ai_services.retrievers.hybrid_retrievers import (
     HybridRetrievalResult,
@@ -8,19 +12,24 @@ from ai_services.retrievers.hybrid_retrievers import (
 
 def create_query_graph_rag_tool(
     driver,
-    database: str,
+    database: str | None,
     embedder,
     entity_retriever,
     community_retriever,
     chunk_retriever,
 ):
     @tool
-    async def query_graph_rag(query: str) -> HybridRetrievalResult:
+    async def query_graph_rag(
+        query: str,
+        runtime: ToolRuntime,
+    ) -> Command:
+        """Search the repository knowledge graph for evidence relevant to the query.
+
+        The tool returns only retrieval context to the model. Structured source
+        metadata is stored separately in the current agent run so it can be
+        returned by the API without inflating the model conversation history.
         """
-        Search the repository knowledge graph for entities, relationships,
-        communities, and supporting evidence relevant to the query.
-        """
-        return await hybrid_retrieve(
+        result: HybridRetrievalResult = await hybrid_retrieve(
             query=query,
             driver=driver,
             database=database,
@@ -31,6 +40,18 @@ def create_query_graph_rag_tool(
             entity_top_k=5,
             community_top_k=3,
             chunk_top_k=5,
+        )
+
+        return Command(
+            update={
+                "retrieval_sources": result.sources,
+                "messages": [
+                    ToolMessage(
+                        content=result.context,
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ],
+            }
         )
 
     return query_graph_rag

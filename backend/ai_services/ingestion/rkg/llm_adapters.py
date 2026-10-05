@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from typing import Sequence
-
-from openai import AsyncAzureOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 import warnings
+
+from shared.utils.llm_utils import AzureOpenAILLM
 
 from .interfaces import LocalExtractor, RelationshipValidator
 from .models import (
@@ -97,26 +97,6 @@ def _format_chunks(chunks: Sequence[EvidenceChunk]) -> tuple[str, dict[str, str]
             f"\n{chunk.text}"
         )
     return "\n\n".join(blocks), refs
-
-
-class AzureOpenAILLM:
-    """Small Azure OpenAI client wrapper."""
-
-    def __init__(self, client: AsyncAzureOpenAI, deployment: str):
-        self.deployment = deployment
-        self.client = client
-
-    async def ainvoke(self, prompt: str) -> str:
-        response = await self.client.chat.completions.create(
-            model=self.deployment,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("Azure OpenAI returned an empty response.")
-        return content
-
 
 class AzureOpenAIExtractor(LocalExtractor):
     """Extract candidate architectural knowledge directly from raw chunks."""

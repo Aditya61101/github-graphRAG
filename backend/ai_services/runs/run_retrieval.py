@@ -9,7 +9,7 @@ from ai_services.retrievers.hybrid_retrievers import hybrid_retrieve
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
 from ai_services.ingestion.rkg.llm_adapters import AzureOpenAILLM
 from ai_services.retrievers.retriever_factory import create_retrievers
-from ai_services.utils.env_helper import require_env
+from shared.utils.env_helper import require_env
 
 GRAPH_RAG_SYSTEM_PROMPT = """
 You are an expert software architecture assistant.
