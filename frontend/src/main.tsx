@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import App from "./App.tsx";
-import { AppProvider } from "@/components/providers/index.tsx";
+import { AppProvider } from "@/contexts";
 
 import "./index.css";
 
