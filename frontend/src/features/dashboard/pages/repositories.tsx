@@ -10,62 +10,27 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "@/components/ui/toast";
-
-type Repository = {
-  id: number;
-  name: string;
-  description: string;
-  visibility: "Public" | "Private";
-  stars: number;
-  updatedAt: string;
-};
-
-const MOCK_REPOSITORIES: Repository[] = [
-  {
-    id: 1,
-    name: "graph-rag-core",
-    description:
-      "Knowledge graph ingestion and querying pipelines for large repositories.",
-    visibility: "Public",
-    stars: 128,
-    updatedAt: "2 hours ago",
-  },
-  {
-    id: 2,
-    name: "github-insights-ui",
-    description:
-      "A React dashboard for analyzing repository relationships and developer activity.",
-    visibility: "Private",
-    stars: 54,
-    updatedAt: "Yesterday",
-  },
-  {
-    id: 3,
-    name: "rag-playground",
-    description:
-      "Experiment workflows for repository indexing, embeddings, and retrieval evaluation.",
-    visibility: "Public",
-    stars: 89,
-    updatedAt: "3 days ago",
-  },
-  {
-    id: 4,
-    name: "agent-workbench",
-    description:
-      "Internal tools used to orchestrate repository ingestion tasks and agents.",
-    visibility: "Private",
-    stars: 21,
-    updatedAt: "1 week ago",
-  },
-];
+import { useApi } from "@/hooks/use-api";
+import { repositoryService } from "@/features/repositories/api";
+import { EmptyState } from "@/components/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export default function RepositoriesPage() {
-  const [selectedRepositoryId, setSelectedRepositoryId] = useState<number>();
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState<string>();
   const [isIngesting, setIsIngesting] = useState(false);
 
+  const {
+    data: repositories,
+    loading,
+    execute: reloadRepositories,
+  } = useApi(repositoryService.getRepositories, {
+    initialData: [],
+    immediate: true,
+  });
+
   const selectedRepository = useMemo(
-    () => MOCK_REPOSITORIES.find((repo) => repo.id === selectedRepositoryId),
-    [selectedRepositoryId]
+    () => repositories.find((repo) => repo.id === selectedRepositoryId),
+    [repositories, selectedRepositoryId]
   );
 
   const handleIngestion = async () => {
@@ -104,68 +69,82 @@ export default function RepositoriesPage() {
         </Button>
       </section>
 
-      {/* TODO: Empty state */}
-      <div className="grid gap-4 lg:grid-cols-4">
-        {MOCK_REPOSITORIES.map((repository) => {
-          const isSelected = repository.id === selectedRepositoryId;
+      {loading ? (
+        <div className="grid gap-4 lg:grid-cols-3">
+          {Array.from({ length: 12 }).map((_, index) => (
+            <Skeleton key={index} className="h-36" />
+          ))}
+        </div>
+      ) : repositories.length > 0 ? (
+        <div className="grid gap-4 lg:grid-cols-3">
+          {repositories.map((repository) => {
+            const isSelected = repository.id === selectedRepositoryId;
 
-          return (
-            <button
-              key={repository.id}
-              type="button"
-              onClick={() => setSelectedRepositoryId(repository.id)}
-              className="text-left"
-            >
-              <Card
-                className={`h-full cursor-pointer transition-all duration-200 hover:ring-primary/70 ${
-                  isSelected
-                    ? "shadow-md ring-2 ring-primary"
-                    : "hover:shadow-sm"
-                }`}
+            return (
+              <button
+                key={repository.id}
+                type="button"
+                onClick={() => setSelectedRepositoryId(repository.id)}
+                className="text-left"
               >
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <CardTitle className="flex items-center gap-2">
-                        <GitBranch className="size-4" />
-                        {repository.name}
-                      </CardTitle>
-                      <CardDescription className="mt-2 line-clamp-2">
-                        {repository.description}
-                      </CardDescription>
-                    </div>
+                <Card
+                  className={`h-full cursor-pointer transition-all duration-200 hover:ring-primary/70 ${
+                    isSelected
+                      ? "shadow-md ring-2 ring-primary"
+                      : "hover:shadow-sm"
+                  }`}
+                >
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <CardTitle className="flex items-center gap-2">
+                          <GitBranch className="size-4" />
+                          {repository.name}
+                        </CardTitle>
+                        <CardDescription className="mt-2 line-clamp-2">
+                          {repository.description}
+                        </CardDescription>
+                      </div>
 
-                    <div className="rounded-full border px-2 py-1 text-xs font-medium text-muted-foreground">
-                      {repository.visibility === "Private" ? (
-                        <span className="flex items-center gap-1">
-                          <Lock className="size-3" />
-                          Private
-                        </span>
-                      ) : (
-                        "Public"
-                      )}
+                      <div className="rounded-full border px-2 py-1 text-xs font-medium text-muted-foreground">
+                        {repository.isPrivate ? (
+                          <span className="flex items-center gap-1">
+                            <Lock className="size-3" />
+                            Private
+                          </span>
+                        ) : (
+                          "Public"
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </CardHeader>
+                  </CardHeader>
 
-                <CardContent>
-                  <div className="flex flex-wrap items-center justify-between gap-4 text-sm text-muted-foreground">
-                    <div className="flex items-center gap-1.5">
-                      <Star className="size-4 text-yellow-500" />
-                      <span>{repository.stars} stars</span>
-                    </div>
+                  <CardContent>
+                    <div className="flex flex-wrap items-center justify-between gap-4 text-sm text-muted-foreground">
+                      <div className="flex items-center gap-1.5">
+                        <Star className="size-4 text-yellow-500" />
+                        <span>NA stars</span>
+                      </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <CalendarClock className="size-4" />
-                      <span>Updated {repository.updatedAt}</span>
+                      <div className="flex items-center gap-1.5">
+                        <CalendarClock className="size-4" />
+                        <span>Updated {repository.updatedAt}</span>
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </button>
-          );
-        })}
-      </div>
+                  </CardContent>
+                </Card>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState
+          text="No repositories found"
+          subtext="Make sure you have at least one repository available."
+          actionLabel="Reload"
+          action={reloadRepositories}
+        />
+      )}
     </div>
   );
 }
