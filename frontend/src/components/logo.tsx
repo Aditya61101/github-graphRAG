@@ -7,7 +7,7 @@ export function Logo() {
       <div className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
         <GitForkIcon className="size-4" />
       </div>
-      GraphRAG Inc.
+      Decision Guard
     </Link>
   );
 }

@@ -15,7 +15,7 @@ export default function AuthSuccess() {
 
     if (token) {
       login(token);
-      navigate("/dashboard");
+      navigate("/");
     }
   }, [login, navigate]);
 

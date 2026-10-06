@@ -78,7 +78,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       login,
       logout,
     }),
-    [token]
+    [token, isLoading, user]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

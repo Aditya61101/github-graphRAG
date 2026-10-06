@@ -27,7 +27,7 @@ import { NavUser } from "@/features/dashboard/components/nav-user";
 
 const NAV_DATA = {
   header: {
-    name: "GraphRAG Inc.",
+    name: "Decision Guard",
     logo: GitForkIcon,
     subtext: "Guard your decisions",
   },
