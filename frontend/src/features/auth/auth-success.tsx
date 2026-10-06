@@ -16,6 +16,8 @@ export default function AuthSuccess() {
     if (token) {
       login(token);
       navigate("/");
+    } else {
+      navigate("/auth/login");
     }
   }, [login, navigate]);
 

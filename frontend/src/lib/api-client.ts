@@ -1,13 +1,13 @@
 import axios from "axios";
 
-const api = axios.create({
+export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-api.interceptors.request.use((config) => {
+apiClient.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
 
   if (token) {
@@ -17,16 +17,14 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-api.interceptors.response.use(
+apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem("token");
-      window.location.href = "/auth/sign-in";
+      window.location.href = "/auth/login";
     }
 
     return Promise.reject(error);
   }
 );
-
-export default api;
