@@ -112,6 +112,7 @@ class RepositoryModel(Base):
     user = relationship("UserModel", backref="repositories")
     github_connection = relationship("GitHubConnectionModel", back_populates="repositories")
     ingestion_runs = relationship("IngestionRunModel", back_populates="repository", cascade="all, delete-orphan")
+    adrs = relationship("ADRModel", back_populates="repository", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_repo_owner_name", "owner", "name"),
@@ -167,4 +168,68 @@ class IngestionRunModel(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
+        }
+
+
+class ADRModel(Base):
+    """Represents an Architecture Decision Record (ADR) associated with a repository."""
+
+    __tablename__ = "adrs"
+
+    id = Column(String(64), primary_key=True, default=lambda: f"adr_{uuid.uuid4().hex[:12]}")
+    repository_id = Column(
+        String(64),
+        ForeignKey("repositories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(32), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED
+
+    # Source metadata (designed for MANUAL_UPLOAD, CONFLUENCE, etc.)
+    source_type = Column(String(32), default="MANUAL_UPLOAD", nullable=False)
+    source_id = Column(String(255), nullable=True)
+    source_url = Column(String(500), nullable=True)
+    source_name = Column(String(255), nullable=False)  # Original uploaded filename or page title
+    source_version = Column(String(64), nullable=True)
+
+    # Local file metadata
+    file_path = Column(String(500), nullable=False)
+    content_hash = Column(String(64), nullable=False, index=True)
+    file_size = Column(Integer, nullable=True)
+    mime_type = Column(String(100), nullable=True)
+    file_extension = Column(String(32), nullable=True)
+
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    repository = relationship("RepositoryModel", back_populates="adrs")
+
+    __table_args__ = (
+        Index("ix_adr_repo_id", "repository_id"),
+        Index("ix_adr_repo_hash", "repository_id", "content_hash"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "repository_id": self.repository_id,
+            "title": self.title,
+            "description": self.description,
+            "status": self.status,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "source_url": self.source_url,
+            "source_name": self.source_name,
+            "source_version": self.source_version,
+            "file_path": self.file_path,
+            "content_hash": self.content_hash,
+            "file_size": self.file_size,
+            "mime_type": self.mime_type,
+            "file_extension": self.file_extension,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

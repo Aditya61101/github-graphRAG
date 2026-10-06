@@ -15,6 +15,13 @@ REPOS_STORAGE_DIR = os.getenv(
     "REPOS_STORAGE_DIR",
     str(Path(__file__).resolve().parents[2] / "data" / "repos"),
 )
+ADRS_STORAGE_DIR = os.getenv(
+    "ADRS_STORAGE_DIR",
+    str(Path(__file__).resolve().parents[2] / "data" / "adrs"),
+)
+MAX_ADR_FILE_SIZE_BYTES = int(
+    os.getenv("MAX_ADR_FILE_SIZE_BYTES", str(10 * 1024 * 1024))  # 10 MB default
+)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{(Path(__file__).resolve().parents[2] / 'data' / 'decisionguard.db').as_posix()}",

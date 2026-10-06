@@ -3,9 +3,29 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 
+from ai_services.ingestion.adr.service import (
+    ADRParsingError,
+    ADRService,
+    ADRServiceError,
+    DuplicateADRError,
+    FileSizeExceededError,
+    InvalidFileTypeError,
+    RepositoryAccessDeniedError as ADRRepoAccessDeniedError,
+    RepositoryNotFoundError as ADRRepoNotFoundError,
+)
 from ai_services.ingestion.persistence.models import UserModel
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
 from ai_services.ingestion.service import IngestionResult, RepositoryIngestionService
@@ -16,7 +36,11 @@ from ai_services.ingestion.sources.interface import (
     RepositoryNotFoundError,
     RepositoryOwnershipConflictError,
 )
+import httpx
+
+from api_services.app.models.adr import ADRResponse
 from api_services.app.models.repository import (
+    AvailableRepositoryResponse,
     IngestRepositoryRequest,
     IngestionJobResponse,
     RepositoryResponse,
@@ -47,6 +71,20 @@ def get_sqlite_store(request: Request) -> SqliteApplicationStore:
             detail="SQLite application store is not initialized.",
         )
     return store
+
+
+def get_adr_service(request: Request) -> ADRService:
+    service = getattr(request.app.state, "adr_service", None)
+    if not service:
+        store = get_sqlite_store(request)
+        from api_services.app.config import ADRS_STORAGE_DIR, MAX_ADR_FILE_SIZE_BYTES
+        service = ADRService(
+            sqlite_store=store,
+            storage_dir=ADRS_STORAGE_DIR,
+            max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
+        )
+        request.app.state.adr_service = service
+    return service
 
 
 async def _run_ingest_background(
@@ -157,16 +195,139 @@ async def ingest_repository(
         )
 
 
-@router.get("", response_model=list[RepositoryResponse])
-async def list_repositories(
+@router.get("/tracked", response_model=list[RepositoryResponse])
+async def list_tracked_repositories(
     request: Request,
     current_user: UserModel = Depends(get_current_user),
 ) -> list[RepositoryResponse]:
-    """List all tracked repositories belonging to the authenticated user."""
+    """List all tracked/indexed repositories belonging to the authenticated user."""
     store = get_sqlite_store(request)
     records = store.list_repositories(user_id=current_user.id)
     return [RepositoryResponse(**record.to_dict()) for record in records]
 
+
+@router.get("", response_model=list[AvailableRepositoryResponse])
+async def list_user_repositories(
+    request: Request,
+    current_user: UserModel = Depends(get_current_user),
+) -> list[AvailableRepositoryResponse]:
+    """List all GitHub repositories of the authenticated user with their DecisionGuard ingestion status."""
+    store = get_sqlite_store(request)
+
+    connection = store.get_user_github_connection(current_user.id)
+    if not connection or not connection.access_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No connected GitHub account found for the current user. Please authenticate with GitHub first.",
+        )
+
+    headers = {
+        "Authorization": f"Bearer {connection.access_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "DecisionGuard-App",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.github.com/user/repos",
+                params={"per_page": 100, "sort": "updated"},
+                headers=headers,
+            )
+    except Exception as exc:
+        logger.exception(f"Failed to fetch repositories from GitHub for user '{current_user.id}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to reach GitHub API: {exc}",
+        )
+
+    if resp.status_code == 401:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="GitHub access token has expired or is invalid. Please reconnect your GitHub account.",
+        )
+    elif resp.status_code == 403:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub API rate limit exceeded or access forbidden.",
+        )
+    elif resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GitHub API error: status {resp.status_code}",
+        )
+
+    github_repos = resp.json()
+
+    # Load tracked repositories from local SQLite database for this user
+    tracked_repos = store.list_repositories(user_id=current_user.id)
+    tracked_by_gh_id = {r.github_repository_id: r for r in tracked_repos if r.github_repository_id}
+    tracked_by_full_name = {r.full_name.lower(): r for r in tracked_repos if r.full_name}
+
+    results: list[AvailableRepositoryResponse] = []
+    seen_tracked_pks: set[str] = set()
+
+    for item in github_repos:
+        gh_id = str(item.get("id"))
+        full_name = item.get("full_name") or f"{item.get('owner', {}).get('login')}/{item.get('name')}"
+        owner = item.get("owner", {}).get("login") or ""
+        name = item.get("name") or ""
+        is_private = bool(item.get("private", False))
+
+        matched = tracked_by_gh_id.get(gh_id) or tracked_by_full_name.get(full_name.lower())
+
+        if matched:
+            seen_tracked_pks.add(matched.id)
+            repo_status = matched.status or "COMPLETED"
+            tracked_id = matched.id
+            commit_sha = matched.indexed_commit_sha
+            tracked_branch = matched.tracked_branch
+        else:
+            repo_status = "NOT_INDEXED"
+            tracked_id = None
+            commit_sha = None
+            tracked_branch = item.get("default_branch") or "main"
+
+        results.append(
+            AvailableRepositoryResponse(
+                github_repository_id=gh_id,
+                owner=owner,
+                name=name,
+                full_name=full_name,
+                repository_url=item.get("html_url") or f"https://github.com/{full_name}",
+                default_branch=item.get("default_branch") or "main",
+                tracked_branch=tracked_branch,
+                is_private=is_private,
+                description=item.get("description"),
+                status=repo_status,
+                tracked_repository_id=tracked_id,
+                indexed_commit_sha=commit_sha,
+                updated_at=item.get("updated_at"),
+            )
+        )
+
+    # Append any tracked repositories that might not have appeared in GitHub page 1
+    for tr in tracked_repos:
+        if tr.id not in seen_tracked_pks:
+            results.append(
+                AvailableRepositoryResponse(
+                    github_repository_id=tr.github_repository_id,
+                    owner=tr.owner,
+                    name=tr.name,
+                    full_name=tr.full_name,
+                    repository_url=tr.repository_url,
+                    default_branch=tr.default_branch,
+                    tracked_branch=tr.tracked_branch,
+                    is_private=False,
+                    description=None,
+                    status=tr.status,
+                    tracked_repository_id=tr.id,
+                    indexed_commit_sha=tr.indexed_commit_sha,
+                    updated_at=tr.updated_at.isoformat() if tr.updated_at else None,
+                )
+            )
+
+    return results
 
 @router.get("/{owner}/{name}", response_model=RepositoryResponse)
 async def get_repository(
@@ -277,3 +438,73 @@ async def sync_repository(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Sync failed: {exc}",
         )
+
+
+@router.post("/{repo_id}/adrs", response_model=ADRResponse, status_code=status.HTTP_201_CREATED)
+async def upload_adr(
+    repo_id: str,
+    request: Request,
+    file: UploadFile = File(..., description="ADR document file (.md, .txt, .pdf, .docx)"),
+    title: str | None = Form(default=None, description="Optional explicit title for the ADR"),
+    description: str | None = Form(default=None, description="Optional brief description"),
+    current_user: UserModel = Depends(get_current_user),
+) -> Any:
+    """Upload and process an Architecture Decision Record (ADR) for a repository."""
+    adr_service = get_adr_service(request)
+
+    file_bytes = await file.read()
+    filename = file.filename or "uploaded_adr.txt"
+
+    try:
+        adr_record, _parsed_doc = adr_service.process_adr_upload(
+            repository_id=repo_id,
+            user_id=current_user.id,
+            filename=filename,
+            file_bytes=file_bytes,
+            explicit_title=title,
+            description=description,
+        )
+        return ADRResponse(**adr_record.to_dict())
+    except ADRRepoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ADRRepoAccessDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except InvalidFileTypeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except FileSizeExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
+    except DuplicateADRError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except ADRParsingError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except ADRServiceError as exc:
+        logger.exception(f"ADR service error for repository '{repo_id}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"ADR processing error: {exc}",
+        )
+    except Exception as exc:
+        logger.exception(f"Unexpected error uploading ADR for repository '{repo_id}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process ADR: {exc}",
+        )
+
+@router.get("/{repo_id}/adrs", response_model=list[ADRResponse])
+async def list_repository_adrs(
+    repo_id: str,
+    request: Request,
+    current_user: UserModel = Depends(get_current_user),
+) -> list[ADRResponse]:
+    """List all ADRs associated with a repository accessible by the current user."""
+    adr_service = get_adr_service(request)
+    store = get_sqlite_store(request)
+    try:
+        repo = adr_service.validate_repository_access(repo_id, current_user.id)
+    except ADRRepoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ADRRepoAccessDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
+    adrs = store.list_adrs(repository_id=repo.id)
+    return [ADRResponse(**adr.to_dict()) for adr in adrs]

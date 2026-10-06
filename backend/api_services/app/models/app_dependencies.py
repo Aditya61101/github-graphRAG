@@ -24,3 +24,4 @@ class AppDependencies:
     ingestion_service: Any = None
     repo_store: Any = None
     sqlite_store: Any = None
+    adr_service: Any = None

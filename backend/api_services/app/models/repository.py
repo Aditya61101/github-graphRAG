@@ -58,6 +58,27 @@ class RepositoryResponse(BaseModel):
     updated_at: str | None = None
 
 
+class AvailableRepositoryResponse(BaseModel):
+    github_repository_id: str
+    owner: str
+    name: str
+    full_name: str
+    repository_url: str
+    default_branch: str
+    tracked_branch: str | None = None
+    is_private: bool = False
+    description: str | None = None
+    status: str = Field(
+        description="Ingestion status in DecisionGuard: 'NOT_INDEXED', 'INDEXING', 'COMPLETED', 'FAILED', 'IDLE'"
+    )
+    tracked_repository_id: str | None = Field(
+        default=None,
+        description="Internal tracked repository ID (e.g. repo_12345) if already in DecisionGuard.",
+    )
+    indexed_commit_sha: str | None = None
+    updated_at: str | None = None
+
+
 class IngestionJobResponse(BaseModel):
     status: str
     repository: str

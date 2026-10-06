@@ -16,11 +16,14 @@ from api_services.app.routers.webhook import router as webhook_router
 from api_services.app.routers.repositories import router as repositories_router
 
 from api_services.app.config import (
+    ADRS_STORAGE_DIR,
     FRONTEND_URL,
+    MAX_ADR_FILE_SIZE_BYTES,
     REPOS_STORAGE_DIR,
 )
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from ai_services.ingestion.adr.service import ADRService
 from ai_services.ingestion.persistence.sqlite_store import (
     SqliteApplicationStore,
     SqliteCredentialProvider,
@@ -109,8 +112,15 @@ async def lifespan(app: FastAPI):
         groq_client=groq_client,
     )
 
+    adr_service = ADRService(
+        sqlite_store=sqlite_store,
+        storage_dir=ADRS_STORAGE_DIR,
+        max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
+    )
+
     app.state.sqlite_store = sqlite_store
     app.state.ingestion_service = ingestion_service
+    app.state.adr_service = adr_service
 
     app.state.deps = AppDependencies(
         driver=driver,
@@ -123,6 +133,7 @@ async def lifespan(app: FastAPI):
         community_retriever=community_retriever,
         ingestion_service=ingestion_service,
         sqlite_store=sqlite_store,
+        adr_service=adr_service,
     )
 
     # Create the conversational agent once. Creating it inside the request

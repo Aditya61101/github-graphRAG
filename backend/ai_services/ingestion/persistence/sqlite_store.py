@@ -5,10 +5,11 @@ import logging
 from typing import Any
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, joinedload, sessionmaker
 
 from ai_services.ingestion.persistence.database import get_session_factory, init_db
 from ai_services.ingestion.persistence.models import (
+    ADRModel,
     GitHubConnectionModel,
     IngestionRunModel,
     RepositoryModel,
@@ -287,11 +288,15 @@ class SqliteApplicationStore:
             ident = identifier_or_user_id
 
         with self.session_factory() as session:
-            stmt = select(RepositoryModel).where(
-                or_(
-                    RepositoryModel.id == ident,
-                    RepositoryModel.github_repository_id == ident,
-                    RepositoryModel.full_name == ident,
+            stmt = (
+                select(RepositoryModel)
+                .options(joinedload(RepositoryModel.github_connection))
+                .where(
+                    or_(
+                        RepositoryModel.id == ident,
+                        RepositoryModel.github_repository_id == ident,
+                        RepositoryModel.full_name == ident,
+                    )
                 )
             )
             if uid:
@@ -446,6 +451,104 @@ class SqliteApplicationStore:
             if conn and conn.access_token:
                 return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
             return None
+
+    def create_adr(
+        self,
+        repository_id: str,
+        title: str,
+        source_name: str,
+        file_path: str,
+        content_hash: str,
+        source_type: str = "MANUAL_UPLOAD",
+        description: str | None = None,
+        source_id: str | None = None,
+        source_url: str | None = None,
+        source_version: str | None = None,
+        file_size: int | None = None,
+        mime_type: str | None = None,
+        file_extension: str | None = None,
+        status: str = "PENDING",
+        adr_id: str | None = None,
+    ) -> ADRModel:
+        """Create a new ADR record for a repository."""
+        import uuid
+
+        with self.session_factory() as session:
+            adr = ADRModel(
+                id=adr_id or f"adr_{uuid.uuid4().hex[:12]}",
+                repository_id=repository_id,
+                title=title,
+                description=description,
+                status=status,
+                source_type=source_type,
+                source_id=source_id,
+                source_url=source_url,
+                source_name=source_name,
+                source_version=source_version,
+                file_path=file_path,
+                content_hash=content_hash,
+                file_size=file_size,
+                mime_type=mime_type,
+                file_extension=file_extension,
+            )
+            session.add(adr)
+            session.commit()
+            session.refresh(adr)
+            return adr
+
+    def get_adr(self, adr_id: str) -> ADRModel | None:
+        """Fetch ADR by primary key."""
+        with self.session_factory() as session:
+            return session.get(ADRModel, adr_id)
+
+    def get_adr_by_hash(self, repository_id: str, content_hash: str) -> ADRModel | None:
+        """Fetch ADR by repository ID and content hash for duplicate detection."""
+        with self.session_factory() as session:
+            stmt = select(ADRModel).where(
+                ADRModel.repository_id == repository_id,
+                ADRModel.content_hash == content_hash,
+            )
+            return session.scalars(stmt).first()
+
+    def update_adr_status(
+        self,
+        adr_id: str,
+        status: str,
+        title: str | None = None,
+        error: str | None = None,
+    ) -> ADRModel | None:
+        """Update ADR processing status, optional title, and error message."""
+        with self.session_factory() as session:
+            adr = session.get(ADRModel, adr_id)
+            if adr:
+                adr.status = status
+                if title:
+                    adr.title = title
+                adr.error = error
+                adr.updated_at = utc_now()
+                session.commit()
+                session.refresh(adr)
+            return adr
+
+    def list_adrs(self, repository_id: str) -> list[ADRModel]:
+        """List all ADRs for a repository."""
+        with self.session_factory() as session:
+            stmt = (
+                select(ADRModel)
+                .where(ADRModel.repository_id == repository_id)
+                .order_by(ADRModel.created_at.desc())
+            )
+            return list(session.scalars(stmt).all())
+
+    def delete_adr(self, adr_id: str) -> bool:
+        """Delete an ADR record."""
+        with self.session_factory() as session:
+            adr = session.get(ADRModel, adr_id)
+            if adr:
+                session.delete(adr)
+                session.commit()
+                return True
+            return False
 
 
 class SqliteCredentialProvider(CredentialProvider):
