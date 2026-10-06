@@ -50,9 +50,6 @@ async def github_callback(request: Request):
         "email": github_user["email"],
     })
 
-    redirect_url = (
-        f"{FRONTEND_URL}/auth/success"
-        f"?token={jwt_token}"
-    )
+    redirect_url = f"{FRONTEND_URL}/auth/success?token={jwt_token}"
 
     return RedirectResponse(url=redirect_url)
