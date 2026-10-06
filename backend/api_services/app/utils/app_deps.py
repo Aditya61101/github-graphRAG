@@ -26,3 +26,6 @@ def get_chunk_retriever(request: Request) -> Any:
 
 def get_community_retriever(request: Request) -> Any:
     return request.app.state.deps.community_retriever
+
+
+from api_services.app.utils.jwt_utils import get_current_user  # Re-export for standard dependency injection

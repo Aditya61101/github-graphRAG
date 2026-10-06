@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
@@ -12,10 +14,13 @@ from .knowledge_pipeline import build_knowledge_pipeline
 
 def build_repository_ingestion_pipeline(
     repository_root: Path,
+    repository_id: str,
     repository_name: str,
     commit: str,
     neo4j_driver: Driver,
     candidates_path: str | Path,
+    full_name: str | None = None,
+    owner: str | None = None,
     examples: str = "",
 ):
     database = os.environ.get("NEO4J_DATABASE", "neo4j")
@@ -34,8 +39,9 @@ def build_repository_ingestion_pipeline(
     async def graph_neighborhood_loader(entity_id: str) -> str:
         result = neo4j_driver.execute_query(
             """
-            MATCH (e:Entity {id: $entity_id})
-            OPTIONAL MATCH (e)-[r]-(n:Entity)
+            MATCH (e:Entity {id: $entity_id, repository: $repo_id})
+            OPTIONAL MATCH (e)-[r]-(n:Entity {repository: $repo_id})
+            WHERE type(r) <> "MEMBER_OF"
             RETURN
                 e.name AS source,
                 type(r) AS relationship,
@@ -43,6 +49,7 @@ def build_repository_ingestion_pipeline(
             ORDER BY relationship, neighbor
             """,
             entity_id=entity_id,
+            repo_id=repository_id,
             database_=database,
         )
 
@@ -54,6 +61,7 @@ def build_repository_ingestion_pipeline(
 
     return RepositoryIngestionPipeline(
         repository_root=repository_root,
+        repository_id=repository_id,
         repository_name=repository_name,
         commit=commit,
         splitter=splitter,
@@ -62,4 +70,6 @@ def build_repository_ingestion_pipeline(
         neo4j_writer=neo4j_writer,
         graph_neighborhood_loader=graph_neighborhood_loader,
         language_detector=LanguageDetectorImpl(),
+        full_name=full_name,
+        owner=owner,
     )

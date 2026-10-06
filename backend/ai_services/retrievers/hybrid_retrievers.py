@@ -14,7 +14,12 @@ class HybridRetrievalResult:
     sources: dict[str, list[dict]]
 
 
-def load_communities(driver, database: str, community_ids: list[str | int]):
+def load_communities(
+    driver,
+    database: str,
+    community_ids: list[str | int],
+    repository_id: str | None = None,
+):
     if not community_ids:
         return []
 
@@ -22,9 +27,11 @@ def load_communities(driver, database: str, community_ids: list[str | int]):
         """
         MATCH (c:Community)
         WHERE c.communityId IN $community_ids
+          AND ($repo_id IS NULL OR c.repository = $repo_id)
         CALL {
             WITH c
             OPTIONAL MATCH (e:Entity)-[:MEMBER_OF]->(c)
+            WHERE $repo_id IS NULL OR e.repository = $repo_id
             RETURN collect(DISTINCT CASE WHEN e IS NULL THEN NULL ELSE {
                 canonical_id: e.id,
                 label: e.label,
@@ -35,7 +42,8 @@ def load_communities(driver, database: str, community_ids: list[str | int]):
             WITH c
             OPTIONAL MATCH (source:Entity)-[:MEMBER_OF]->(c)
             OPTIONAL MATCH (source)-[r]->(target:Entity)-[:MEMBER_OF]->(c)
-            WHERE r IS NULL OR type(r) <> "MEMBER_OF"
+            WHERE (r IS NULL OR type(r) <> "MEMBER_OF")
+              AND ($repo_id IS NULL OR (source.repository = $repo_id AND target.repository = $repo_id))
             RETURN collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {
                 source_id: source.id,
                 source_label: source.label,
@@ -54,6 +62,7 @@ def load_communities(driver, database: str, community_ids: list[str | int]):
         ORDER BY community_id
         """,
         community_ids=community_ids,
+        repo_id=repository_id,
         database_=database,
     )
     return result.records
@@ -75,6 +84,7 @@ async def hybrid_retrieve(
     entity_retriever,
     community_retriever,
     chunk_retriever,
+    repository_id: str | None = None,
     entity_top_k: int = 5,
     community_top_k: int = 3,
     chunk_top_k: int = 5,
@@ -84,38 +94,67 @@ async def hybrid_retrieve(
         raise RuntimeError("Embedder must return exactly one vector for a query.")
     query_vector = vectors[0]
 
-    entity_results = entity_retriever.search(query_vector=query_vector, top_k=entity_top_k)
+    retriever_filters = {"repository": repository_id} if repository_id else None
+
+    try:
+        entity_results = entity_retriever.search(
+            query_vector=query_vector,
+            top_k=entity_top_k,
+            filters=retriever_filters,
+        )
+    except Exception:
+        # Fallback if vector index does not yet support SEARCH clause filter
+        entity_results = entity_retriever.search(
+            query_vector=query_vector,
+            top_k=entity_top_k,
+        )
+
     entity_ids = [
         item.metadata["canonical_id"]
         for item in entity_results.items
         if item.metadata.get("canonical_id")
+        and (not repository_id or item.metadata.get("repository") in {repository_id, None})
     ]
 
-    graph_records = expand_entities(driver, entity_ids, database)
-    print("GRAPH RECORDS:")
-    for record in graph_records:
-        if (
-            record["source"] == "POST /login"
-            and record["target"] == "User"
-        ):
-            print(record)
-    community_results = community_retriever.search(
-        query_vector=query_vector,
-        top_k=community_top_k,
-    )
-    community_ids = [item.metadata["community_id"] for item in community_results.items]
-    communities = load_communities(driver, database, community_ids)
+    graph_records = expand_entities(driver, entity_ids, database, repository_id=repository_id)
+
+    try:
+        community_results = community_retriever.search(
+            query_vector=query_vector,
+            top_k=community_top_k,
+            filters=retriever_filters,
+        )
+    except Exception:
+        community_results = community_retriever.search(
+            query_vector=query_vector,
+            top_k=community_top_k,
+        )
+
+    community_ids = [
+        item.metadata["community_id"]
+        for item in community_results.items
+        if not repository_id or item.metadata.get("repository") in {repository_id, None}
+    ]
+    communities = load_communities(driver, database, community_ids, repository_id=repository_id)
 
     # Direct semantic retrieval over raw source-code chunks. This is the
     # evidence path: it gives the LLM actual code/text, not only graph nodes.
-    chunk_results = chunk_retriever.search(query_vector=query_vector, top_k=chunk_top_k)
-    print("chunk results: ", chunk_results.items[0].metadata)
-    
+    try:
+        chunk_results = chunk_retriever.search(
+            query_vector=query_vector,
+            top_k=chunk_top_k,
+            filters=retriever_filters,
+        )
+    except Exception:
+        chunk_results = chunk_retriever.search(
+            query_vector=query_vector,
+            top_k=chunk_top_k,
+        )
+
     # Resolve provenance for graph facts. Entity and relationship evidence are
     # represented by stable chunk IDs, which are then expanded to file/excerpt.
-    entity_chunk_ids = load_entity_evidence_ids(driver, entity_ids, database)
-    # print("ENTITY EVIDENCE IDS:",entity_chunk_ids)
-    
+    entity_chunk_ids = load_entity_evidence_ids(driver, entity_ids, database, repository_id=repository_id)
+
     relationship_chunk_ids = {}
     for record in graph_records:
         key = (
@@ -130,7 +169,7 @@ async def hybrid_retrieve(
         [cid for ids in entity_chunk_ids.values() for cid in ids]
         + [cid for ids in relationship_chunk_ids.values() for cid in ids]
     ))
-    provenance_chunks = load_evidence_chunks(driver, provenance_chunk_ids, database)
+    provenance_chunks = load_evidence_chunks(driver, provenance_chunk_ids, database, repository_id=repository_id)
 
     entity_evidence = _evidence_records(provenance_chunks, entity_chunk_ids)
     relationship_evidence = _evidence_records(provenance_chunks, relationship_chunk_ids)

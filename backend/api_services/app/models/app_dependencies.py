@@ -21,3 +21,6 @@ class AppDependencies:
     entity_retriever: Any
     chunk_retriever: Any
     community_retriever: Any
+    ingestion_service: Any = None
+    repo_store: Any = None
+    sqlite_store: Any = None

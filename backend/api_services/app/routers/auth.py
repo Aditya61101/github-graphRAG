@@ -41,13 +41,28 @@ async def github_callback(request: Request):
         )
 
     github_user = user_resp.json()
-    # print(github_user)
+
+    # Persist User and GitHubConnection into SQLite store via atomic upsert
+    sqlite_store = getattr(request.app.state, "sqlite_store", None)
+    if sqlite_store:
+        user, _ = sqlite_store.upsert_github_login(
+            github_user_id=str(github_user["id"]),
+            username=github_user["login"],
+            email=github_user.get("email"),
+            avatar_url=github_user.get("avatar_url"),
+            access_token=token["access_token"],
+            token_type=token.get("token_type", "Bearer"),
+            scope=token.get("scope"),
+        )
+        user_id = user.id
+    else:
+        user_id = f"usr_{github_user['id']}"
 
     jwt_token = create_access_token({
-        "sub": str(github_user["id"]),
-        "username": github_user["login"],
-        "avatar_url": github_user["avatar_url"],
-        "email": github_user["email"],
+        "sub": user_id,  # application User.id
+        "username": github_user.get("login"),
+        "avatar_url": github_user.get("avatar_url"),
+        "email": github_user.get("email"),
     })
 
     redirect_url = f"{FRONTEND_URL}/auth/success?token={jwt_token}"

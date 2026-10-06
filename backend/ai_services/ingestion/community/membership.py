@@ -108,6 +108,7 @@ class Neo4jCommunityStore(CommunityStore):
                 ) from exc
 
         community_ids = [item["community_id"] for item in items]
+        repo_id = self.config.repository_id
 
         # All mutations for a full synchronization occur in one Cypher statement,
         # hence one Neo4j transaction. This prevents partially persisted memberships
@@ -118,11 +119,16 @@ class Neo4jCommunityStore(CommunityStore):
                 UNWIND $items AS item
                 MERGE (c:{c_label} {{communityId: item.community_id}})
                 SET c.entityCount = size(item.entity_ids)
+                FOREACH (_ IN CASE WHEN $repository_id IS NOT NULL THEN [1] ELSE [] END |
+                    SET c.repository = $repository_id
+                )
                 RETURN count(c) AS created_communities
             }}
             CALL () {{
                 MATCH (e:{e_label})
-                OPTIONAL MATCH (e)-[old_rel:{rel_type}]->(:{c_label})
+                WHERE ($repository_id IS NULL OR e.repository = $repository_id)
+                OPTIONAL MATCH (e)-[old_rel:{rel_type}]->(old_c:{c_label})
+                WHERE ($repository_id IS NULL OR old_c.repository = $repository_id)
                 DELETE old_rel
                 REMOVE e.communityId
                 RETURN count(DISTINCT e) AS cleared_entities
@@ -139,7 +145,8 @@ class Neo4jCommunityStore(CommunityStore):
             }}
             CALL () {{
                 MATCH (c:{c_label})
-                WHERE NOT c.communityId IN $community_ids
+                WHERE ($repository_id IS NULL OR c.repository = $repository_id)
+                  AND NOT c.communityId IN $community_ids
                 DETACH DELETE c
                 RETURN count(c) AS deleted_communities
             }}
@@ -150,6 +157,9 @@ class Neo4jCommunityStore(CommunityStore):
             UNWIND $items AS item
             MERGE (c:{c_label} {{communityId: item.community_id}})
             SET c.entityCount = size(item.entity_ids)
+            FOREACH (_ IN CASE WHEN $repository_id IS NOT NULL THEN [1] ELSE [] END |
+                SET c.repository = $repository_id
+            )
             WITH collect(c) AS current_communities
 
             CALL {{
@@ -161,6 +171,7 @@ class Neo4jCommunityStore(CommunityStore):
                 SET e.communityId = item.community_id
                 OPTIONAL MATCH (e)-[old_rel:{rel_type}]->(old_c:{c_label})
                 WHERE old_c.communityId <> item.community_id
+                  AND ($repository_id IS NULL OR old_c.repository = $repository_id)
                 DELETE old_rel
                 MERGE (e)-[:{rel_type}]->(c)
                 RETURN count(DISTINCT e) AS persisted_entities
@@ -176,6 +187,7 @@ class Neo4jCommunityStore(CommunityStore):
                 database=db,
                 items=items,
                 community_ids=community_ids,
+                repository_id=repo_id,
                 expected_membership_count=len(expected_entity_ids),
             )
             records = getattr(result, "records", result)
@@ -236,14 +248,16 @@ class Neo4jCommunityStore(CommunityStore):
         db = self.config.database
         e_label = self.config.entity_label
         temp_prop = self.config.temporary_gds_property
+        repo_id = self.config.repository_id
 
         query = f"""
         MATCH (e:{e_label})
         WHERE e.{temp_prop} IS NOT NULL
+          AND ($repository_id IS NULL OR e.repository = $repository_id)
         REMOVE e.{temp_prop}
         """
         try:
-            await _execute_query(self.driver, query, database=db)
+            await _execute_query(self.driver, query, database=db, repository_id=repo_id)
         except Exception as exc:
             logger.warning("Failed to clean up temporary GDS property '%s': %s", temp_prop, exc)
 
@@ -312,10 +326,12 @@ class Neo4jCommunityStore(CommunityStore):
         rel_type = self.config.membership_relationship
 
         c_ids_param = list(community_ids) if community_ids is not None else None
+        repo_id = self.config.repository_id
 
         query = f"""
         MATCH (e:{e_label})-[:{rel_type}]->(c:{c_label})
         WHERE ($community_ids IS NULL OR c.communityId IN $community_ids)
+          AND ($repository_id IS NULL OR c.repository = $repository_id)
         OPTIONAL MATCH (e)-[r]->(neighbor:{e_label})-[:{rel_type}]->(c)
         WHERE e <> neighbor AND type(r) <> $rel_type
         RETURN
@@ -335,6 +351,7 @@ class Neo4jCommunityStore(CommunityStore):
                 database=db,
                 community_ids=c_ids_param,
                 rel_type=rel_type,
+                repository_id=repo_id,
             )
             records = getattr(result, "records", result)
 

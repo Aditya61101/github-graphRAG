@@ -11,9 +11,10 @@ def entity_result_formatter(record):
     return RetrieverResultItem(
         content=node["name"],
         metadata={
-            "canonical_id": node["id"],
-            "label": node["label"],
-            "name": node["name"],
+            "canonical_id": node.get("id"),
+            "label": node.get("label"),
+            "name": node.get("name"),
+            "repository": node.get("repository"),
             "score": record["score"],
         },
     )
@@ -24,7 +25,8 @@ def community_result_formatter(record):
     return RetrieverResultItem(
         content=node["summary"],
         metadata={
-            "community_id": node["communityId"],
+            "community_id": node.get("communityId"),
+            "repository": node.get("repository"),
             "score": record["score"],
         },
     )
@@ -54,7 +56,7 @@ def create_retrievers(driver, database: str | None = None):
     entity_retriever = VectorRetriever(
         driver=driver,
         index_name=ENTITY_INDEX_NAME,
-        return_properties=["id", "label", "name"],
+        return_properties=["id", "label", "name", "repository"],
         result_formatter=entity_result_formatter,
         neo4j_database=database,
     )
@@ -62,7 +64,7 @@ def create_retrievers(driver, database: str | None = None):
     community_retriever = VectorRetriever(
         driver=driver,
         index_name=COMMUNITY_INDEX_NAME,
-        return_properties=["communityId", "summary"],
+        return_properties=["communityId", "summary", "repository"],
         result_formatter=community_result_formatter,
         neo4j_database=database,
     )

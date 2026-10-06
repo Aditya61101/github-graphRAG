@@ -12,3 +12,8 @@ wheels/
 
 # OAuth2 credentials
 **/token.json
+
+# Local repository storage and pipeline state
+data/
+backend/data/
+.state/

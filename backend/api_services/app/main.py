@@ -7,13 +7,26 @@ from neo4j import GraphDatabase
 from openai import AsyncAzureOpenAI
 from starlette.middleware.sessions import SessionMiddleware
 
+import os
+
 from api_services.app.routers.auth import router as auth_router
 from api_services.app.routers.query import router as query_router
 from api_services.app.routers.health import router as health_router
+from api_services.app.routers.webhook import router as webhook_router
+from api_services.app.routers.repositories import router as repositories_router
 
-from api_services.app.config import FRONTEND_URL
+from api_services.app.config import (
+    FRONTEND_URL,
+    REPOS_STORAGE_DIR,
+)
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from ai_services.ingestion.persistence.sqlite_store import (
+    SqliteApplicationStore,
+    SqliteCredentialProvider,
+)
+from ai_services.ingestion.service import RepositoryIngestionService
+from ai_services.ingestion.sources.github import GitHubRepositorySource
 from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
 from shared.utils.env_helper import require_env
@@ -67,6 +80,38 @@ async def lifespan(app: FastAPI):
         database=database,
     )
 
+    # Initialize SQLite relational application store and credential provider
+    sqlite_store = SqliteApplicationStore()
+    cred_provider = SqliteCredentialProvider(sqlite_store)
+
+    # Initialize GitHub repository source and ingestion service
+    repo_source = GitHubRepositorySource(
+        storage_dir=REPOS_STORAGE_DIR,
+        credential_provider=cred_provider,
+    )
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    groq_client = None
+    if groq_api_key:
+        try:
+            from groq import Groq
+            groq_client = Groq(api_key=groq_api_key)
+        except Exception:
+            pass
+
+    ingestion_service = RepositoryIngestionService(
+        repository_source=repo_source,
+        metadata_store=sqlite_store,
+        neo4j_driver=driver,
+        database=database,
+        embedder=embedder,
+        llm=llm,
+        groq_client=groq_client,
+    )
+
+    app.state.sqlite_store = sqlite_store
+    app.state.ingestion_service = ingestion_service
+
     app.state.deps = AppDependencies(
         driver=driver,
         client=client,
@@ -76,6 +121,8 @@ async def lifespan(app: FastAPI):
         entity_retriever=entity_retriever,
         chunk_retriever=chunk_retriever,
         community_retriever=community_retriever,
+        ingestion_service=ingestion_service,
+        sqlite_store=sqlite_store,
     )
 
     # Create the conversational agent once. Creating it inside the request
@@ -118,3 +165,5 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth")
 app.include_router(query_router, prefix="/query")
 app.include_router(health_router, prefix="/health")
+app.include_router(webhook_router, prefix="/webhooks")
+app.include_router(repositories_router, prefix="/repositories")

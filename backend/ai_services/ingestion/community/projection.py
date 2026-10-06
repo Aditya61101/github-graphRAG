@@ -52,12 +52,17 @@ class GDSProjectionManager:
         driver: Any,
         database: str | None = None,
     ) -> int:
-        """Return the total number of entity nodes in the database."""
+        """Return the total number of entity nodes in the database, scoped to repository if configured."""
         db = database or self.config.database
         label = self.config.entity_label
-        query = f"MATCH (:{label}) RETURN count(*) AS cnt"
+        repo_id = self.config.repository_id
+        query = f"""
+        MATCH (e:{label})
+        WHERE ($repository_id IS NULL OR e.repository = $repository_id)
+        RETURN count(*) AS cnt
+        """
         try:
-            result = await _execute_query(driver, query, database=db)
+            result = await _execute_query(driver, query, database=db, repository_id=repo_id)
             records = getattr(result, "records", result)
             return int(records[0]["cnt"]) if records else 0
         except Exception as exc:
@@ -74,17 +79,24 @@ class GDSProjectionManager:
         db = database or self.config.database
         label = self.config.entity_label
         membership_rel = self.config.membership_relationship
+        repo_id = self.config.repository_id
         query = f"""
         MATCH (e:{label})
-        WHERE EXISTS {{
+        WHERE ($repository_id IS NULL OR e.repository = $repository_id)
+          AND EXISTS {{
             MATCH (e)-[r]-(neighbor:{label})
             WHERE type(r) <> $membership_rel
+              AND ($repository_id IS NULL OR neighbor.repository = $repository_id)
         }}
         RETURN count(e) AS cnt
         """
         try:
             result = await _execute_query(
-                driver, query, database=db, membership_rel=membership_rel
+                driver,
+                query,
+                database=db,
+                membership_rel=membership_rel,
+                repository_id=repo_id,
             )
             records = getattr(result, "records", result)
             return int(records[0]["cnt"]) if records else 0
@@ -98,18 +110,16 @@ class GDSProjectionManager:
         driver: Any,
         database: str | None = None,
     ) -> list[str]:
-        """Discover all distinct relationship types connecting architectural entities.
-
-        Strictly excludes membership relationships (e.g. MEMBER_OF) and community nodes.
-        Requires both endpoints to carry the entity label.
-        """
+        """Discover all distinct relationship types connecting architectural entities."""
         db = database or self.config.database
         label = self.config.entity_label
         membership_rel = self.config.membership_relationship
+        repo_id = self.config.repository_id
 
         query = f"""
         MATCH (s:{label})-[r]->(t:{label})
         WHERE type(r) <> $membership_rel
+          AND ($repository_id IS NULL OR (s.repository = $repository_id AND t.repository = $repository_id))
         RETURN DISTINCT type(r) AS relationship_type
         ORDER BY relationship_type
         """
@@ -119,6 +129,7 @@ class GDSProjectionManager:
                 query,
                 database=db,
                 membership_rel=membership_rel,
+                repository_id=repo_id,
             )
             records = getattr(result, "records", result)
             rel_types: list[str] = []
@@ -148,7 +159,7 @@ class GDSProjectionManager:
     ) -> bool:
         """Check whether the named GDS projection already exists."""
         db = database or self.config.database
-        gname = graph_name or self.config.graph_name
+        gname = graph_name or self.config.effective_graph_name
 
         query = """
         CALL gds.graph.exists($graph_name)
@@ -174,7 +185,7 @@ class GDSProjectionManager:
     ) -> bool:
         """Drop the GDS projection if it exists, freeing GDS memory."""
         db = database or self.config.database
-        gname = graph_name or self.config.graph_name
+        gname = graph_name or self.config.effective_graph_name
 
         exists = await self.projection_exists(driver, graph_name=gname, database=db)
         if not exists:
@@ -211,9 +222,10 @@ class GDSProjectionManager:
         6. Empty entity graphs return clean zero statistics without error.
         """
         db = database or self.config.database
-        gname = graph_name or self.config.graph_name
+        gname = graph_name or self.config.effective_graph_name
         label = self.config.entity_label
         membership_rel = self.config.membership_relationship
+        repo_id = self.config.repository_id
 
         # await self.validate_entity_ids(driver, database=db)
         entity_count = await self.count_entities(driver, database=db)
@@ -238,20 +250,20 @@ class GDSProjectionManager:
         }
         if self.config.gds_memory:
             graph_config["memory"] = self.config.gds_memory
-        
-        # if self.config.gds_ttl:
-        #     graph_config["ttl"] = self.config.gds_ttl
 
         # Cypher projection query: only entities with at least one eligible
         # entity-to-entity relationship enter the derived community graph.
         query = f"""
         MATCH (source:{label})
-        WHERE EXISTS {{
+        WHERE ($repository_id IS NULL OR source.repository = $repository_id)
+          AND EXISTS {{
             MATCH (source)-[eligible_rel]-(eligible_target:{label})
             WHERE type(eligible_rel) <> $membership_rel
+              AND ($repository_id IS NULL OR eligible_target.repository = $repository_id)
         }}
         OPTIONAL MATCH (source)-[r]->(target:{label})
-        WHERE r IS NULL OR type(r) <> $membership_rel
+        WHERE (r IS NULL OR type(r) <> $membership_rel)
+          AND ($repository_id IS NULL OR target IS NULL OR target.repository = $repository_id)
         WITH gds.graph.project(
             $graph_name,
             source,
@@ -272,6 +284,7 @@ class GDSProjectionManager:
                 database=db,
                 graph_name=gname,
                 membership_rel=membership_rel,
+                repository_id=repo_id,
                 graph_config=graph_config,
             )
             records = getattr(result, "records", result)

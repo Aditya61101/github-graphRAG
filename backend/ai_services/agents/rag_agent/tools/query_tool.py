@@ -22,13 +22,25 @@ def create_query_graph_rag_tool(
     async def query_graph_rag(
         query: str,
         runtime: ToolRuntime,
+        repository_id: str | None = None,
     ) -> Command:
         """Search the repository knowledge graph for evidence relevant to the query.
 
         The tool returns only retrieval context to the model. Structured source
         metadata is stored separately in the current agent run so it can be
         returned by the API without inflating the model conversation history.
+
+        Args:
+            query: Question or architectural concept to search for.
+            runtime: Runtime context providing graph state.
+            repository_id: Optional globally unique repository identifier to scope retrieval.
         """
+        # Resolve repository_id from tool argument or from graph run state
+        state_repo = None
+        if hasattr(runtime, "state") and isinstance(runtime.state, dict):
+            state_repo = runtime.state.get("repository_id")
+        target_repo_id = repository_id or state_repo
+
         result: HybridRetrievalResult = await hybrid_retrieve(
             query=query,
             driver=driver,
@@ -37,6 +49,7 @@ def create_query_graph_rag_tool(
             entity_retriever=entity_retriever,
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
+            repository_id=target_repo_id,
             entity_top_k=5,
             community_top_k=3,
             chunk_top_k=5,

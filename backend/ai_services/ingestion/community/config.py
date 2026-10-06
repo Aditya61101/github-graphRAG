@@ -85,6 +85,18 @@ class CommunityConfig(BaseModel):
         default=None,
         description="Target Neo4j database name (None uses the driver default).",
     )
+    repository_id: str | None = Field(
+        default=None,
+        description="Target repository identifier to scope community detection and persistence.",
+    )
+
+    @property
+    def effective_graph_name(self) -> str:
+        if self.repository_id and self.graph_name == "entityGraph":
+            # Sanitize repository ID to form a valid GDS identifier
+            clean_id = re.sub(r"[^A-Za-z0-9_]", "_", self.repository_id)
+            return f"entityGraph_{clean_id}"
+        return self.graph_name
 
     @field_validator(
         "entity_label",

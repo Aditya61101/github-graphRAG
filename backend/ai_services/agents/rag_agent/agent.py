@@ -76,16 +76,21 @@ class RAGQueryAgent:
         self,
         conversation_id: str,
         query: str,
+        repository_id: str | None = None,
     ) -> RAGAgentResult:
+        state_input: dict[str, Any] = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": query,
+                }
+            ]
+        }
+        if repository_id:
+            state_input["repository_id"] = repository_id
+
         result = await self.agent.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": query,
-                    }
-                ]
-            },
+            state_input,
             {
                 "configurable": {
                     "thread_id": conversation_id,

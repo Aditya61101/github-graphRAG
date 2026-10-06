@@ -17,3 +17,4 @@ class RAGAgentState(AgentState):
     retrieval_sources: NotRequired[
         Annotated[dict[str, list[dict]], UntrackedValue]
     ]
+    repository_id: NotRequired[str | None]
