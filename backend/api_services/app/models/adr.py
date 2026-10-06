@@ -14,7 +14,6 @@ class ADRResponse(BaseModel):
     source_type: str = Field(description="Source type, e.g. MANUAL_UPLOAD or CONFLUENCE.")
     source_name: str = Field(description="Original uploaded document name.")
     content_hash: str = Field(description="SHA-256 content hash of the document.")
-    file_path: str | None = Field(default=None, description="Local disk storage path of the ADR file.")
     file_size: int | None = Field(default=None, description="Size in bytes.")
     file_extension: str | None = Field(default=None, description="File extension.")
     mime_type: str | None = Field(default=None, description="MIME type.")

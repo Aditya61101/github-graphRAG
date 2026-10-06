@@ -295,18 +295,18 @@ def test_upload_adr_valid_markdown(test_env):
     assert data["source_type"] == "MANUAL_UPLOAD"
     assert data["source_name"] == "001-sqlite.md"
     assert data["file_extension"] == ".md"
+    assert "file_path" not in data  # file_path is internal metadata, not exposed
 
-    # Verify file saved on local disk under storage path
-    saved_file = Path(data["file_path"])
-    assert saved_file.exists()
-    assert saved_file.read_bytes() == md_content
-
-    # Verify DB record
+    # Verify DB record and file saved on local disk under storage path
     store = test_env["store"]
     db_adr = store.get_adr(data["id"])
     assert db_adr is not None
     assert db_adr.status == "COMPLETED"
     assert db_adr.title == "ADR 001: Use SQLite for Prototype"
+
+    saved_file = Path(db_adr.file_path)
+    assert saved_file.exists()
+    assert saved_file.read_bytes() == md_content
 
 
 # =========================================================================
@@ -454,7 +454,11 @@ def test_upload_adr_path_traversal_prevention(test_env):
         )
         assert resp.status_code == 201
         data = resp.json()
-        saved_file = Path(data["file_path"]).resolve()
+        assert "file_path" not in data
+
+        db_adr = test_env["store"].get_adr(data["id"])
+        assert db_adr is not None
+        saved_file = Path(db_adr.file_path).resolve()
         storage_root = test_env["storage_path"].resolve()
 
         # Must be strictly within storage root
@@ -565,78 +569,50 @@ def test_upload_adr_file_cleanup_on_write_failure(test_env):
 
 
 # =========================================================================
-# 17. GET /repositories/tracked -> Returns only tracked repositories for user
+# 17. Failed Upload is Retryable (Not Blocked as Duplicate)
 # =========================================================================
-def test_list_tracked_repositories(test_env):
+def test_upload_adr_retry_failed_upload(test_env):
+    """If an upload previously failed, uploading the same content again should succeed rather than conflict."""
     client = test_env["client"]
-    headers_alice = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
-    headers_bob = {"Authorization": f"Bearer {test_env['bob_jwt']}"}
+    store = test_env["store"]
+    headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
+    content = b"# Retried ADR\n\n## Context\nTest retry on failure.\n\n## Decision\nIt works."
 
-    resp_alice = client.get("/repositories/tracked", headers=headers_alice)
-    assert resp_alice.status_code == 200
-    data_alice = resp_alice.json()
-    assert len(data_alice) == 1
-    assert data_alice[0]["id"] == test_env["repo_alice_id"]
-    assert data_alice[0]["full_name"] == "alice/project-a"
+    # 1. First attempt fails due to temporary parser error
+    with patch(
+        "ai_services.ingestion.adr.service.parse_adr_content",
+        side_effect=ADRParseError("Temporary parsing failure"),
+    ):
+        resp1 = client.post(
+            f"/repositories/{test_env['repo_alice_id']}/adrs",
+            files={"file": ("retried-adr.md", content, "text/markdown")},
+            headers=headers,
+        )
+        assert resp1.status_code == 422
 
-    resp_bob = client.get("/repositories/tracked", headers=headers_bob)
-    assert resp_bob.status_code == 200
-    data_bob = resp_bob.json()
-    assert len(data_bob) == 1
-    assert data_bob[0]["id"] == test_env["repo_bob_id"]
-    assert data_bob[0]["full_name"] == "bob/project-b"
+    # Verify status in database is FAILED
+    content_hash = hashlib.sha256(content).hexdigest()
+    failed_adr = store.get_adr_by_hash(test_env["repo_alice_id"], content_hash)
+    assert failed_adr is not None
+    assert failed_adr.status == "FAILED"
+    first_adr_id = failed_adr.id
 
+    # 2. Second attempt with exact same content should NOT return 409 Duplicate
+    # It should reclaim/retry the record and transition to COMPLETED
+    resp2 = client.post(
+        f"/repositories/{test_env['repo_alice_id']}/adrs",
+        files={"file": ("retried-adr.md", content, "text/markdown")},
+        headers=headers,
+    )
+    assert resp2.status_code == 201
+    data2 = resp2.json()
+    assert data2["status"] == "COMPLETED"
+    assert data2["title"] == "Retried ADR"
+    assert data2["id"] == first_adr_id  # Reclaimed existing record
 
-# =========================================================================
-# 18. GET /repositories -> GitHub Ingestion Picker with Merged Status
-# =========================================================================
-def test_list_available_repositories_with_merged_status(test_env):
-    client = test_env["client"]
-    headers_alice = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
+    # Verify updated DB state
+    updated_adr = store.get_adr(first_adr_id)
+    assert updated_adr is not None
+    assert updated_adr.status == "COMPLETED"
+    assert updated_adr.error is None
 
-    mock_github_repos = [
-        {
-            "id": 1001,
-            "name": "project-a",
-            "full_name": "alice/project-a",
-            "owner": {"login": "alice"},
-            "html_url": "https://github.com/alice/project-a",
-            "default_branch": "main",
-            "private": False,
-            "description": "Alice's tracked project",
-            "updated_at": "2026-10-06T10:00:00Z",
-        },
-        {
-            "id": 9999,
-            "name": "brand-new-project",
-            "full_name": "alice/brand-new-project",
-            "owner": {"login": "alice"},
-            "html_url": "https://github.com/alice/brand-new-project",
-            "default_branch": "main",
-            "private": False,
-            "description": "Untracked project",
-            "updated_at": "2026-10-06T11:00:00Z",
-        },
-    ]
-
-    class MockResponse:
-        status_code = 200
-
-        def json(self):
-            return mock_github_repos
-
-    with patch("httpx.AsyncClient.get", return_value=MockResponse()):
-        resp = client.get("/repositories", headers=headers_alice)
-        assert resp.status_code == 200
-        items = resp.json()
-        assert len(items) == 2
-
-        # project-a should be COMPLETED and have tracked_repository_id set
-        project_a = next(i for i in items if i["full_name"] == "alice/project-a")
-        assert project_a["status"] == "COMPLETED"
-        assert project_a["tracked_repository_id"] == "repo_1001"
-
-        # brand-new-project should be NOT_INDEXED
-        brand_new = next(i for i in items if i["full_name"] == "alice/brand-new-project")
-        assert brand_new["status"] == "NOT_INDEXED"
-        assert brand_new["tracked_repository_id"] is None

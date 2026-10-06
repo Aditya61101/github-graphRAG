@@ -163,43 +163,46 @@ class ADRService:
         # 4. Compute content hash (SHA-256)
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
-        # 5. Deterministic duplicate detection for this repository
-        existing_adr = self.sqlite_store.get_adr_by_hash(canonical_repo_id, content_hash)
-        if existing_adr and existing_adr.status in {"COMPLETED", "PROCESSING"}:
-            logger.info(
-                f"ADR upload duplicate detected in repo '{canonical_repo_id}' with hash '{content_hash[:8]}' (existing ID: '{existing_adr.id}')"
-            )
-            raise DuplicateADRError(
-                f"An identical ADR already exists for this repository (id='{existing_adr.id}', title='{existing_adr.title}').",
-                existing_adr=existing_adr,
-            )
-
-        # 6. Generate server-controlled collision-resistant storage path
-        adr_id = f"adr_{uuid.uuid4().hex[:12]}"
-        repo_adr_dir = self.storage_dir / canonical_repo_id / adr_id
+        # 5. Generate server-controlled collision-resistant storage path candidate
+        provisional_adr_id = f"adr_{uuid.uuid4().hex[:12]}"
+        repo_adr_dir = self.storage_dir / canonical_repo_id / provisional_adr_id
         repo_adr_dir.mkdir(parents=True, exist_ok=True)
         dest_file_path = repo_adr_dir / f"original{ext}"
         mime_type = detect_mime_type(ext)
-
-        # Initial fallback title
         provisional_title = (explicit_title or "").strip() or Path(clean_name).stem
 
-        # 7. Create initial DB record (PENDING)
-        adr_record = self.sqlite_store.create_adr(
+        # 6. Atomically claim or create ADR record (protects against concurrent race condition and enables retry of FAILED uploads)
+        adr_record, is_duplicate = self.sqlite_store.claim_or_create_adr(
             repository_id=canonical_repo_id,
+            content_hash=content_hash,
             title=provisional_title,
             description=description,
             source_type="MANUAL_UPLOAD",
             source_name=clean_name,
             file_path=str(dest_file_path.as_posix()),
-            content_hash=content_hash,
             file_size=len(file_bytes),
             mime_type=mime_type,
             file_extension=ext,
-            status="PENDING",
-            adr_id=adr_id,
+            adr_id=provisional_adr_id,
         )
-        logger.info(f"ADR metadata record created: id='{adr_id}', status='PENDING'")
+
+        if is_duplicate:
+            try:
+                repo_adr_dir.rmdir()
+            except Exception:
+                pass
+            logger.info(
+                f"ADR upload duplicate detected in repo '{canonical_repo_id}' with hash '{content_hash[:8]}' (existing ID: '{adr_record.id}')"
+            )
+            raise DuplicateADRError(
+                f"An identical ADR already exists for this repository (id='{adr_record.id}', title='{adr_record.title}').",
+                existing_adr=adr_record,
+            )
+
+        adr_id = adr_record.id
+        dest_file_path = Path(adr_record.file_path)
+        dest_file_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"ADR metadata record claimed/created: id='{adr_id}', status='PENDING'")
 
         # 8. Save file to disk safely
         try:

@@ -17,3 +17,5 @@ wheels/
 data/
 backend/data/
 .state/
+
+*.zip

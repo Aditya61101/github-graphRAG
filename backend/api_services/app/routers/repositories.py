@@ -127,9 +127,6 @@ async def ingest_repository(
 
     # Resolve credential server-side from authenticated user (never accept client tokens or connection IDs)
     connection = store.get_user_github_connection(current_user.id)
-    print("Current connection:", connection.user_id if connection else None)
-    print("connection token type:", connection.token_type if connection else None)
-    print("connection access token:", connection.access_token if connection else None)
     
     if not connection or not connection.access_token:
         raise HTTPException(
@@ -329,6 +326,27 @@ async def list_user_repositories(
 
     return results
 
+
+@router.get("/{repo_id}/adrs", response_model=list[ADRResponse])
+async def list_repository_adrs(
+    repo_id: str,
+    request: Request,
+    current_user: UserModel = Depends(get_current_user),
+) -> list[ADRResponse]:
+    """List all ADRs associated with a repository accessible by the current user."""
+    adr_service = get_adr_service(request)
+    store = get_sqlite_store(request)
+    try:
+        repo = adr_service.validate_repository_access(repo_id, current_user.id)
+    except ADRRepoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ADRRepoAccessDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
+    adrs = store.list_adrs(repository_id=repo.id)
+    return [ADRResponse(**adr.to_dict()) for adr in adrs]
+
+
 @router.get("/{owner}/{name}", response_model=RepositoryResponse)
 async def get_repository(
     owner: str,
@@ -451,9 +469,31 @@ async def upload_adr(
 ) -> Any:
     """Upload and process an Architecture Decision Record (ADR) for a repository."""
     adr_service = get_adr_service(request)
-
-    file_bytes = await file.read()
+    max_size = adr_service.max_file_size_bytes
     filename = file.filename or "uploaded_adr.txt"
+
+    # Read UploadFile in bounded chunks to prevent unbounded memory allocation
+    chunk_size = 64 * 1024  # 64 KB
+    chunks: list[bytes] = []
+    total_bytes = 0
+
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_size:
+            max_mb = max_size // (1024 * 1024)
+            logger.warning(
+                f"ADR upload rejected: file '{filename}' exceeded size limit ({total_bytes} > {max_size} bytes)"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File size exceeds maximum allowed limit of {max_mb} MB.",
+            )
+        chunks.append(chunk)
+
+    file_bytes = b"".join(chunks)
 
     try:
         adr_record, _parsed_doc = adr_service.process_adr_upload(
@@ -476,35 +516,21 @@ async def upload_adr(
     except DuplicateADRError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except ADRParsingError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        # Internal parser/exception details are logged server-side, not exposed to client
+        logger.warning(f"ADR parsing failed for repo '{repo_id}', file '{filename}': {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Failed to parse uploaded ADR document. Please verify the document format and content.",
+        )
     except ADRServiceError as exc:
         logger.exception(f"ADR service error for repository '{repo_id}': {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ADR processing error: {exc}",
+            detail="An error occurred while storing or processing the ADR.",
         )
     except Exception as exc:
         logger.exception(f"Unexpected error uploading ADR for repository '{repo_id}': {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process ADR: {exc}",
-        )
-
-@router.get("/{repo_id}/adrs", response_model=list[ADRResponse])
-async def list_repository_adrs(
-    repo_id: str,
-    request: Request,
-    current_user: UserModel = Depends(get_current_user),
-) -> list[ADRResponse]:
-    """List all ADRs associated with a repository accessible by the current user."""
-    adr_service = get_adr_service(request)
-    store = get_sqlite_store(request)
-    try:
-        repo = adr_service.validate_repository_access(repo_id, current_user.id)
-    except ADRRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except ADRRepoAccessDeniedError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
-
-    adrs = store.list_adrs(repository_id=repo.id)
-    return [ADRResponse(**adr.to_dict()) for adr in adrs]
+            detail="An unexpected error occurred while processing the ADR upload.",
+        )

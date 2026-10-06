@@ -452,6 +452,88 @@ class SqliteApplicationStore:
                 return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
             return None
 
+    def claim_or_create_adr(
+        self,
+        repository_id: str,
+        content_hash: str,
+        title: str,
+        source_name: str,
+        file_path: str,
+        source_type: str = "MANUAL_UPLOAD",
+        description: str | None = None,
+        source_id: str | None = None,
+        source_url: str | None = None,
+        source_version: str | None = None,
+        file_size: int | None = None,
+        mime_type: str | None = None,
+        file_extension: str | None = None,
+        adr_id: str | None = None,
+    ) -> tuple[ADRModel, bool]:
+        """Atomically find or create an ADR record for (repository_id, content_hash).
+
+        Handles concurrent uploads and retry of failed uploads:
+        - If an active ADR (COMPLETED, PROCESSING, PENDING) already exists:
+          returns (existing_record, True), indicating a duplicate.
+        - If an ADR exists with status 'FAILED':
+          reclaims and resets it to 'PENDING', returns (reclaimed_record, False), allowing retry.
+        - If no ADR exists:
+          creates a new record with status 'PENDING', returns (new_record, False).
+        """
+        import uuid
+
+        with self.session_factory() as session:
+            stmt = (
+                select(ADRModel)
+                .where(
+                    ADRModel.repository_id == repository_id,
+                    ADRModel.content_hash == content_hash,
+                )
+                .order_by(ADRModel.created_at.desc())
+            )
+            existing = session.scalars(stmt).first()
+
+            if existing:
+                if existing.status in {"COMPLETED", "PROCESSING", "PENDING"}:
+                    session.refresh(existing)
+                    return existing, True
+
+                # Retryable failed upload
+                existing.status = "PENDING"
+                existing.title = title
+                existing.description = description
+                existing.source_name = source_name
+                existing.file_path = file_path
+                existing.file_size = file_size
+                existing.mime_type = mime_type
+                existing.file_extension = file_extension
+                existing.error = None
+                existing.updated_at = utc_now()
+                session.commit()
+                session.refresh(existing)
+                return existing, False
+
+            adr = ADRModel(
+                id=adr_id or f"adr_{uuid.uuid4().hex[:12]}",
+                repository_id=repository_id,
+                title=title,
+                description=description,
+                status="PENDING",
+                source_type=source_type,
+                source_name=source_name,
+                source_id=source_id,
+                source_url=source_url,
+                source_version=source_version,
+                file_path=file_path,
+                content_hash=content_hash,
+                file_size=file_size,
+                mime_type=mime_type,
+                file_extension=file_extension,
+            )
+            session.add(adr)
+            session.commit()
+            session.refresh(adr)
+            return adr, False
+
     def create_adr(
         self,
         repository_id: str,
@@ -495,6 +577,7 @@ class SqliteApplicationStore:
             session.commit()
             session.refresh(adr)
             return adr
+
 
     def get_adr(self, adr_id: str) -> ADRModel | None:
         """Fetch ADR by primary key."""
