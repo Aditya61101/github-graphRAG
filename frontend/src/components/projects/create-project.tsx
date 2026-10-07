@@ -5,9 +5,16 @@ import {
   useMemo,
   useState,
 } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { CheckIcon, GitBranchIcon, LockIcon, SearchIcon } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  CheckIcon,
+  GitBranchIcon,
+  Loader,
+  LockIcon,
+  SearchIcon,
+} from "lucide-react";
 
+import { projectService } from "@/api/project-service";
 import { repositoryService } from "@/api/repository-service";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Button } from "@/components/ui/button";
@@ -25,6 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GithubIcon } from "@/components/icons";
+import { toast } from "@/components/ui/toast";
 
 type CreateProjectProps = {
   open: boolean;
@@ -37,7 +45,10 @@ export function CreateProject({
   children,
 }: PropsWithChildren<CreateProjectProps>) {
   const isMobile = useIsMobile();
+  const queryClient = useQueryClient();
 
+  const [projectName, setProjectName] = useState("");
+  const [projectDescription, setProjectDescription] = useState("");
   const [search, setSearch] = useState("");
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<
     string | undefined
@@ -57,9 +68,35 @@ export function CreateProject({
     );
   }, [repositories, search]);
 
-  function handleCreateProject() {
-    setOpen(false);
-  }
+  const { mutate: handleCreateProject, isPending } = useMutation({
+    mutationFn: () =>
+      projectService.createProject({
+        name: projectName,
+        description: projectDescription,
+        repositoryId: selectedRepositoryId!,
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["projects"],
+      });
+
+      setProjectName("");
+      setProjectDescription("");
+      setSelectedRepositoryId(undefined);
+      setSearch("");
+      setOpen(false);
+      toast.add({
+        type: "success",
+        title: "Project created successfully!",
+      });
+    },
+    onError: () => {
+      toast.add({
+        type: "error",
+        title: "Failed to create project.",
+      });
+    },
+  });
 
   return (
     <Drawer
@@ -85,17 +122,25 @@ export function CreateProject({
         <div className="scrollbar-macos flex-1 space-y-8 overflow-y-auto px-6 py-6">
           <section className="space-y-5">
             <div className="space-y-2">
-              <Label htmlFor="project-name">Project name</Label>
+              <Label htmlFor="project-name">
+                Project name<span className="text-destructive">*</span>
+              </Label>
               <Input
                 id="project-name"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
                 placeholder="E.g. Ticket Management System"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="project-description">Project description</Label>
+              <Label htmlFor="project-description">
+                Project description<span className="text-destructive">*</span>
+              </Label>
               <Input
                 id="project-description"
+                value={projectDescription}
+                onChange={(event) => setProjectDescription(event.target.value)}
                 placeholder="Describe what this project is used for..."
               />
             </div>
@@ -103,7 +148,10 @@ export function CreateProject({
 
           <section className="space-y-4">
             <div className="space-y-1">
-              <h3 className="font-semibold">Connect repository</h3>
+              <h3 className="font-semibold">
+                Connect repository
+                <span className="ml-2 text-destructive">*</span>
+              </h3>
               <p className="text-sm text-muted-foreground">
                 Select a GitHub repository to associate with this project.
               </p>
@@ -138,14 +186,14 @@ export function CreateProject({
                         key={repository.id}
                         type="button"
                         onClick={() => setSelectedRepositoryId(repository.id)}
-                        className={`flex w-full items-start justify-between gap-4 rounded-lg border p-4 text-left transition-colors ${
+                        className={`flex w-full items-start justify-between gap-4 rounded-lg border p-2 text-left transition-colors ${
                           isSelected
                             ? "border-primary bg-primary/5"
                             : "border-transparent hover:bg-muted/50"
                         }`}
                       >
                         <div className="flex items-start gap-3">
-                          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-violet-500/25">
                             <GithubIcon className="size-5" />
                           </div>
 
@@ -201,12 +249,23 @@ export function CreateProject({
 
         <DrawerFooter className="border-t px-6 py-4">
           <Button
-            onClick={handleCreateProject}
-            disabled={!selectedRepositoryId}
+            onClick={() => handleCreateProject()}
+            disabled={
+              !projectName.trim() ||
+              !projectDescription.trim() ||
+              !selectedRepositoryId ||
+              isPending
+            }
           >
-            Create project
+            {isPending ? (
+              <>
+                <Loader className="animate-spin" />
+                Creating project...
+              </>
+            ) : (
+              "Create project"
+            )}
           </Button>
-
           <DrawerClose render={<Button variant="outline">Cancel</Button>} />
         </DrawerFooter>
       </DrawerContent>

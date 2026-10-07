@@ -8,7 +8,7 @@ export const MOCK_PROJECTS: Project[] = [
       "Interactive knowledge graph explorer for repository-aware retrieval augmented generation.",
     repositoryId: "repo-001",
     repositoryName: "graph-rag-explorer",
-    updatedAt: "2026-10-05T14:32:00Z",
+    updatedAt: "05/10/2026",
   },
   {
     id: "proj-002",
@@ -17,7 +17,7 @@ export const MOCK_PROJECTS: Project[] = [
       "AI-powered GitHub issue triage dashboard with sentiment and priority analysis.",
     repositoryId: "repo-002",
     repositoryName: "issue-pulse-ai",
-    updatedAt: "2026-10-06T09:10:00Z",
+    updatedAt: "06/10/2026",
   },
   {
     id: "proj-003",
@@ -26,7 +26,7 @@ export const MOCK_PROJECTS: Project[] = [
       "Repository visualization toolkit for mapping files, commits, and contributors.",
     repositoryId: "repo-003",
     repositoryName: "code-atlas",
-    updatedAt: "2026-10-07T05:48:00Z",
+    updatedAt: "07/10/2026",
   },
   {
     id: "proj-004",
@@ -35,7 +35,7 @@ export const MOCK_PROJECTS: Project[] = [
       "Automated pull request review assistant with contextual code suggestions.",
     repositoryId: "repo-004",
     repositoryName: "pr-review-copilot",
-    updatedAt: "2026-10-07T11:22:00Z",
+    updatedAt: "07/10/2026",
   },
   {
     id: "proj-005",
@@ -44,6 +44,6 @@ export const MOCK_PROJECTS: Project[] = [
       "Semantic search engine for large repositories using embeddings and vector indexing.",
     repositoryId: "repo-005",
     repositoryName: "semantic-repo-search",
-    updatedAt: "2026-10-07T16:05:00Z",
+    updatedAt: "07/10/2026",
   },
 ];
