@@ -16,6 +16,9 @@ from ai_services.agents.rag_agent.dataclasses.result import RAGAgentResult
 from ai_services.agents.rag_agent.state.agent_state import RAGAgentState
 from ai_services.agents.rag_agent.tools.query_tool import create_query_graph_rag_tool
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from ai_services.graph.context import GraphContext
+from ai_services.retrievers.reranker import Reranker
+from ai_services.retrievers.settings import RetrievalSettings
 
 from .prompts import RAG_AGENT_SYSTEM_PROMPT
 
@@ -33,6 +36,8 @@ class RAGQueryAgent:
         community_retriever: Any,
         chunk_retriever: Any,
         llm: AzureChatOpenAI,
+        reranker: Reranker,
+        retrieval_settings: RetrievalSettings | None = None,
         max_tokens_before_summary: int = 4000,
         messages_to_keep: int = 10,
         tool_context_clear_trigger: int = 8000,
@@ -47,6 +52,8 @@ class RAGQueryAgent:
             entity_retriever=entity_retriever,
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
+            reranker=reranker,
+            retrieval_settings=retrieval_settings,
         )
 
         self.agent = create_agent(
@@ -86,8 +93,9 @@ class RAGQueryAgent:
                 }
             ]
         }
-        if repository_id:
-            state_input["repository_id"] = repository_id
+        # Always overwrite the current scope, including None, so a previous
+        # checkpoint cannot silently select a different repository.
+        state_input["repository_id"] = repository_id
 
         result = await self.agent.ainvoke(
             state_input,
@@ -112,10 +120,17 @@ class RAGQueryAgent:
             raise RuntimeError("RAG query agent did not return a final AI message.")
 
         sources = result.get("retrieval_sources") or {}
+        raw_gc = result.get("retrieval_graph_context") or {}
+        graph_context = GraphContext(
+            node_ids=list(raw_gc.get("node_ids", [])),
+            edge_ids=list(raw_gc.get("edge_ids", [])),
+            assertion_ids=list(raw_gc.get("assertion_ids", [])),
+        )
 
         return RAGAgentResult(
             answer=final_message.content,
             sources=sources,
+            graph_context=graph_context,
         )
 
     def get_state(self, conversation_id: str):

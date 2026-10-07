@@ -8,6 +8,8 @@ from ai_services.retrievers.hybrid_retrievers import (
     HybridRetrievalResult,
     hybrid_retrieve,
 )
+from ai_services.retrievers.reranker import Reranker
+from ai_services.retrievers.settings import RetrievalSettings
 
 
 def create_query_graph_rag_tool(
@@ -17,6 +19,8 @@ def create_query_graph_rag_tool(
     entity_retriever,
     community_retriever,
     chunk_retriever,
+    reranker: Reranker,
+    retrieval_settings: RetrievalSettings | None = None,
 ):
     @tool
     async def query_graph_rag(
@@ -39,7 +43,10 @@ def create_query_graph_rag_tool(
         state_repo = None
         if hasattr(runtime, "state") and isinstance(runtime.state, dict):
             state_repo = runtime.state.get("repository_id")
-        target_repo_id = repository_id or state_repo
+        # The API-authorized scope cannot be overridden by a model tool argument.
+        if state_repo and repository_id and repository_id != state_repo:
+            raise ValueError("Tool repository does not match the authorized repository")
+        target_repo_id = state_repo or repository_id
 
         result: HybridRetrievalResult = await hybrid_retrieve(
             query=query,
@@ -50,14 +57,14 @@ def create_query_graph_rag_tool(
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
             repository_id=target_repo_id,
-            entity_top_k=5,
-            community_top_k=3,
-            chunk_top_k=5,
+            reranker=reranker,
+            settings=retrieval_settings,
         )
 
         return Command(
             update={
                 "retrieval_sources": result.sources,
+                "retrieval_graph_context": result.graph_context.to_dict(),
                 "messages": [
                     ToolMessage(
                         content=result.context,

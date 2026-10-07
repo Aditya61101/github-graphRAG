@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from api_services.app.config import (
     FRONTEND_URL,
     MAX_ADR_FILE_SIZE_BYTES,
     REPOS_STORAGE_DIR,
+    RETRIEVAL_SETTINGS,
 )
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
@@ -37,6 +39,7 @@ from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
 from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
+from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
@@ -45,6 +48,9 @@ from shared.utils.llm_utils import AzureOpenAILLM
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database = require_env("NEO4J_DATABASE") or None
+    # One model per FastAPI worker; failures propagate and fail startup.
+    reranker = await asyncio.to_thread(Qwen3Reranker, RETRIEVAL_SETTINGS)
+    app.state.reranker = reranker
 
     # Create application-scoped infrastructure once. These instances are
     # reused by ingestion, retrieval, and agents for the lifetime of this
@@ -166,6 +172,8 @@ async def lifespan(app: FastAPI):
         entity_retriever=entity_retriever,
         chunk_retriever=chunk_retriever,
         community_retriever=community_retriever,
+        reranker=reranker,
+        retrieval_settings=RETRIEVAL_SETTINGS,
         ingestion_service=ingestion_service,
         sqlite_store=sqlite_store,
         adr_service=adr_service,
@@ -182,6 +190,8 @@ async def lifespan(app: FastAPI):
         community_retriever=community_retriever,
         chunk_retriever=chunk_retriever,
         llm=chat_llm,
+        reranker=reranker,
+        retrieval_settings=RETRIEVAL_SETTINGS,
     )
 
     try:

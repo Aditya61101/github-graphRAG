@@ -8,15 +8,17 @@ CHUNK_INDEX_NAME = "chunk_vector_index"
 
 def entity_result_formatter(record):
     node = record["node"]
+    metadata = {
+        "canonical_id": node.get("id"),
+        "label": node.get("label"),
+        "name": node.get("name"),
+        "score": record["score"],
+    }
+    if "repository" in node:
+        metadata["repository"] = node.get("repository")
     return RetrieverResultItem(
         content=node["name"],
-        metadata={
-            "canonical_id": node.get("id"),
-            "label": node.get("label"),
-            "name": node.get("name"),
-            "repository": node.get("repository"),
-            "score": record["score"],
-        },
+        metadata=metadata,
     )
 
 

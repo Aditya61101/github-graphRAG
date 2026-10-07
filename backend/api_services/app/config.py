@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 
 load_dotenv()
+from ai_services.retrievers.settings import RetrievalSettings
+
+RETRIEVAL_SETTINGS = RetrievalSettings.from_env()
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")

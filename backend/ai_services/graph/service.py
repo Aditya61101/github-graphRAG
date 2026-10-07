@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ai_services.graph.identity import clean_entity_id, edge_graph_id, entity_graph_id
 from ai_services.graph.repository import GraphRepositoryError, Neo4jGraphRepository
 from ai_services.ingestion.persistence.models import RepositoryModel
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
@@ -77,12 +78,12 @@ class RepositoryGraphService:
         valid_node_ids: set[str] = set()
 
         for ent in raw_entities:
-            raw_id = str(ent.get("id") or "").strip()
-            if not raw_id:
+            raw_id = ent.get("id")
+            node_id = entity_graph_id(raw_id)
+            if not node_id:
                 continue
 
-            clean_id = raw_id.removeprefix("entity:")
-            node_id = f"entity:{clean_id}"
+            clean_id = clean_entity_id(raw_id)
 
             if node_id in seen_node_ids:
                 continue
@@ -129,28 +130,20 @@ class RepositoryGraphService:
         edges_map: dict[str, GraphEdge] = {}
 
         for rel, source_kind in all_raw_edges:
-            src_raw = str(rel.get("source_id") or "").strip()
-            tgt_raw = str(rel.get("target_id") or "").strip()
-            rel_type = str(rel.get("rel_type") or "").strip()
+            src_raw = rel.get("source_id")
+            tgt_raw = rel.get("target_id")
+            rel_type = rel.get("rel_type")
 
-            if not src_raw or not tgt_raw or not rel_type:
+            src_node_id = entity_graph_id(src_raw)
+            tgt_node_id = entity_graph_id(tgt_raw)
+            edge_id = edge_graph_id(src_raw, rel_type, tgt_raw)
+
+            if not src_node_id or not tgt_node_id or not edge_id:
                 continue
-
-            src_clean = src_raw.removeprefix("entity:")
-            tgt_clean = tgt_raw.removeprefix("entity:")
-
-            if src_clean == tgt_clean:
-                # Disallow self-loops
-                continue
-
-            src_node_id = f"entity:{src_clean}"
-            tgt_node_id = f"entity:{tgt_clean}"
 
             # Only return relationships whose source and target entities belong to the requested repository
             if src_node_id not in valid_node_ids or tgt_node_id not in valid_node_ids:
                 continue
-
-            edge_id = f"edge:{src_clean}:{rel_type}:{tgt_clean}"
             confidence = rel.get("confidence")
             rationale = rel.get("rationale")
 

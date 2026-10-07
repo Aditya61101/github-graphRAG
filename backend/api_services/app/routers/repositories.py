@@ -47,6 +47,7 @@ from ai_services.graph import (
 )
 from api_services.app.models.adr import ADRResponse
 from api_services.app.models.graph import RepositoryGraphResponse
+from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
     AvailableRepositoryResponse,
     IngestRepositoryRequest,
@@ -55,6 +56,7 @@ from api_services.app.models.repository import (
     SyncRepositoryRequest,
 )
 from api_services.app.utils.jwt_utils import get_current_user
+from api_services.app.utils.query_response_mapper import build_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +401,47 @@ async def get_repository_graph(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while fetching the repository graph.",
         )
+
+
+@router.post("/{repo_id}/query", response_model=APIResponse)
+async def query_repository(
+    repo_id: str,
+    payload: QueryRequest,
+    http_request: Request,
+    current_user: UserModel = Depends(get_current_user),
+) -> APIResponse:
+    """Execute conversational GraphRAG query scoped to the specified repository."""
+    store = get_sqlite_store(http_request)
+    repo = store.get_repository(repo_id, user_id=current_user.id)
+    if not repo:
+        any_repo = store.get_repository(repo_id)
+        if any_repo:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: You do not have permission to access repository '{repo_id}'.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{repo_id}' was not found.",
+        )
+
+    rag_agent = getattr(http_request.app.state, "rag_agent", None)
+    if not rag_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RAG query agent is not initialized.",
+        )
+
+    result = await rag_agent.query(
+        conversation_id=payload.conversation_id,
+        query=payload.query,
+        repository_id=repo.id,
+    )
+
+    return build_api_response(
+        result=result,
+        conversation_id=payload.conversation_id,
+    )
 
 
 @router.get("/{owner}/{name}", response_model=RepositoryResponse)
