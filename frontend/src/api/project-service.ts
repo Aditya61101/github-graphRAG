@@ -5,7 +5,7 @@ export const projectService = {
   getProjects: async (): Promise<Project[]> => {
     const projects = await new Promise<Project[]>((resolve) => {
       setTimeout(() => {
-        resolve(MOCK_PROJECTS);
+        resolve([]);
       }, 1000);
     });
     return projects;

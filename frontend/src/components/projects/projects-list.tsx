@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { AlertTriangle, Folders } from "lucide-react";
+import { AlertTriangle, Folders, PlusIcon } from "lucide-react";
 
 import { ProjectCard } from "@/components/projects/project-card";
 import { EmptyState } from "@/components/core/feedback/empty-state";
@@ -62,7 +62,10 @@ export function ProjectsList({
         text="No projects yet"
         subtext="Create your first project to start organizing and exploring repositories."
         actionNode={
-          <Button onClick={onCreateProject}>Create project</Button>
+          <Button onClick={onCreateProject}>
+            <PlusIcon />
+            Create project
+          </Button>
         }
       />
     );

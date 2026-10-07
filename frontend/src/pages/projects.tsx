@@ -4,8 +4,12 @@ import { PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProjectsList } from "@/components/projects/projects-list";
 import { projectService } from "@/api/project-service";
+import { CreateProject } from "@/components/projects/create-project";
+import { useState } from "react";
 
 export default function ProjectsPage() {
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+
   const {
     data: projects,
     isLoading,
@@ -16,7 +20,9 @@ export default function ProjectsPage() {
     queryFn: projectService.getProjects,
   });
 
-  const handleCreateProject = () => {};
+  const handleCreateProject = () => {
+    setIsDrawerOpen(true);
+  };
 
   return (
     <div className="flex flex-1 flex-col gap-6 p-4 pt-0">
@@ -30,10 +36,12 @@ export default function ProjectsPage() {
             GraphRAG insights.
           </p>
         </div>
-        <Button onClick={handleCreateProject}>
-          <PlusIcon />
-          Create project
-        </Button>
+        <CreateProject open={isDrawerOpen} setOpen={setIsDrawerOpen}>
+          <Button onClick={handleCreateProject}>
+            <PlusIcon />
+            Create project
+          </Button>
+        </CreateProject>
       </section>
 
       <ProjectsList
