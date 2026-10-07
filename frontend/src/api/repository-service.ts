@@ -1,5 +1,5 @@
-import type { Repository, RepositoryDto } from "@/features/repositories/types";
 import { apiClient } from "@/lib/api-client";
+import type { Repository, RepositoryDto } from "@/types/repositories";
 
 export const repositoryService = {
   getRepositories: async (): Promise<Repository[]> => {

@@ -1,4 +1,4 @@
-import { Logo } from "@/components/logo";
+import { Logo } from "@/components/core/logo";
 
 type LoadingScreenProps = {
   loadingText?: string;

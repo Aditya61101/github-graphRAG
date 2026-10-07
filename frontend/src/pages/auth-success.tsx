@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router";
 
 import { useAuth } from "@/contexts/auth-context";
-import { LoadingScreen } from "@/components/loading-screen";
+import { LoadingScreen } from "@/components/core/loading-screen";
 
 export default function AuthSuccess() {
   const navigate = useNavigate();
