@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CalendarClock, GitBranch, Lock, Star } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "@/components/ui/toast";
-import { useApi } from "@/hooks/use-api";
-import { repositoryService } from "@/features/repositories/api";
-import { EmptyState } from "@/components/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { repositoryService } from "@/api/repository-service";
+import { EmptyState } from "@/components/core/feedback/empty-state";
 
 export default function RepositoriesPage() {
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string>();
@@ -21,11 +21,12 @@ export default function RepositoriesPage() {
 
   const {
     data: repositories,
-    loading,
-    execute: reloadRepositories,
-  } = useApi(repositoryService.getRepositories, {
+    isFetching,
+    refetch,
+  } = useQuery({
+    queryKey: ["repositories"],
+    queryFn: repositoryService.getRepositories,
     initialData: [],
-    immediate: true,
   });
 
   const selectedRepository = useMemo(
@@ -69,7 +70,7 @@ export default function RepositoriesPage() {
         </Button>
       </section>
 
-      {loading ? (
+      {isFetching ? (
         <div className="grid gap-4 lg:grid-cols-3">
           {Array.from({ length: 12 }).map((_, index) => (
             <Skeleton key={index} className="h-36" />
@@ -142,7 +143,7 @@ export default function RepositoriesPage() {
           text="No repositories found"
           subtext="Make sure you have at least one repository available."
           actionLabel="Reload"
-          action={reloadRepositories}
+          action={refetch}
         />
       )}
     </div>

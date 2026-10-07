@@ -9,7 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Field, FieldGroup } from "@/components/ui/field";
-import { Logo } from "@/components/logo";
+import { Logo } from "@/components/core/logo";
 import { useAuth } from "@/contexts/auth-context";
 
 export default function LoginPage() {

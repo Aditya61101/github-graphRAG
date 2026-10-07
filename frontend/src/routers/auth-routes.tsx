@@ -1,7 +1,7 @@
 import type { RouteObject } from "react-router";
 
-import AuthSuccess from "@/features/auth/auth-success";
-import LoginPage from "@/features/auth/login";
+import AuthSuccess from "@/pages/auth-success";
+import LoginPage from "@/pages/login";
 
 export const authRoutes: RouteObject[] = [
   {

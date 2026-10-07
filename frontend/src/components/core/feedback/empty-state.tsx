@@ -1,22 +1,18 @@
 import type { ReactNode } from "react";
-import { PackageOpenIcon, type LucideIcon } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
+import { PackageOpen, type LucideIcon } from "lucide-react";
 
 type EmptyStateProps = {
   Icon?: LucideIcon;
   text?: string;
   subtext?: string;
-  actionLabel?: ReactNode;
-  action?: () => void;
+  actionNode?: ReactNode;
 };
 
 export function EmptyState({
-  Icon = PackageOpenIcon,
-  text = "Oops!",
-  subtext = "No data available",
-  actionLabel,
-  action,
+  Icon = PackageOpen,
+  text = "Nothing here yet!",
+  subtext = "Try adding new items or refreshing the list.",
+  actionNode,
 }: EmptyStateProps) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center">
@@ -25,7 +21,7 @@ export function EmptyState({
         <h4 className="text-center">{text}</h4>
         <p className="text-center text-sm text-muted-foreground">{subtext}</p>
       </div>
-      {actionLabel && action && <Button onClick={action}>{actionLabel}</Button>}
+      {actionNode}
     </div>
   );
 }
