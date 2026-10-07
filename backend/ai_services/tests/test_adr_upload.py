@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 from pathlib import Path
@@ -552,11 +553,13 @@ def test_upload_adr_file_cleanup_on_write_failure(test_env):
     # Mock open() to simulate an I/O error during disk writing
     with patch("ai_services.ingestion.adr.service.open", side_effect=IOError("Disk write simulated failure")):
         with pytest.raises(Exception) as exc_info:
-            adr_service.process_adr_upload(
-                repository_id=test_env["repo_alice_id"],
-                user_id="usr_alice",
-                filename="disk-fail.md",
-                file_bytes=b"# Test disk fail",
+            asyncio.run(
+                adr_service.process_adr_upload(
+                    repository_id=test_env["repo_alice_id"],
+                    user_id="usr_alice",
+                    filename="disk-fail.md",
+                    file_bytes=b"# Test disk fail",
+                )
             )
         assert "disk" in str(exc_info.value).lower()
 

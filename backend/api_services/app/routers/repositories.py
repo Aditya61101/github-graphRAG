@@ -38,7 +38,15 @@ from ai_services.ingestion.sources.interface import (
 )
 import httpx
 
+from ai_services.graph import (
+    GraphRepositoryError,
+    Neo4jGraphRepository,
+    RepositoryAccessDeniedError as GraphRepoAccessDeniedError,
+    RepositoryGraphService,
+    RepositoryNotFoundError as GraphRepoNotFoundError,
+)
 from api_services.app.models.adr import ADRResponse
+from api_services.app.models.graph import RepositoryGraphResponse
 from api_services.app.models.repository import (
     AvailableRepositoryResponse,
     IngestRepositoryRequest,
@@ -84,6 +92,23 @@ def get_adr_service(request: Request) -> ADRService:
             max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
         )
         request.app.state.adr_service = service
+    return service
+
+
+def get_graph_service(request: Request) -> RepositoryGraphService:
+    service = getattr(request.app.state, "graph_service", None)
+    if not service:
+        deps = getattr(request.app.state, "deps", None)
+        service = getattr(deps, "graph_service", None) if deps else None
+    if not service:
+        store = get_sqlite_store(request)
+        deps = getattr(request.app.state, "deps", None)
+        driver = getattr(deps, "driver", None) if deps else getattr(request.app.state, "driver", None)
+        import os
+        database = getattr(request.app.state, "database", None) or os.getenv("NEO4J_DATABASE", "neo4j")
+        graph_repo = Neo4jGraphRepository(driver=driver, database=database)
+        service = RepositoryGraphService(sqlite_store=store, graph_repo=graph_repo)
+        request.app.state.graph_service = service
     return service
 
 
@@ -287,6 +312,7 @@ async def list_user_repositories(
 
         results.append(
             AvailableRepositoryResponse(
+                id=tracked_id,
                 github_repository_id=gh_id,
                 owner=owner,
                 name=name,
@@ -308,6 +334,7 @@ async def list_user_repositories(
         if tr.id not in seen_tracked_pks:
             results.append(
                 AvailableRepositoryResponse(
+                    id=tr.id,
                     github_repository_id=tr.github_repository_id,
                     owner=tr.owner,
                     name=tr.name,
@@ -345,6 +372,33 @@ async def list_repository_adrs(
 
     adrs = store.list_adrs(repository_id=repo.id)
     return [ADRResponse(**adr.to_dict()) for adr in adrs]
+
+
+@router.get("/{repo_id}/graph", response_model=RepositoryGraphResponse)
+async def get_repository_graph(
+    repo_id: str,
+    request: Request,
+    current_user: UserModel = Depends(get_current_user),
+) -> RepositoryGraphResponse:
+    """Retrieve the architectural entity-relationship graph for a repository."""
+    graph_service = get_graph_service(request)
+    try:
+        return await graph_service.get_repository_graph(
+            repository_identifier=repo_id,
+            user_id=current_user.id,
+        )
+    except GraphRepoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except GraphRepoAccessDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Unexpected error retrieving graph for repository '{repo_id}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while fetching the repository graph.",
+        )
 
 
 @router.get("/{owner}/{name}", response_model=RepositoryResponse)
@@ -496,7 +550,7 @@ async def upload_adr(
     file_bytes = b"".join(chunks)
 
     try:
-        adr_record, _parsed_doc = adr_service.process_adr_upload(
+        adr_record, _parsed_doc = await adr_service.process_adr_upload(
             repository_id=repo_id,
             user_id=current_user.id,
             filename=filename,

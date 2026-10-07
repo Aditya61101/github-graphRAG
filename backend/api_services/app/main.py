@@ -23,6 +23,11 @@ from api_services.app.config import (
 )
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from ai_services.ingestion.adr.chunker import ADRChunker
+from ai_services.ingestion.adr.extractor import ADRArchitecturalExtractor
+from ai_services.ingestion.adr.neo4j_writer import ADRNeo4jWriter
+from ai_services.ingestion.adr.processor import ADRProcessingService
+from ai_services.ingestion.adr.resolver import ADREntityResolver
 from ai_services.ingestion.adr.service import ADRService
 from ai_services.ingestion.persistence.sqlite_store import (
     SqliteApplicationStore,
@@ -32,6 +37,7 @@ from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
 from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
+from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
 
@@ -112,15 +118,44 @@ async def lifespan(app: FastAPI):
         groq_client=groq_client,
     )
 
+    if embedder is None:
+        raise RuntimeError("ADR Phase 2 requires the configured embedding service")
+
+    adr_writer = ADRNeo4jWriter(
+        driver=driver,
+        database=database or "neo4j",
+        embedding_dimensions=embedder.dimensions if embedder else 3072,
+    )
+    adr_writer.initialize_constraints()
+
+    adr_processor = ADRProcessingService(
+        chunker=ADRChunker(),
+        extractor=ADRArchitecturalExtractor(llm=llm),
+        resolver=ADREntityResolver(
+            driver=driver,
+            database=database or "neo4j",
+            embedder=embedder,
+            embedding_dimensions=embedder.dimensions if embedder else 3072,
+        ),
+        writer=adr_writer,
+        embedder=embedder,
+        embedding_dimensions=embedder.dimensions if embedder else 3072,
+    )
+
     adr_service = ADRService(
         sqlite_store=sqlite_store,
         storage_dir=ADRS_STORAGE_DIR,
         max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
+        processor=adr_processor,
     )
+
+    graph_repo = Neo4jGraphRepository(driver=driver, database=database or "neo4j")
+    graph_service = RepositoryGraphService(sqlite_store=sqlite_store, graph_repo=graph_repo)
 
     app.state.sqlite_store = sqlite_store
     app.state.ingestion_service = ingestion_service
     app.state.adr_service = adr_service
+    app.state.graph_service = graph_service
 
     app.state.deps = AppDependencies(
         driver=driver,
@@ -134,6 +169,7 @@ async def lifespan(app: FastAPI):
         ingestion_service=ingestion_service,
         sqlite_store=sqlite_store,
         adr_service=adr_service,
+        graph_service=graph_service,
     )
 
     # Create the conversational agent once. Creating it inside the request

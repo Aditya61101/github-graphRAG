@@ -85,11 +85,13 @@ class ADRService:
         sqlite_store: SqliteApplicationStore,
         storage_dir: Path | str,
         max_file_size_bytes: int = 10 * 1024 * 1024,
+        processor: Any | None = None,
     ) -> None:
         self.sqlite_store = sqlite_store
         self.storage_dir = Path(storage_dir).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.max_file_size_bytes = max_file_size_bytes
+        self.processor = processor
 
     def validate_repository_access(self, repository_id: str, user_id: str) -> Any:
         """Verify repository exists and belongs to the authenticated user.
@@ -117,7 +119,7 @@ class ADRService:
 
         return repo
 
-    def process_adr_upload(
+    async def process_adr_upload(
         self,
         repository_id: str,
         user_id: str,
@@ -126,7 +128,7 @@ class ADRService:
         explicit_title: str | None = None,
         description: str | None = None,
     ) -> tuple[ADRModel, ADRDocument]:
-        """Validate, store, persist, and parse a manually uploaded ADR file."""
+        """Validate, store, persist, parse, and optionally ingest ADR into Neo4j graph."""
         logger.info(
             f"ADR upload initiated for repo '{repository_id}' by user '{user_id}' (file: '{filename}', size: {len(file_bytes)} bytes)"
         )
@@ -235,19 +237,6 @@ class ADRService:
                 source_type="MANUAL_UPLOAD",
                 mime_type=mime_type,
             )
-
-            # 10. Mark COMPLETED with final title
-            updated_record = self.sqlite_store.update_adr_status(
-                adr_id=adr_id,
-                status="COMPLETED",
-                title=parsed_doc.title,
-                error=None,
-            )
-            logger.info(
-                f"ADR '{adr_id}' successfully parsed and marked COMPLETED (title='{parsed_doc.title}')"
-            )
-            return updated_record or adr_record, parsed_doc
-
         except Exception as exc:
             logger.warning(f"ADR parsing failed for '{adr_id}': {exc}")
             # Retain file on disk for diagnosis, but mark status as FAILED in DB
@@ -257,3 +246,35 @@ class ADRService:
                 error=str(exc),
             )
             raise ADRParsingError(f"Failed to parse uploaded ADR document: {exc}") from exc
+
+        # 10. Phase 2: Knowledge Graph Ingestion (if processor is configured)
+        if self.processor:
+            logger.info(f"Starting Phase 2 Neo4j knowledge graph ingestion for ADR '{adr_id}'")
+            self.sqlite_store.update_adr_status(
+                adr_id=adr_id,
+                status="PROCESSING",
+                title=parsed_doc.title,
+                error=None,
+            )
+            try:
+                await self.processor.process_adr(parsed_doc)
+            except Exception as exc:
+                logger.exception(f"Phase 2 ADR processing failed for '{adr_id}': {exc}")
+                self.sqlite_store.update_adr_status(
+                    adr_id=adr_id,
+                    status="FAILED",
+                    error=str(exc),
+                )
+                raise ADRServiceError(f"Knowledge graph ingestion failed: {exc}") from exc
+
+        # 11. Mark COMPLETED with final title
+        updated_record = self.sqlite_store.update_adr_status(
+            adr_id=adr_id,
+            status="COMPLETED",
+            title=parsed_doc.title,
+            error=None,
+        )
+        logger.info(
+            f"ADR '{adr_id}' successfully completed all phases and marked COMPLETED (title='{parsed_doc.title}')"
+        )
+        return updated_record or adr_record, parsed_doc

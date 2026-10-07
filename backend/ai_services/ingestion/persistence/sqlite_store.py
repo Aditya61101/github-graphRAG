@@ -280,6 +280,7 @@ class SqliteApplicationStore:
         - get_repository(repository_identifier, user_id=user_id)
         - get_repository(repository_identifier) (unscoped, e.g. for webhooks)
         """
+        print(f"get_repository called with identifier_or_user_id={identifier_or_user_id}, repository_identifier={repository_identifier}, user_id={user_id}")
         if repository_identifier is not None:
             uid = identifier_or_user_id
             ident = repository_identifier

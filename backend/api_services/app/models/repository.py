@@ -59,6 +59,10 @@ class RepositoryResponse(BaseModel):
 
 
 class AvailableRepositoryResponse(BaseModel):
+    id: str | None = Field(
+        default=None,
+        description="Internal tracked repository ID (e.g. repo_12345) if already indexed in DecisionGuard, otherwise null.",
+    )
     github_repository_id: str
     owner: str
     name: str
