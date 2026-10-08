@@ -37,6 +37,201 @@ from api_services.app.routers.repositories import router as repositories_router
 from api_services.app.utils.jwt_utils import create_access_token
 
 
+def post_adr_batch(env, uploads, **kwargs):
+    return env['client'].post(
+        f"/repositories/{env['repo_alice_id']}/adrs",
+        files=[('files', upload) for upload in uploads],
+        headers={'Authorization': f"Bearer {env['alice_jwt']}"},
+        **kwargs,
+    )
+
+
+def test_batch_upload_mixed_formats_infers_titles_without_metadata(test_env):
+    response = post_adr_batch(test_env, [
+        ('one.md', b'# One\nChoose SQLite.', 'text/markdown'),
+        ('two.txt', b'Two\nChoose Kafka.', 'text/plain'),
+        ('three.pdf', _create_minimal_pdf_bytes(), 'application/pdf'),
+        ('four.docx', _create_minimal_docx_bytes(), 'application/octet-stream'),
+    ])
+    assert response.status_code == 201
+    data = response.json()
+    assert (data['total'], data['completed'], data['duplicates'], data['failed']) == (4, 4, 0, 0)
+    assert [item['index'] for item in data['results']] == [0, 1, 2, 3]
+    records = [item['adr'] for item in data['results']]
+    assert [record['title'] for record in records] == ['One', 'Two', 'ADR 003: Architecture Decision', 'ADR 004: Event Bus Selection']
+    assert all(record['description'] is None for record in records)
+    assert len({record['id'] for record in records}) == 4
+    for record in records:
+        assert record['repository_id'] == test_env['repo_alice_id']
+        assert 'file_path' not in record
+        assert Path(test_env['store'].get_adr(record['id']).file_path).exists()
+
+
+def test_batch_duplicate_and_invalid_item_do_not_stop_later_files(test_env):
+    content = b'# ADR\nChoose SQLite.'
+    response = post_adr_batch(test_env, [
+        ('one.md', content, 'text/markdown'),
+        ('copy.md', content, 'text/markdown'),
+        ('bad.exe', b'unsupported', 'application/octet-stream'),
+        ('last.txt', b'Another decision: use Kafka.', 'text/plain'),
+    ])
+    assert response.status_code == 207
+    data = response.json()
+    assert (data['completed'], data['duplicates'], data['failed']) == (2, 1, 1)
+    assert [item['status_code'] for item in data['results']] == [201, 409, 400, 201]
+    assert data['results'][0]['adr']['id'] == data['results'][1]['adr']['id']
+    assert len(test_env['store'].list_adrs(test_env['repo_alice_id'])) == 2
+
+
+def test_batch_size_parse_and_empty_errors_are_per_file(test_env):
+    test_env['adr_service'].max_file_size_bytes = 100
+    response = post_adr_batch(test_env, [
+        ('large.md', b'x' * 101, 'text/markdown'),
+        ('broken.pdf', b'not a PDF', 'application/pdf'),
+        ('empty.txt', b'', 'text/plain'),
+        ('good.md', b'# Good\nChoose SQLite.', 'text/markdown'),
+    ])
+    assert response.status_code == 207
+    assert [item['status_code'] for item in response.json()['results']] == [413, 422, 400, 201]
+    assert response.json()['completed'] == 1
+
+
+def test_batch_count_limit_is_rejected_before_ingestion(test_env):
+    test_env['adr_service'].max_files_per_upload = 1
+    response = post_adr_batch(test_env, [
+        ('one.md', b'# One', 'text/markdown'), ('two.md', b'# Two', 'text/markdown'),
+    ])
+    assert response.status_code == 400
+    assert test_env['store'].list_adrs(test_env['repo_alice_id']) == []
+
+
+@pytest.mark.parametrize('repo,token,code', [
+    ('repo_1001', None, 401), ('repo_missing', 'alice_jwt', 404),
+    ('repo_2001', 'alice_jwt', 403),
+])
+def test_batch_repository_authorization(test_env, repo, token, code):
+    headers = {'Authorization': f"Bearer {test_env[token]}"} if token else {}
+    response = test_env['client'].post(
+        f'/repositories/{repo}/adrs',
+        files=[('files', ('one.md', b'# One', 'text/markdown')),
+               ('files', ('two.md', b'# Two', 'text/markdown'))], headers=headers,
+    )
+    assert response.status_code == code
+    assert test_env['store'].list_adrs(test_env['repo_alice_id']) == []
+    assert test_env['store'].list_adrs(test_env['repo_bob_id']) == []
+
+
+def test_single_file_uses_files_field_and_batch_response(test_env):
+    response = post_adr_batch(test_env, [('one.md', b'# One', 'text/markdown')])
+    assert response.status_code == 201
+    assert response.json()['total'] == response.json()['completed'] == 1
+    assert response.json()['results'][0]['adr']['title'] == 'One'
+
+
+def test_legacy_file_field_is_not_supported(test_env):
+    response = test_env['client'].post(
+        f"/repositories/{test_env['repo_alice_id']}/adrs",
+        files={'file': ('legacy.md', b'# Legacy', 'text/markdown')},
+        headers={'Authorization': f"Bearer {test_env['alice_jwt']}"},
+    )
+    assert response.status_code == 422
+    assert test_env['store'].list_adrs(test_env['repo_alice_id']) == []
+
+
+def test_removed_metadata_cannot_override_inferred_title_or_description(test_env):
+    # FastAPI ignores extra form fields; none are forwarded into ingestion.
+    response = post_adr_batch(test_env, [('inferred.md', b'# Inferred title', 'text/markdown')],
+                             data={'title': 'Override', 'description': 'Not stored',
+                                   'titles': ['Override'], 'descriptions': ['Not stored']})
+    assert response.status_code == 201
+    record = response.json()['results'][0]['adr']
+    assert record['title'] == 'Inferred title' and record['description'] is None
+    stored = test_env['store'].get_adr(record['id'])
+    assert stored.title == 'Inferred title' and stored.description is None
+
+
+def test_upload_service_has_no_title_or_description_override_parameters():
+    from inspect import signature
+    assert set(signature(ADRService.process_adr_uploads).parameters) == {
+        'self', 'repository_id', 'user_id', 'files',
+    }
+    assert set(signature(ADRService.process_adr_upload).parameters) == {
+        'self', 'repository_id', 'user_id', 'filename', 'file_bytes',
+    }
+    assert 'explicit_title' not in signature(parse_adr_content).parameters
+
+
+def test_parser_preserves_automatic_filename_title_fallback():
+    # Unstyled DOCX documents with a long first paragraph have no inferred title.
+    document = parse_adr_content(
+        file_bytes=_create_minimal_docx_bytes('x' * 160), file_extension='.docx',
+        source_name='003-database-choice.docx', adr_id='adr_test', repository_id='repo_test',
+        file_path='unused.docx', content_hash='test',
+    )
+    assert document.title == '003 Database Choice'
+
+
+def test_batch_api_schema_documents_file_array_and_multi_status(test_env):
+    schema = test_env['client'].get('/openapi.json').json()
+    operation = schema['paths']['/repositories/{repo_id}/adrs']['post']
+    assert '207' in operation['responses']
+    body_ref = operation['requestBody']['content']['multipart/form-data']['schema']['$ref']
+    properties = schema['components']['schemas'][body_ref.rsplit('/', 1)[1]]['properties']
+    assert set(properties) == {'files'}
+    assert properties['files']['type'] == 'array'
+    assert schema['components']['schemas'][body_ref.rsplit('/', 1)[1]]['required'] == ['files']
+
+
+def test_batch_processor_failure_is_sanitized_and_later_item_completes(test_env):
+    from unittest.mock import AsyncMock
+    processor = AsyncMock()
+    processor.process_adr.side_effect = [RuntimeError('private-secret-detail'), None]
+    test_env['adr_service'].processor = processor
+    response = post_adr_batch(test_env, [
+        ('failed.md', b'# Failed\nChoose SQLite.', 'text/markdown'),
+        ('success.md', b'# Success\nChoose Kafka.', 'text/markdown'),
+    ])
+    assert response.status_code == 207
+    assert [item['status_code'] for item in response.json()['results']] == [500, 201]
+    assert 'private-secret-detail' not in response.text
+    assert processor.process_adr.await_count == 2
+    assert sorted(record.status for record in test_env['store'].list_adrs(test_env['repo_alice_id'])) == ['COMPLETED', 'FAILED']
+
+
+@pytest.mark.asyncio
+async def test_batch_reads_bounded_chunks_and_closes_uploads(test_env):
+    from starlette.datastructures import UploadFile
+    from unittest.mock import AsyncMock
+    uploads = [UploadFile(io.BytesIO(b'# One'), filename='one.md'),
+               UploadFile(io.BytesIO(b'# Two'), filename='two.md')]
+    for upload in uploads:
+        upload.read = AsyncMock(wraps=upload.read)
+        upload.close = AsyncMock(wraps=upload.close)
+    results = await test_env['adr_service'].process_adr_uploads(
+        test_env['repo_alice_id'], 'usr_alice', uploads,
+    )
+    assert [item.status for item in results] == ['completed', 'completed']
+    for upload in uploads:
+        assert all(call.args == (64 * 1024,) for call in upload.read.call_args_list)
+        upload.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_batch_read_failure_is_isolated_and_file_is_closed(test_env):
+    from starlette.datastructures import UploadFile
+    from unittest.mock import AsyncMock
+    broken = UploadFile(io.BytesIO(b'# Broken'), filename='broken.md')
+    broken.read = AsyncMock(side_effect=OSError('private read error'))
+    broken.close = AsyncMock(wraps=broken.close)
+    good = UploadFile(io.BytesIO(b'# Good'), filename='good.md')
+    results = await test_env['adr_service'].process_adr_uploads(
+        test_env['repo_alice_id'], 'usr_alice', [broken, good],
+    )
+    assert [item.status_code for item in results] == [500, 201]
+    assert 'private read error' not in results[0].error
+    broken.close.assert_awaited_once()
+
+
 def _create_minimal_pdf_bytes(title: str = "ADR 003: Architecture Decision") -> bytes:
     """Generate minimal valid PDF binary with an embedded text stream."""
     stream_content = f"BT\n/F1 12 Tf\n100 700 Td\n({title}) Tj\nET\n".encode("latin-1")
@@ -187,7 +382,7 @@ def test_env():
 # =========================================================================
 def test_upload_adr_without_jwt_rejected(test_env):
     client = test_env["client"]
-    files = {"file": ("001-test.md", b"# Test ADR", "text/markdown")}
+    files = {"files": ("001-test.md", b"# Test ADR", "text/markdown")}
     resp = client.post(f"/repositories/{test_env['repo_alice_id']}/adrs", files=files)
     assert resp.status_code == 401
 
@@ -197,7 +392,7 @@ def test_upload_adr_without_jwt_rejected(test_env):
 # =========================================================================
 def test_upload_adr_invalid_jwt_rejected(test_env):
     client = test_env["client"]
-    files = {"file": ("001-test.md", b"# Test ADR", "text/markdown")}
+    files = {"files": ("001-test.md", b"# Test ADR", "text/markdown")}
     headers = {"Authorization": "Bearer invalid.jwt.token"}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
@@ -213,7 +408,7 @@ def test_upload_adr_invalid_jwt_rejected(test_env):
 def test_upload_adr_repo_not_found(test_env):
     client = test_env["client"]
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
-    files = {"file": ("001-test.md", b"# Test ADR", "text/markdown")}
+    files = {"files": ("001-test.md", b"# Test ADR", "text/markdown")}
     resp = client.post("/repositories/repo_nonexistent/adrs", files=files, headers=headers)
     assert resp.status_code == 404
     assert "not found" in resp.json()["detail"].lower()
@@ -226,7 +421,7 @@ def test_upload_adr_forbidden_different_user(test_env):
     client = test_env["client"]
     # Alice attempts to upload to Bob's repository
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
-    files = {"file": ("001-test.md", b"# Test ADR", "text/markdown")}
+    files = {"files": ("001-test.md", b"# Test ADR", "text/markdown")}
     resp = client.post(
         f"/repositories/{test_env['repo_bob_id']}/adrs",
         files=files,
@@ -242,14 +437,15 @@ def test_upload_adr_forbidden_different_user(test_env):
 def test_upload_adr_unsupported_file_extension(test_env):
     client = test_env["client"]
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
-    files = {"file": ("malicious.exe", b"binary content", "application/octet-stream")}
+    files = {"files": ("malicious.exe", b"binary content", "application/octet-stream")}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 400
-    assert "unsupported file type" in resp.json()["detail"].lower()
+    assert resp.status_code == 207
+    assert resp.json()["results"][0]["status_code"] == 400
+    assert "unsupported file type" in resp.json()["results"][0]["error"].lower()
 
 
 # =========================================================================
@@ -264,14 +460,15 @@ def test_upload_adr_file_exceeds_size(test_env):
     try:
         headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
         large_content = b"A" * 100
-        files = {"file": ("large.md", large_content, "text/markdown")}
+        files = {"files": ("large.md", large_content, "text/markdown")}
         resp = client.post(
             f"/repositories/{test_env['repo_alice_id']}/adrs",
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 413
-        assert "exceeds" in resp.json()["detail"].lower()
+        assert resp.status_code == 207
+        assert resp.json()["results"][0]["status_code"] == 413
+        assert "exceeds" in resp.json()["results"][0]["error"].lower()
     finally:
         adr_service.max_file_size_bytes = original_limit
 
@@ -283,14 +480,14 @@ def test_upload_adr_valid_markdown(test_env):
     client = test_env["client"]
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
     md_content = b"# ADR 001: Use SQLite for Prototype\n\n## Context\nRapid local iteration.\n\n## Decision\nWe choose SQLite."
-    files = {"file": ("001-sqlite.md", md_content, "text/markdown")}
+    files = {"files": ("001-sqlite.md", md_content, "text/markdown")}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files,
         headers=headers,
     )
     assert resp.status_code == 201
-    data = resp.json()
+    data = resp.json()["results"][0]["adr"]
     assert data["status"] == "COMPLETED"
     assert data["title"] == "ADR 001: Use SQLite for Prototype"
     assert data["source_type"] == "MANUAL_UPLOAD"
@@ -317,14 +514,14 @@ def test_upload_adr_valid_txt(test_env):
     client = test_env["client"]
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
     txt_content = b"ADR 002: Service Communication\n\nContext: Distributed system.\nDecision: Use gRPC."
-    files = {"file": ("decision-grpc.txt", txt_content, "text/plain")}
+    files = {"files": ("decision-grpc.txt", txt_content, "text/plain")}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files,
         headers=headers,
     )
     assert resp.status_code == 201
-    data = resp.json()
+    data = resp.json()["results"][0]["adr"]
     assert data["status"] == "COMPLETED"
     assert data["title"] == "ADR 002: Service Communication"
     assert data["file_extension"] == ".txt"
@@ -337,14 +534,14 @@ def test_upload_adr_valid_pdf(test_env):
     client = test_env["client"]
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
     pdf_bytes = _create_minimal_pdf_bytes("ADR 003: Architecture Decision")
-    files = {"file": ("adr-003.pdf", pdf_bytes, "application/pdf")}
+    files = {"files": ("adr-003.pdf", pdf_bytes, "application/pdf")}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files,
         headers=headers,
     )
     assert resp.status_code == 201
-    data = resp.json()
+    data = resp.json()["results"][0]["adr"]
     assert data["status"] == "COMPLETED"
     assert "ADR 003: Architecture Decision" in data["title"]
     assert data["mime_type"] == "application/pdf"
@@ -358,7 +555,7 @@ def test_upload_adr_valid_docx(test_env):
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
     docx_bytes = _create_minimal_docx_bytes("ADR 004: Event Bus Selection")
     files = {
-        "file": (
+        "files": (
             "adr-004.docx",
             docx_bytes,
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -370,7 +567,7 @@ def test_upload_adr_valid_docx(test_env):
         headers=headers,
     )
     assert resp.status_code == 201
-    data = resp.json()
+    data = resp.json()["results"][0]["adr"]
     assert data["status"] == "COMPLETED"
     assert data["title"] == "ADR 004: Event Bus Selection"
     assert data["file_extension"] == ".docx"
@@ -385,14 +582,14 @@ def test_upload_adr_content_hash_verified(test_env):
     content = b"# ADR Hash Test\nSpecific content to verify hash generation."
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    files = {"file": ("hash-test.md", content, "text/markdown")}
+    files = {"files": ("hash-test.md", content, "text/markdown")}
     resp = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files,
         headers=headers,
     )
     assert resp.status_code == 201
-    data = resp.json()
+    data = resp.json()["results"][0]["adr"]
     assert data["content_hash"] == expected_hash
 
 
@@ -404,7 +601,7 @@ def test_upload_adr_duplicate_detection(test_env):
     headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
     content = b"# ADR 005: Cache Layer\nUse Redis for low-latency session caching."
 
-    files1 = {"file": ("adr-005.md", content, "text/markdown")}
+    files1 = {"files": ("adr-005.md", content, "text/markdown")}
     resp1 = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files1,
@@ -413,18 +610,19 @@ def test_upload_adr_duplicate_detection(test_env):
     assert resp1.status_code == 201
 
     # Second upload with identical content to the same repository
-    files2 = {"file": ("adr-005-copy.md", content, "text/markdown")}
+    files2 = {"files": ("adr-005-copy.md", content, "text/markdown")}
     resp2 = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
         files=files2,
         headers=headers,
     )
-    assert resp2.status_code == 409
-    assert "identical adr already exists" in resp2.json()["detail"].lower()
+    assert resp2.status_code == 207
+    assert resp2.json()["results"][0]["status_code"] == 409
+    assert "identical adr already exists" in resp2.json()["results"][0]["error"].lower()
 
     # But uploading the SAME file content to a DIFFERENT repository (by Bob) succeeds
     headers_bob = {"Authorization": f"Bearer {test_env['bob_jwt']}"}
-    files_bob = {"file": ("adr-005.md", content, "text/markdown")}
+    files_bob = {"files": ("adr-005.md", content, "text/markdown")}
     resp_bob = client.post(
         f"/repositories/{test_env['repo_bob_id']}/adrs",
         files=files_bob,
@@ -447,14 +645,14 @@ def test_upload_adr_path_traversal_prevention(test_env):
         "..\\..\\windows\\system32\\cmd.md",
         "/absolute/path/override.md",
     ]:
-        files = {"file": (traversal_name, content + traversal_name.encode(), "text/markdown")}
+        files = {"files": (traversal_name, content + traversal_name.encode(), "text/markdown")}
         resp = client.post(
             f"/repositories/{test_env['repo_alice_id']}/adrs",
             files=files,
             headers=headers,
         )
         assert resp.status_code == 201
-        data = resp.json()
+        data = resp.json()["results"][0]["adr"]
         assert "file_path" not in data
 
         db_adr = test_env["store"].get_adr(data["id"])
@@ -481,14 +679,15 @@ def test_upload_adr_parsing_failure_handling(test_env):
         "ai_services.ingestion.adr.service.parse_adr_content",
         side_effect=ADRParseError("Malformed document syntax"),
     ):
-        files = {"file": ("bad-doc.md", b"# Malformed Document", "text/markdown")}
+        files = {"files": ("bad-doc.md", b"# Malformed Document", "text/markdown")}
         resp = client.post(
             f"/repositories/{test_env['repo_alice_id']}/adrs",
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 422
-        detail = resp.json()["detail"].lower()
+        assert resp.status_code == 207
+        assert resp.json()["results"][0]["status_code"] == 422
+        detail = resp.json()["results"][0]["error"].lower()
         assert "parse" in detail and "failed" in detail
 
     # Verify ADR was recorded in DB and marked FAILED
@@ -513,7 +712,7 @@ def test_upload_adr_repository_isolation(test_env):
     # Alice uploads ADR to Alice's repo
     resp_alice = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
-        files={"file": ("alice-secret.md", b"# Alice Secret ADR", "text/markdown")},
+        files={"files": ("alice-secret.md", b"# Alice Secret ADR", "text/markdown")},
         headers=headers_alice,
     )
     assert resp_alice.status_code == 201
@@ -521,7 +720,7 @@ def test_upload_adr_repository_isolation(test_env):
     # Bob cannot upload to Alice's repo
     resp_bob_upload = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
-        files={"file": ("bob-intruder.md", b"# Bob Intrusion", "text/markdown")},
+        files={"files": ("bob-intruder.md", b"# Bob Intrusion", "text/markdown")},
         headers=headers_bob,
     )
     assert resp_bob_upload.status_code == 403
@@ -588,10 +787,11 @@ def test_upload_adr_retry_failed_upload(test_env):
     ):
         resp1 = client.post(
             f"/repositories/{test_env['repo_alice_id']}/adrs",
-            files={"file": ("retried-adr.md", content, "text/markdown")},
+            files={"files": ("retried-adr.md", content, "text/markdown")},
             headers=headers,
         )
-        assert resp1.status_code == 422
+        assert resp1.status_code == 207
+        assert resp1.json()["results"][0]["status_code"] == 422
 
     # Verify status in database is FAILED
     content_hash = hashlib.sha256(content).hexdigest()
@@ -604,11 +804,11 @@ def test_upload_adr_retry_failed_upload(test_env):
     # It should reclaim/retry the record and transition to COMPLETED
     resp2 = client.post(
         f"/repositories/{test_env['repo_alice_id']}/adrs",
-        files={"file": ("retried-adr.md", content, "text/markdown")},
+        files={"files": ("retried-adr.md", content, "text/markdown")},
         headers=headers,
     )
     assert resp2.status_code == 201
-    data2 = resp2.json()
+    data2 = resp2.json()["results"][0]["adr"]
     assert data2["status"] == "COMPLETED"
     assert data2["title"] == "Retried ADR"
     assert data2["id"] == first_adr_id  # Reclaimed existing record
@@ -618,4 +818,3 @@ def test_upload_adr_retry_failed_upload(test_env):
     assert updated_adr is not None
     assert updated_adr.status == "COMPLETED"
     assert updated_adr.error is None
-

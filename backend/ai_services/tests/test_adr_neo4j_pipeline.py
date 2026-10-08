@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
+import io
 from pathlib import Path
 import re
 import tempfile
@@ -368,6 +369,7 @@ class MockNeo4jDriver:
                 self.nodes[f"GraphAssertion:{aid}"] = {
                     "_label": "GraphAssertion",
                     "id": aid,
+                    "repository": params.get("repo"),
                     "source_id": adr_id,
                     "relationship_type": r.get("relationship_type"),
                     "rationale": r.get("rationale"),
@@ -1418,6 +1420,46 @@ async def test_same_relationship_from_two_adrs_keeps_independent_provenance(adr_
         and r.get("source", "").startswith("Entity:")
         and r.get("target", "").startswith("Entity:")
         for r in driver.relationships
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_adrs_keep_separate_graph_assertions_and_chunk_provenance(adr_env):
+    from starlette.datastructures import UploadFile
+    adr_env['extractor'].result = ADRExtractionResult(
+        entities=[ADREntityOutput(name='PaymentService', label='Service'),
+                  ADREntityOutput(name='Stripe', label='ExternalSystem')],
+        relationships=[ADRRelationshipOutput(
+            source_name='PaymentService', source_label='Service', relationship_type='USES',
+            target_name='Stripe', target_label='ExternalSystem', rationale='Payment integration.',
+        )],
+    )
+    results = await adr_env['service'].process_adr_uploads(
+        adr_env['repo_a'], adr_env['user_id'], [
+            UploadFile(io.BytesIO(b'# ADR One\nPaymentService uses Stripe.'), filename='one.md'),
+            UploadFile(io.BytesIO(b'# ADR Two\nPaymentService uses Stripe for cards.'), filename='two.md'),
+        ],
+    )
+    assert [item.status for item in results] == ['completed', 'completed']
+    adr_ids = {item.adr.id for item in results}
+    nodes = list(adr_env['driver'].nodes.values())
+    assertions = [node for node in nodes if node.get('_label') == 'GraphAssertion']
+    assert len(assertions) == 2
+    assert {node['source_id'] for node in assertions} == adr_ids
+    assert len({node['id'] for node in assertions}) == 2
+    assert all(node.get('repository') == adr_env['repo_a'] for node in assertions)
+    chunks = [node for node in nodes if node.get('_label') == 'Chunk']
+    assert {node['adr_id'] for node in chunks} == adr_ids
+    for assertion in assertions:
+        supports = [rel for rel in adr_env['driver'].relationships
+                    if rel.get('type') == 'SUPPORTS'
+                    and rel.get('target') == f"GraphAssertion:{assertion['id']}"]
+        assert supports
+        assert all(rel['source'].startswith(f"Chunk:adr:{assertion['source_id']}") for rel in supports)
+    assert not any(
+        rel.get('type') == 'USES' and rel.get('source', '').startswith('Entity:')
+        and rel.get('target', '').startswith('Entity:')
+        for rel in adr_env['driver'].relationships
     )
 
 

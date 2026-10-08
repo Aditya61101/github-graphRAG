@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
 import re
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Protocol, Sequence
 import uuid
 
 from ai_services.ingestion.adr.parser import ADRParseError, parse_adr_content
@@ -16,6 +17,24 @@ from ai_services.models.adr_document import ADRDocument
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {".md", ".markdown", ".txt", ".pdf", ".docx"}
+
+
+class ADRUploadFile(Protocol):
+    filename: str | None
+
+    async def read(self, size: int = -1) -> bytes: ...
+
+    async def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class ADRUploadResult:
+    index: int
+    filename: str
+    status: str
+    status_code: int
+    adr: ADRModel | None = None
+    error: str | None = None
 
 
 class ADRServiceError(Exception):
@@ -86,12 +105,79 @@ class ADRService:
         storage_dir: Path | str,
         max_file_size_bytes: int = 10 * 1024 * 1024,
         processor: Any | None = None,
+        max_files_per_upload: int = 20,
     ) -> None:
         self.sqlite_store = sqlite_store
         self.storage_dir = Path(storage_dir).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.max_file_size_bytes = max_file_size_bytes
         self.processor = processor
+        if max_files_per_upload < 1:
+            raise ValueError("max_files_per_upload must be positive")
+        self.max_files_per_upload = max_files_per_upload
+
+    async def process_adr_uploads(
+        self,
+        repository_id: str,
+        user_id: str,
+        files: Sequence[ADRUploadFile],
+    ) -> list[ADRUploadResult]:
+        """Process a bounded batch independently, preserving each ADR's provenance.
+
+        Repository authorization and batch shape are checked before any writes.
+        Only one file's bytes are held at a time; ingestion uses the existing
+        per-document pipeline. Successful items are not rolled back on failure.
+        """
+        self.validate_repository_access(repository_id, user_id)
+        if not files or len(files) > self.max_files_per_upload:
+            raise ValueError(f"Upload between 1 and {self.max_files_per_upload} ADR files.")
+
+        results: list[ADRUploadResult] = []
+        for index, upload in enumerate(files):
+            filename = upload.filename or "uploaded_adr.txt"
+            try:
+                parts: list[bytes] = []
+                size = 0
+                while chunk := await upload.read(64 * 1024):
+                    size += len(chunk)
+                    if size > self.max_file_size_bytes:
+                        raise FileSizeExceededError(
+                            f"File size exceeds maximum allowed limit of {self.max_file_size_bytes} bytes."
+                        )
+                    parts.append(chunk)
+                payload = b"".join(parts)
+                del parts
+                record, parsed_doc = await self.process_adr_upload(
+                    repository_id=repository_id, user_id=user_id,
+                    filename=filename, file_bytes=payload,
+                )
+                del parsed_doc
+                results.append(ADRUploadResult(index, filename, "completed", 201, adr=record))
+            except DuplicateADRError as exc:
+                results.append(ADRUploadResult(index, filename, "duplicate", 409,
+                                               adr=exc.existing_adr, error=str(exc)))
+            except (InvalidFileTypeError, FileSizeExceededError) as exc:
+                code = 413 if isinstance(exc, FileSizeExceededError) else 400
+                results.append(ADRUploadResult(index, filename, "failed", code, error=str(exc)))
+            except ADRParsingError:
+                results.append(ADRUploadResult(index, filename, "failed", 422,
+                    error="Failed to parse uploaded ADR document. Please verify the document format and content."))
+            except Exception:
+                logger.exception("ADR batch item failed repository=%s index=%s", repository_id, index)
+                results.append(ADRUploadResult(index, filename, "failed", 500,
+                    error="An error occurred while storing or processing the ADR."))
+            finally:
+                try:
+                    await upload.close()
+                except Exception:
+                    logger.warning("Could not close ADR upload repository=%s index=%s", repository_id, index,
+                                   exc_info=True)
+                # Do not retain a previous document's bytes while reading the next.
+                parts = []
+                payload = b""
+        logger.info("ADR batch completed repository=%s total=%s completed=%s", repository_id,
+                    len(results), sum(item.status == "completed" for item in results))
+        return results
 
     def validate_repository_access(self, repository_id: str, user_id: str) -> Any:
         """Verify repository exists and belongs to the authenticated user.
@@ -125,8 +211,6 @@ class ADRService:
         user_id: str,
         filename: str,
         file_bytes: bytes,
-        explicit_title: str | None = None,
-        description: str | None = None,
     ) -> tuple[ADRModel, ADRDocument]:
         """Validate, store, persist, parse, and optionally ingest ADR into Neo4j graph."""
         logger.info(
@@ -171,14 +255,13 @@ class ADRService:
         repo_adr_dir.mkdir(parents=True, exist_ok=True)
         dest_file_path = repo_adr_dir / f"original{ext}"
         mime_type = detect_mime_type(ext)
-        provisional_title = (explicit_title or "").strip() or Path(clean_name).stem
+        provisional_title = Path(clean_name).stem
 
         # 6. Atomically claim or create ADR record (protects against concurrent race condition and enables retry of FAILED uploads)
         adr_record, is_duplicate = self.sqlite_store.claim_or_create_adr(
             repository_id=canonical_repo_id,
             content_hash=content_hash,
             title=provisional_title,
-            description=description,
             source_type="MANUAL_UPLOAD",
             source_name=clean_name,
             file_path=str(dest_file_path.as_posix()),
@@ -233,7 +316,6 @@ class ADRService:
                 repository_id=canonical_repo_id,
                 file_path=str(dest_file_path.as_posix()),
                 content_hash=content_hash,
-                explicit_title=explicit_title,
                 source_type="MANUAL_UPLOAD",
                 mime_type=mime_type,
             )

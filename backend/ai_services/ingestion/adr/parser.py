@@ -261,7 +261,6 @@ def parse_adr_content(
     repository_id: str,
     file_path: str,
     content_hash: str,
-    explicit_title: str | None = None,
     source_type: str = "MANUAL_UPLOAD",
     source_id: str | None = None,
     source_url: str | None = None,
@@ -285,13 +284,10 @@ def parse_adr_content(
         raise ADRParseError(f"Unsupported document format '{file_extension}' for ADR parsing.")
 
     # Title resolution hierarchy:
-    # 1. Explicit user-provided title (if non-empty)
-    # 2. Document heading / title metadata
-    # 3. Cleaned filename fallback
+    # 1. Document heading / title metadata
+    # 2. Cleaned filename fallback
     resolved_title: str
-    if explicit_title and explicit_title.strip():
-        resolved_title = explicit_title.strip()
-    elif extracted_title and extracted_title.strip():
+    if extracted_title and extracted_title.strip():
         resolved_title = extracted_title.strip()
     else:
         resolved_title = clean_title_from_filename(source_name)

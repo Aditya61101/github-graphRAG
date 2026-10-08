@@ -1,7 +1,6 @@
 import json
 from typing import Callable
 from ai_services.models.ingestion_plan import IngestionPlan
-from .plan_validation import validate_ingestion_plan
 
 MODEL = "openai/gpt-oss-120b"
 
@@ -204,6 +203,4 @@ def create_ingestion_plan(
     }
     if on_response:
         on_response(content, metadata)
-    plan = IngestionPlan.model_validate_json(content)
-    validate_ingestion_plan(plan, manifest)
-    return plan
+    return IngestionPlan.model_validate_json(content)

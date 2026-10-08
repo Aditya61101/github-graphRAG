@@ -8,7 +8,6 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
-    Form,
     HTTPException,
     Request,
     UploadFile,
@@ -17,12 +16,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 from ai_services.ingestion.adr.service import (
-    ADRParsingError,
     ADRService,
-    ADRServiceError,
-    DuplicateADRError,
-    FileSizeExceededError,
-    InvalidFileTypeError,
     RepositoryAccessDeniedError as ADRRepoAccessDeniedError,
     RepositoryNotFoundError as ADRRepoNotFoundError,
 )
@@ -45,7 +39,7 @@ from ai_services.graph import (
     RepositoryGraphService,
     RepositoryNotFoundError as GraphRepoNotFoundError,
 )
-from api_services.app.models.adr import ADRResponse
+from api_services.app.models.adr import ADRResponse, ADRBatchUploadResponse, ADRUploadItemResponse
 from api_services.app.models.graph import RepositoryGraphResponse
 from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
@@ -87,11 +81,12 @@ def get_adr_service(request: Request) -> ADRService:
     service = getattr(request.app.state, "adr_service", None)
     if not service:
         store = get_sqlite_store(request)
-        from api_services.app.config import ADRS_STORAGE_DIR, MAX_ADR_FILE_SIZE_BYTES
+        from api_services.app.config import ADRS_STORAGE_DIR, MAX_ADR_FILE_SIZE_BYTES, MAX_ADR_FILES_PER_UPLOAD
         service = ADRService(
             sqlite_store=store,
             storage_dir=ADRS_STORAGE_DIR,
             max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
+            max_files_per_upload=MAX_ADR_FILES_PER_UPLOAD,
         )
         request.app.state.adr_service = service
     return service
@@ -559,79 +554,45 @@ async def sync_repository(
         )
 
 
-@router.post("/{repo_id}/adrs", response_model=ADRResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{repo_id}/adrs",
+    response_model=ADRBatchUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={207: {"model": ADRBatchUploadResponse, "description": "Per-file failures or duplicates"}},
+)
 async def upload_adr(
     repo_id: str,
     request: Request,
-    file: UploadFile = File(..., description="ADR document file (.md, .txt, .pdf, .docx)"),
-    title: str | None = Form(default=None, description="Optional explicit title for the ADR"),
-    description: str | None = Form(default=None, description="Optional brief description"),
+    files: list[UploadFile] = File(..., description="One or more ADR documents (.md, .txt, .pdf, .docx)"),
     current_user: UserModel = Depends(get_current_user),
 ) -> Any:
-    """Upload and process an Architecture Decision Record (ADR) for a repository."""
+    """Upload one or more ADRs through the same `files` multipart field.
+
+    Results preserve input order. Each document is ingested independently;
+    HTTP 207 reports per-file failures/duplicates without hiding successful items.
+    Document titles are inferred from content or filenames, not request metadata.
+    """
     adr_service = get_adr_service(request)
-    max_size = adr_service.max_file_size_bytes
-    filename = file.filename or "uploaded_adr.txt"
-
-    # Read UploadFile in bounded chunks to prevent unbounded memory allocation
-    chunk_size = 64 * 1024  # 64 KB
-    chunks: list[bytes] = []
-    total_bytes = 0
-
-    while True:
-        chunk = await file.read(chunk_size)
-        if not chunk:
-            break
-        total_bytes += len(chunk)
-        if total_bytes > max_size:
-            max_mb = max_size // (1024 * 1024)
-            logger.warning(
-                f"ADR upload rejected: file '{filename}' exceeded size limit ({total_bytes} > {max_size} bytes)"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File size exceeds maximum allowed limit of {max_mb} MB.",
-            )
-        chunks.append(chunk)
-
-    file_bytes = b"".join(chunks)
-
     try:
-        adr_record, _parsed_doc = await adr_service.process_adr_upload(
-            repository_id=repo_id,
-            user_id=current_user.id,
-            filename=filename,
-            file_bytes=file_bytes,
-            explicit_title=title,
-            description=description,
+        items = await adr_service.process_adr_uploads(
+            repository_id=repo_id, user_id=current_user.id, files=files,
         )
-        return ADRResponse(**adr_record.to_dict())
     except ADRRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
     except ADRRepoAccessDeniedError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
-    except InvalidFileTypeError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except FileSizeExceededError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
-    except DuplicateADRError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    except ADRParsingError as exc:
-        # Internal parser/exception details are logged server-side, not exposed to client
-        logger.warning(f"ADR parsing failed for repo '{repo_id}', file '{filename}': {exc}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Failed to parse uploaded ADR document. Please verify the document format and content.",
-        )
-    except ADRServiceError as exc:
-        logger.exception(f"ADR service error for repository '{repo_id}': {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while storing or processing the ADR.",
-        )
-    except Exception as exc:
-        logger.exception(f"Unexpected error uploading ADR for repository '{repo_id}': {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while processing the ADR upload.",
-        )
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result = ADRBatchUploadResponse(
+        repository_id=repo_id, total=len(items),
+        completed=sum(item.status == "completed" for item in items),
+        duplicates=sum(item.status == "duplicate" for item in items),
+        failed=sum(item.status == "failed" for item in items),
+        results=[ADRUploadItemResponse(
+            index=item.index, filename=item.filename, status=item.status,
+            status_code=item.status_code, error=item.error,
+            adr=ADRResponse(**item.adr.to_dict()) if item.adr else None,
+        ) for item in items],
+    )
+    return JSONResponse(status_code=201 if result.completed == result.total else 207,
+                        content=result.model_dump(mode="json"))

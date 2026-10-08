@@ -20,7 +20,7 @@ class ADRDocument(BaseModel):
 
     adr_id: str = Field(description="Unique identifier for the ADR.")
     repository_id: str = Field(description="Canonical repository identity.")
-    title: str = Field(description="Extracted or explicitly provided title of the ADR.")
+    title: str = Field(description="Title inferred from the ADR document or source filename.")
     content: str = Field(description="Full normalized text content of the ADR.")
 
     # Source metadata (agnostic to MANUAL_UPLOAD, CONFLUENCE, etc.)

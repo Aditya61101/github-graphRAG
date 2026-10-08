@@ -20,3 +20,21 @@ class ADRResponse(BaseModel):
     error: str | None = Field(default=None, description="Error message if processing failed.")
     created_at: str | None = Field(default=None, description="ISO timestamp of creation.")
     updated_at: str | None = Field(default=None, description="ISO timestamp of last update.")
+
+
+class ADRUploadItemResponse(BaseModel):
+    index: int
+    filename: str
+    status: str
+    status_code: int
+    adr: ADRResponse | None = None
+    error: str | None = None
+
+
+class ADRBatchUploadResponse(BaseModel):
+    repository_id: str
+    total: int
+    completed: int
+    duplicates: int
+    failed: int
+    results: list[ADRUploadItemResponse]

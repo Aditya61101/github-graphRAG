@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, 
 from fastapi.responses import JSONResponse
 
 from ai_services.ingestion.service import RepositoryIngestionService
-from api_services.app.config import GITHUB_WEBHOOK_SECRET
+from api_services.app.config import GITHUB_APP_WEBHOOK_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,8 @@ async def github_webhook(
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
 ) -> Any:
     """Handle GitHub webhooks (push, pull_request, ping) with fail-closed HMAC verification."""
-    if not GITHUB_WEBHOOK_SECRET:
-        logger.error("GITHUB_WEBHOOK_SECRET is not configured; refusing webhook request.")
+    if not GITHUB_APP_WEBHOOK_SECRET:
+        logger.error("GITHUB_APP_WEBHOOK_SECRET is not configured; refusing webhook request.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Webhook secret is not configured on the server.",
@@ -80,7 +80,7 @@ async def github_webhook(
 
     raw_body = await request.body()
 
-    if not verify_github_signature(raw_body, x_hub_signature_256, GITHUB_WEBHOOK_SECRET):
+    if not verify_github_signature(raw_body, x_hub_signature_256, GITHUB_APP_WEBHOOK_SECRET):
         logger.warning("Rejected webhook request: invalid or missing X-Hub-Signature-256")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
