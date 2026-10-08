@@ -6,17 +6,17 @@ import {
   MailIcon,
   Settings2Icon,
   ShieldCheckIcon,
-  UserCircle2Icon,
 } from "lucide-react";
 
 import { AppHeader } from "@/components/core/app-header";
+import { GithubIcon } from "@/components/icons";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
-import { GithubIcon } from "@/components/icons";
+import { useAuth } from "@/contexts/auth-context";
 
-const settingsNavigation = [
+const SETTINGS_NAVIGATION = [
   {
     id: "general",
     label: "General",
@@ -29,7 +29,7 @@ const settingsNavigation = [
   },
 ] as const;
 
-const connectedApps = [
+const CONNECTED_APPS = [
   {
     name: "Confluence",
     description:
@@ -50,9 +50,20 @@ const connectedApps = [
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] =
-    useState<(typeof settingsNavigation)[number]["id"]>("general");
+    useState<(typeof SETTINGS_NAVIGATION)[number]["id"]>("general");
 
-  const headerCrumbs = [{ label: "Settings", pathname: "/settings" }];
+  const { user } = useAuth();
+
+  const headerCrumbs = [
+    { label: "Settings", pathname: "/settings" },
+    {
+      label: SETTINGS_NAVIGATION.find((s) => s.id === activeTab)!.label,
+      pathname: "/settings",
+    },
+  ];
+
+  const displayName = user?.username ?? "User";
+  const email = user?.email ?? "user@example.com";
 
   return (
     <>
@@ -69,7 +80,7 @@ export default function SettingsPage() {
 
         <section className="grid gap-6 lg:grid-cols-[220px_1fr]">
           <aside className="space-y-2">
-            {settingsNavigation.map((item) => {
+            {SETTINGS_NAVIGATION.map((item) => {
               const Icon = item.icon;
 
               return (
@@ -103,14 +114,19 @@ export default function SettingsPage() {
 
                 <div className="space-y-6 p-6">
                   <div className="flex items-center gap-4 rounded-xl border p-4">
-                    <div className="flex size-16 items-center justify-center rounded-full bg-primary/10 text-primary">
-                      <UserCircle2Icon className="size-9" />
-                    </div>
+                    <Avatar className="size-16 rounded-full border">
+                      <AvatarImage src={user?.avatarUrl} alt={displayName} />
+
+                      <AvatarFallback className="rounded-full bg-primary/10 text-primary">
+                        {displayName.charAt(0).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
 
                     <div>
-                      <h3 className="text-lg font-semibold">Samrat Roy</h3>
+                      <h3 className="text-lg font-semibold">{displayName}</h3>
+
                       <p className="text-sm text-muted-foreground">
-                        AI Engineer • GraphRAG Workspace Owner
+                        Authenticated GitHub account
                       </p>
                     </div>
                   </div>
@@ -118,12 +134,12 @@ export default function SettingsPage() {
                   <div className="grid gap-5 lg:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="full-name">Full name</Label>
-                      <Input id="full-name" value="Samrat Roy" readOnly />
+                      <Input id="full-name" value={displayName} readOnly />
                     </div>
 
                     <div className="space-y-2">
                       <Label htmlFor="display-name">Display name</Label>
-                      <Input id="display-name" value="Samrat" readOnly />
+                      <Input id="display-name" value={displayName} readOnly />
                     </div>
                   </div>
 
@@ -136,7 +152,7 @@ export default function SettingsPage() {
 
                         <Input
                           id="email"
-                          value="samrat@graphrag.dev"
+                          value={email}
                           className="pl-9"
                           readOnly
                         />
@@ -199,7 +215,7 @@ export default function SettingsPage() {
                     </div>
 
                     <div className="space-y-4">
-                      {connectedApps.map((app) => {
+                      {CONNECTED_APPS.map((app) => {
                         const Icon = app.icon;
 
                         return (
@@ -249,7 +265,9 @@ export default function SettingsPage() {
                         </div>
 
                         <div>
-                          <h4 className="font-medium">GitHub</h4>
+                          <h4 className="font-medium">
+                            GitHub ({displayName})
+                          </h4>
                           <p className="text-sm text-muted-foreground">
                             Connected through GitHub OAuth for repositories,
                             commits, PRs, and GraphRAG ingestion workflows.
