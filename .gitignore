@@ -19,3 +19,4 @@ backend/data/
 .state/
 
 *.zip
+backend/secrets/

@@ -20,6 +20,7 @@ from api_services.app.config import (
     ADRS_STORAGE_DIR,
     FRONTEND_URL,
     MAX_ADR_FILE_SIZE_BYTES,
+    MAX_ADR_FILES_PER_UPLOAD,
     REPOS_STORAGE_DIR,
     RETRIEVAL_SETTINGS,
 )
@@ -152,6 +153,7 @@ async def lifespan(app: FastAPI):
         sqlite_store=sqlite_store,
         storage_dir=ADRS_STORAGE_DIR,
         max_file_size_bytes=MAX_ADR_FILE_SIZE_BYTES,
+        max_files_per_upload=MAX_ADR_FILES_PER_UPLOAD,
         processor=adr_processor,
     )
 

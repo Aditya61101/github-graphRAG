@@ -59,10 +59,21 @@ def planner_client(output):
     (['a.py'], 'missing'), (['a.py', 'b.py', 'a.py'], 'duplicates'),
     (['a.py', 'b.py', 'unknown.py'], 'unknown'),
 ])
-def test_planner_requires_exact_manifest_coverage(paths, field):
+def test_coverage_validator_requires_exact_manifest_coverage(paths, field):
     with pytest.raises(PlannerCoverageError) as error:
-        create_ingestion_plan(planner_client(plan(paths).model_dump(mode='json')), 'unchanged', manifest(['a.py', 'b.py']))
+        validate_ingestion_plan(plan(paths), manifest(['a.py', 'b.py']))
     assert error.value.details[field]
+
+
+def test_planner_leaves_coverage_validation_to_caller():
+    result = create_ingestion_plan(
+        planner_client(plan(['a.py']).model_dump(mode='json')),
+        'unchanged', manifest(['a.py', 'b.py']),
+    )
+    assert [file.path for file in result.files] == ['a.py']
+    with pytest.raises(PlannerCoverageError) as error:
+        validate_ingestion_plan(result, manifest(['a.py', 'b.py']))
+    assert error.value.details['missing'] == ['b.py']
 
 
 @pytest.mark.parametrize('path', [

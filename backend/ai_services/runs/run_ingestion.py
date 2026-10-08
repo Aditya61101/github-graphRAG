@@ -1,3 +1,4 @@
+import json
 import os
 from dotenv import load_dotenv
 from groq import Groq
@@ -6,6 +7,7 @@ load_dotenv()
 from backend.ai_services.ingestion.discovery.read_write_plan import save_manifest, save_plan
 
 from backend.ai_services.ingestion.discovery.planner import create_ingestion_plan
+from backend.ai_services.ingestion.discovery.plan_validation import validate_ingestion_plan
 from backend.ai_services.ingestion.discovery.repo import Repository
 from backend.ai_services.ingestion.discovery.git_tree import get_head_commit, get_repository_files
 from backend.ai_services.ingestion.discovery.repo_manifest import build_repository_manifest
@@ -46,6 +48,7 @@ async def main():
         architectural_objective=architectural_objective,
         manifest=manifest,
     )
+    validate_ingestion_plan(plan, json.loads(manifest))
     save_plan(plan)
     
 if __name__ == "__main__":
