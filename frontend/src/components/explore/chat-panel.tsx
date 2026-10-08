@@ -1,18 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ArrowUpIcon, PlusIcon, SparklesIcon } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { ArrowUpIcon, SparklesIcon } from "lucide-react";
 
+import { exploreService } from "@/api/explore-service";
 import { Button } from "@/components/ui/button";
-
-type Message = {
-  id: number;
-  role: "user" | "assistant";
-  content: string;
-};
+import type { ExploreChatMessage } from "@/types/explore";
+import { cn } from "cn";
 
 export function ChatPanel() {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ExploreChatMessage[]>([]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -28,6 +26,13 @@ export function ChatPanel() {
     });
   }, [messages]);
 
+  const sendMessageMutation = useMutation({
+    mutationFn: exploreService.sendMessage,
+    onSuccess: (response) => {
+      setMessages((current) => [...current, response]);
+    },
+  });
+
   const sendMessage = () => {
     const value = input.trim();
 
@@ -35,7 +40,7 @@ export function ChatPanel() {
       return;
     }
 
-    const userMessage: Message = {
+    const userMessage: ExploreChatMessage = {
       id: Date.now(),
       role: "user",
       content: value,
@@ -48,21 +53,14 @@ export function ChatPanel() {
       textareaRef.current?.focus();
     });
 
-    window.setTimeout(() => {
-      const agentMessage: Message = {
-        id: Date.now() + 1,
-        role: "assistant",
-        content:
-          "I can help analyse repositories, explain architecture, and explore GraphRAG relationships. Backend integration can be connected next.",
-      };
-
-      setMessages((current) => [...current, agentMessage]);
-    }, 700);
+    sendMessageMutation.mutate({
+      message: value,
+    });
   };
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-2xl backdrop-blur-xl">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(61,189,162,0.12),transparent_28%),radial-gradient(circle_at_bottom_right,rgba(59,130,246,0.1),transparent_22%)] opacity-80 dark:opacity-70" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(61,189,162,0.12),transparent_28%),radial-gradient(circle_at_bottom_right,rgba(59,130,246,0.1),transparent_22%)]" />
 
       <div className="relative flex h-full min-h-0 flex-1 flex-col gap-2">
         <div className="scrollbar-macos flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
@@ -86,7 +84,7 @@ export function ChatPanel() {
           ) : (
             <div
               ref={scrollRef}
-              className="scrollbar-macos flex h-128 flex-col gap-3 overflow-y-auto px-4 py-2"
+              className="scrollbar-macos flex h-130 flex-col gap-3 overflow-y-auto px-4 py-2"
             >
               {messages.map((message) => (
                 <div
@@ -94,22 +92,32 @@ export function ChatPanel() {
                   className={message.role === "user" ? "ml-auto" : "mr-auto"}
                 >
                   <div
-                    className={
+                    className={cn(
+                      "max-w-2xl rounded-2xl px-4 py-2 text-xs wrap-break-word",
                       message.role === "user"
-                        ? "max-w-2xl rounded-2xl rounded-br-md bg-primary px-4 py-3 text-sm wrap-break-word text-primary-foreground shadow-lg"
-                        : "max-w-2xl rounded-2xl rounded-bl-md border border-border/60 bg-transparent px-4 py-3 text-sm wrap-break-word text-foreground"
-                    }
+                        ? "ml-12 rounded-br-md bg-primary wrap-break-word text-primary-foreground shadow-lg"
+                        : "rounded-bl-md border border-border/60 bg-transparent text-foreground"
+                    )}
                   >
                     {message.content}
                   </div>
                 </div>
               ))}
+
+              {sendMessageMutation.isPending ? (
+                <div className="mr-auto">
+                  <div className="flex items-center gap-2 bg-transparent px-4 py-2 text-xs text-muted-foreground">
+                    <span className="size-2 animate-pulse rounded-full bg-yellow-500" />
+                    Thinking...
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
         </div>
 
-        <div className="mx-auto w-full max-w-4xl border-border/60 p-2">
-          <div className="rounded-lg border border-border/70 bg-background/80 p-4 shadow-2xl transition-all duration-300">
+        <div className="absolute bottom-0 mx-auto w-full max-w-4xl p-2">
+          <div className="rounded-lg border border-border bg-background/80 p-4 shadow-2xl transition-all duration-300">
             <textarea
               ref={textareaRef}
               value={input}
@@ -124,12 +132,12 @@ export function ChatPanel() {
               placeholder="Help me understand the repository structure."
             />
 
-            <div className="flex items-center justify-between gap-3">
-              <Button variant="ghost" size="icon">
-                <PlusIcon className="size-4" />
-              </Button>
-
-              <Button size="icon" onClick={sendMessage}>
+            <div className="flex items-center justify-end gap-3">
+              <Button
+                size="icon"
+                onClick={sendMessage}
+                disabled={sendMessageMutation.isPending}
+              >
                 <ArrowUpIcon className="size-4" />
               </Button>
             </div>

@@ -1,4 +1,4 @@
-import { BookOpen, GitForkIcon } from "lucide-react";
+import { BookOpen, GitForkIcon, Settings } from "lucide-react";
 
 export const NAV_DATA = {
   header: {
@@ -11,7 +11,11 @@ export const NAV_DATA = {
       title: "Projects",
       url: "/projects",
       icon: BookOpen,
-      isActive: true,
+    },
+    {
+      title: "Settings",
+      url: "/settings",
+      icon: Settings,
     },
   ],
 };
