@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from ai_services.ingestion.run_audit import IngestionStageCounts
 
 
 class IngestRepositoryRequest(BaseModel):
@@ -92,3 +93,5 @@ class IngestionJobResponse(BaseModel):
     added_or_modified_count: int = 0
     deleted_count: int = 0
     message: str = ""
+    run_id: str | None = None
+    stage_counts: IngestionStageCounts | None = None

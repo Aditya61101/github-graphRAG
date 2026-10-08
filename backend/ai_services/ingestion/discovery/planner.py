@@ -1,5 +1,7 @@
 import json
+from typing import Callable
 from ai_services.models.ingestion_plan import IngestionPlan
+from .plan_validation import validate_ingestion_plan
 
 MODEL = "openai/gpt-oss-120b"
 
@@ -154,8 +156,12 @@ def create_ingestion_plan(
     client,
     architectural_objective: str,
     manifest: dict,
+    *,
+    on_response: Callable[[str | None, dict], None] | None = None,
 ) -> IngestionPlan:
-
+    # Older direct runners supply serialized JSON; validate the same manifest.
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
     prompt = build_planner_prompt(
         architectural_objective=architectural_objective,
         manifest=manifest,
@@ -183,7 +189,21 @@ def create_ingestion_plan(
         temperature=0,
     )
 
-    plan = IngestionPlan.model_validate_json(
-        response.choices[0].message.content
-    )
+    choice = response.choices[0]
+    content = choice.message.content
+    usage = getattr(response, "usage", None)
+    metadata = {
+        "requested_model": MODEL,
+        "response_model": getattr(response, "model", None),
+        "response_id": getattr(response, "id", None),
+        "finish_reason": getattr(choice, "finish_reason", None),
+        "usage": {
+            key: getattr(usage, key, None)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        },
+    }
+    if on_response:
+        on_response(content, metadata)
+    plan = IngestionPlan.model_validate_json(content)
+    validate_ingestion_plan(plan, manifest)
     return plan

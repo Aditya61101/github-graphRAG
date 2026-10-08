@@ -202,6 +202,8 @@ async def ingest_repository(
             added_or_modified_count=result.added_or_modified_count,
             deleted_count=result.deleted_count,
             message=result.message,
+            run_id=result.run_id,
+            stage_counts=result.stage_counts,
         )
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
@@ -538,6 +540,8 @@ async def sync_repository(
             added_or_modified_count=result.added_or_modified_count,
             deleted_count=result.deleted_count,
             message=result.message,
+            run_id=result.run_id,
+            stage_counts=result.stage_counts,
         )
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))

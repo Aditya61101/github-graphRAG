@@ -12,15 +12,22 @@ from neo4j import Driver
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
 from ai_services.ingestion.community import CommunityConfig, build_community_pipeline
 from ai_services.ingestion.discovery.git_tree import get_repository_files
-from ai_services.ingestion.discovery.planner import create_ingestion_plan
+from ai_services.ingestion.discovery.planner import MODEL as PLANNER_MODEL, create_ingestion_plan
+from ai_services.ingestion.discovery.plan_validation import (
+    PlannerCoverageError, resolve_planned_file, validate_ingestion_plan,
+)
+from ai_services.ingestion.discovery.git_tree import GitFile
 from ai_services.ingestion.discovery.repo_manifest import build_repository_manifest
+from ai_services.ingestion.run_audit import (
+    IngestionRunAudit, IngestionStageCounts, measure_persisted_counts,
+)
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
 from ai_services.ingestion.rkg.builders.repo_ingestion_pipeline import (
     build_repository_ingestion_pipeline,
 )
 from ai_services.ingestion.rkg.incremental import ChangeKind
 from ai_services.ingestion.sources.classifier import classify_file_for_ingestion
-from ai_services.ingestion.sources.credentials import GitHubCredential
+from ai_services.ingestion.sources.credentials import GitHubCredential, sanitize_sensitive_text
 from ai_services.ingestion.sources.interface import (
     RepositoryMetadata,
     RepositoryRef,
@@ -43,6 +50,8 @@ class IngestionResult:
     added_or_modified_count: int = 0
     deleted_count: int = 0
     message: str = ""
+    run_id: str | None = None
+    stage_counts: IngestionStageCounts | None = None
 
 
 class RepositoryIngestionService:
@@ -163,7 +172,12 @@ class RepositoryIngestionService:
             is_incremental=False,
         )
 
+        audit = None
         try:
+            audit = IngestionRunAudit(
+                self.state_dir, repo_id, run.id, mode="full",
+                commit=snapshot.commit_sha, branch=snapshot.branch, status="running",
+            )
             # 1. Discovery and Manifest
             files = get_repository_files(snapshot.root)
             manifest = build_repository_manifest(
@@ -171,6 +185,9 @@ class RepositoryIngestionService:
                 commit=snapshot.commit_sha,
                 files=files,
             )
+            audit.write("manifest.json", manifest.to_dict())
+            audit.counts.discovered = len(files)
+            audit.save_counts()
 
             # 2. Planning (use Groq planner if client available, otherwise fallback to classifier)
             architectural_objective = (
@@ -178,18 +195,42 @@ class RepositoryIngestionService:
                 "Prioritize production components, services, APIs, databases, "
                 "events, contracts, and configuration."
             )
+            planner_metadata = {
+                "source": "groq" if self.groq_client else "classifier",
+                "objective": architectural_objective, "scope": "complete_manifest",
+                "requested_model": PLANNER_MODEL if self.groq_client else None,
+            }
+            def record_response(content, metadata):
+                audit.record_planner_response(content, metadata)
+                planner_metadata.update(metadata)
+
             if self.groq_client:
                 try:
-                    plan = create_ingestion_plan(
+                    plan = await asyncio.to_thread(
+                        create_ingestion_plan,
                         client=self.groq_client,
                         architectural_objective=architectural_objective,
                         manifest=manifest.to_dict(),
+                        on_response=record_response,
                     )
+                    validate_ingestion_plan(plan, manifest.to_dict())
                 except Exception as exc:
-                    logger.warning(f"Groq planner failed ({exc}); falling back to deterministic classifier.")
+                    error = sanitize_sensitive_text(str(exc))
+                    if isinstance(exc, PlannerCoverageError):
+                        logger.warning(
+                            "Groq planner coverage invalid counts=%s; falling back to deterministic classifier.",
+                            {key: len(value) for key, value in exc.details.items()},
+                        )
+                    else:
+                        logger.warning("Groq planner failed (%s); falling back to deterministic classifier.", error)
+                    planner_metadata.update(source="classifier_fallback", fallback_reason=error)
+                    if isinstance(exc, PlannerCoverageError):
+                        planner_metadata["coverage_errors"] = exc.details
                     plan = IngestionPlan(files=[classify_file_for_ingestion(f.path) for f in files])
             else:
                 plan = IngestionPlan(files=[classify_file_for_ingestion(f.path) for f in files])
+            validate_ingestion_plan(plan, manifest.to_dict())
+            audit.record_plan(manifest, plan, planner_metadata)
 
             # 3. RKG Ingestion Pipeline scoped to repo_id
             candidates_path = self.state_dir / f"candidates_{ref.owner}_{ref.name}.jsonl"
@@ -202,11 +243,20 @@ class RepositoryIngestionService:
                 candidates_path=candidates_path,
                 full_name=metadata.full_name,
                 owner=metadata.owner,
+                progress_callback=audit.record_result,
             )
-            await pipeline.ingest(plan.files)
+            result = await pipeline.ingest(plan.files)
+            audit.record_result(result)
+            audit.counts.persisted = await asyncio.to_thread(
+                measure_persisted_counts, self.neo4j_driver, self.database, repo_id, result,
+            )
+            audit.save_counts()
 
             # 4. Community Layer scoped to repo_id
-            await self._run_community_pipeline(repository_id=repo_id)
+            community_result = await self._run_community_pipeline(repository_id=repo_id)
+            audit.counts.communities = community_result.community_count if community_result else None
+            audit.finish("completed")
+            logger.info("RKG stage counts repository=%s run=%s counts=%s", repo_id, run.id, audit.counts.to_dict())
 
             # 5. Record Success in SQLite
             self.metadata_store.record_ingestion_success(
@@ -222,11 +272,21 @@ class RepositoryIngestionService:
                 status="completed",
                 indexed_commit_sha=snapshot.commit_sha,
                 is_incremental=False,
-                added_or_modified_count=len(files),
-                message=f"Full ingestion indexed {len(files)} files at commit {snapshot.commit_sha}",
+                added_or_modified_count=audit.counts.chunked,
+                run_id=run.id,
+                stage_counts=audit.counts,
+                message=(
+                    f"Full ingestion produced {audit.counts.chunks} chunks from "
+                    f"{audit.counts.chunked}/{audit.counts.included} included files "
+                    f"({audit.counts.discovered} discovered, {audit.counts.excluded} excluded); "
+                    f"persisted {audit.counts.persisted.entities} entities and "
+                    f"{audit.counts.persisted.relationships} relationships at commit {snapshot.commit_sha}"
+                ),
             )
 
         except Exception as exc:
+            if audit:
+                audit.finish("failed", error=sanitize_sensitive_text(str(exc)))
             logger.exception(f"FULL ingestion failed for {ref.full_name}: {exc}")
             self.metadata_store.record_ingestion_failure(repo_id, run.id, str(exc))
             raise
@@ -261,7 +321,17 @@ class RepositoryIngestionService:
             is_incremental=True,
         )
 
+        audit = None
         try:
+            audit = IngestionRunAudit(
+                self.state_dir, repo_id, run.id, mode="incremental", status="running",
+                commit=snapshot.commit_sha, branch=snapshot.branch, base_commit=indexed_sha,
+            )
+            files = get_repository_files(snapshot.root)
+            manifest = build_repository_manifest(ref.name, snapshot.commit_sha, files)
+            audit.write("manifest.json", manifest.to_dict())
+            audit.counts.discovered = len(files)
+            audit.save_counts()
             # 1. Compute git diff between previous indexed commit and new commit
             changes = self.repository_source.compute_diff(
                 snapshot=snapshot,
@@ -279,7 +349,21 @@ class RepositoryIngestionService:
                 f"{len(added_or_modified_paths)} added/modified, {len(deleted_paths)} deleted."
             )
 
+            # Incremental planning intentionally covers the changed-file manifest,
+            # not unchanged snapshot files. Preserve the complete manifest as well.
+            changed_files = []
+            for path in added_or_modified_paths:
+                resolved = resolve_planned_file(snapshot.root, path)
+                changed_files.append(GitFile(path, "100644", "blob", "", resolved.stat().st_size))
+            planning_manifest = build_repository_manifest(ref.name, snapshot.commit_sha, changed_files)
+            plan = IngestionPlan(files=[classify_file_for_ingestion(p) for p in added_or_modified_paths])
+            validate_ingestion_plan(plan, planning_manifest.to_dict())
+            audit.record_plan(planning_manifest, plan, {
+                "source": "classifier", "scope": "changed_files", "deleted_paths": deleted_paths,
+            })
+
             if not deleted_paths and not added_or_modified_paths:
+                audit.finish("completed")
                 self.metadata_store.record_ingestion_success(
                     repository_id=repo_id,
                     run_id=run.id,
@@ -291,11 +375,13 @@ class RepositoryIngestionService:
                     status="completed",
                     indexed_commit_sha=snapshot.commit_sha,
                     is_incremental=True,
+                    run_id=run.id,
+                    stage_counts=audit.counts,
                     message="No file changes between commits.",
                 )
 
             # 2. Plan chunking strategies for added and modified files
-            file_plans = [classify_file_for_ingestion(p) for p in added_or_modified_paths]
+            file_plans = plan.files
 
             # 3. Incremental RKG update scoped to repo_id
             candidates_path = self.state_dir / f"candidates_{ref.owner}_{ref.name}.jsonl"
@@ -308,14 +394,23 @@ class RepositoryIngestionService:
                 candidates_path=candidates_path,
                 full_name=metadata.full_name,
                 owner=metadata.owner,
+                progress_callback=audit.record_result,
             )
-            await pipeline.ingest_incremental(
+            result = await pipeline.ingest_incremental(
                 added_or_modified_plans=file_plans,
                 deleted_paths=deleted_paths,
             )
+            audit.record_result(result)
+            audit.counts.persisted = await asyncio.to_thread(
+                measure_persisted_counts, self.neo4j_driver, self.database, repo_id, result,
+            )
+            audit.save_counts()
 
             # 4. Community Layer scoped to repo_id
-            await self._run_community_pipeline(repository_id=repo_id)
+            community_result = await self._run_community_pipeline(repository_id=repo_id)
+            audit.counts.communities = community_result.community_count if community_result else None
+            audit.finish("completed")
+            logger.info("RKG stage counts repository=%s run=%s counts=%s", repo_id, run.id, audit.counts.to_dict())
 
             # 5. Record Success in SQLite
             self.metadata_store.record_ingestion_success(
@@ -335,18 +430,23 @@ class RepositoryIngestionService:
                 is_incremental=True,
                 added_or_modified_count=len(added_or_modified_paths),
                 deleted_count=len(deleted_paths),
+                run_id=run.id,
+                stage_counts=audit.counts,
                 message=(
-                    f"Incrementally updated {len(added_or_modified_paths)} files, "
+                    f"Incremental ingestion produced {audit.counts.chunks} chunks from "
+                    f"{audit.counts.chunked}/{audit.counts.included} included changed files, "
                     f"deleted {len(deleted_paths)} files from {indexed_sha[:8]} to {snapshot.commit_sha[:8]}."
                 ),
             )
 
         except Exception as exc:
+            if audit:
+                audit.finish("failed", error=sanitize_sensitive_text(str(exc)))
             logger.exception(f"INCREMENTAL ingestion failed for {ref.full_name}: {exc}")
             self.metadata_store.record_ingestion_failure(repo_id, run.id, str(exc))
             raise
 
-    async def _run_community_pipeline(self, repository_id: str) -> None:
+    async def _run_community_pipeline(self, repository_id: str):
         """Run community detection and summarization scoped strictly to the specified repository."""
         if not self.llm or not self.embedder:
             logger.info("Skipping community detection: LLM or Embedder not configured.")
@@ -366,7 +466,7 @@ class RepositoryIngestionService:
                 embedder=self.embedder,
                 config=config,
             )
-            await community_pipeline.run(force_refresh=False)
+            return await community_pipeline.run(force_refresh=False)
         except Exception as exc:
             logger.warning(f"Community pipeline error for repo {repository_id}: {exc}")
 

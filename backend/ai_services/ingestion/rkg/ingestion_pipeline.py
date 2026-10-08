@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from collections import Counter
 
 from ai_services.models.ingestion_plan import FilePlan, IngestionAction
+from ai_services.ingestion.discovery.plan_validation import resolve_planned_file
 from .cross_chunk import CrossChunkReasoner
 from .models import ChunkStrategy, EvidenceChunk
 from .neo4j_writer import Neo4jRepositoryWriter
@@ -38,6 +40,7 @@ class RepositoryIngestionPipeline:
         graph_neighborhood_loader,
         full_name: str | None = None,
         owner: str | None = None,
+        progress_callback: Callable[[RepositoryIngestionResult], None] | None = None,
     ):
         self.repository_root = repository_root
         self.repository_id = repository_id
@@ -51,17 +54,28 @@ class RepositoryIngestionPipeline:
         self.neo4j_writer = neo4j_writer
         self.language_detector = language_detector
         self.graph_neighborhood_loader = graph_neighborhood_loader
+        self.progress_callback = progress_callback
+
+    def _record_progress(self, result: RepositoryIngestionResult) -> None:
+        if self.progress_callback:
+            self.progress_callback(result)
 
     async def ingest(self, file_plans) -> RepositoryIngestionResult:
         chunks = self._create_chunks(file_plans)
+        progress = RepositoryIngestionResult(chunks, [], None, [], [])
+        self._record_progress(progress)
         if not chunks:
-            return RepositoryIngestionResult([], [], None, [], [])
+            return progress
 
         result = await self.knowledge_pipeline.process_chunks(chunks)
         processed_chunks = result["chunks"]
         candidate_knowledge = result["candidate_knowledge"]
         entities = result["entities"]
         relationship_candidates = result["relationship_candidates"]
+        progress = RepositoryIngestionResult(
+            processed_chunks, candidate_knowledge, entities, relationship_candidates, [],
+        )
+        self._record_progress(progress)
 
         self.neo4j_writer.initialize_constraints(
             embedding_dimensions=self.knowledge_pipeline.embedding_dimensions,
@@ -87,19 +101,15 @@ class RepositoryIngestionPipeline:
             chunks_by_id=chunks_by_id,
             graph_neighborhood_loader=self.graph_neighborhood_loader,
         )
+        progress.validated_relationships = validated_relationships
+        self._record_progress(progress)
 
         self.neo4j_writer.write_relationships(
             validated_relationships,
             repository=self.repository_id,
         )
 
-        return RepositoryIngestionResult(
-            chunks=processed_chunks,
-            candidate_knowledge=candidate_knowledge,
-            entities=entities,
-            relationship_candidates=relationship_candidates,
-            validated_relationships=validated_relationships,
-        )
+        return progress
 
     async def ingest_incremental(
         self,
@@ -107,6 +117,8 @@ class RepositoryIngestionPipeline:
         deleted_paths: list[str],
     ) -> RepositoryIngestionResult:
         """Incrementally update the repository graph for changed and deleted files."""
+        # Validate every replacement before destructive cleanup starts.
+        self._validate_planned_files(added_or_modified_plans)
         # 1. Clean up deleted files from Neo4j
         if deleted_paths:
             self.neo4j_writer.delete_files(self.repository_id, deleted_paths)
@@ -124,15 +136,15 @@ class RepositoryIngestionPipeline:
         return await self.ingest(added_or_modified_plans)
 
     def _create_chunks(self, file_plans: list[FilePlan]) -> list[EvidenceChunk]:
+        file_plans = list(file_plans)
+        resolved_files = self._validate_planned_files(file_plans)
         chunks: list[EvidenceChunk] = []
 
         for file_plan in file_plans:
             if file_plan.action == IngestionAction.EXCLUDE:
                 continue
 
-            file_path = self.repository_root / file_plan.path
-            if not file_path.is_file():
-                continue
+            file_path = resolved_files[file_plan.path]
 
             text = file_path.read_text(encoding="utf-8", errors="replace")
             strategy = ChunkStrategy(file_plan.chunk_strategy)
@@ -153,3 +165,9 @@ class RepositoryIngestionPipeline:
             )
 
         return chunks
+
+    def _validate_planned_files(self, file_plans: list[FilePlan]) -> dict[str, Path]:
+        duplicates = [path for path, count in Counter(p.path for p in file_plans).items() if count > 1]
+        if duplicates:
+            raise ValueError(f"Duplicate planned file paths: {sorted(duplicates)}")
+        return {p.path: resolve_planned_file(self.repository_root, p.path) for p in file_plans}

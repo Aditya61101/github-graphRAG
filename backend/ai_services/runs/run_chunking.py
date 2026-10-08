@@ -30,6 +30,7 @@ async def main():
     
     pipeline = build_repository_ingestion_pipeline(
         repository_root=repo.root,
+        repository_id=repo.name,
         repository_name=repo.name,
         commit=get_head_commit(repo.root),
         neo4j_driver=neo4j_driver,

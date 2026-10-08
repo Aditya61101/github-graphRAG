@@ -22,6 +22,7 @@ def build_repository_ingestion_pipeline(
     full_name: str | None = None,
     owner: str | None = None,
     examples: str = "",
+    progress_callback=None,
 ):
     database = os.environ.get("NEO4J_DATABASE", "neo4j")
 
@@ -72,4 +73,5 @@ def build_repository_ingestion_pipeline(
         language_detector=LanguageDetectorImpl(),
         full_name=full_name,
         owner=owner,
+        progress_callback=progress_callback,
     )
