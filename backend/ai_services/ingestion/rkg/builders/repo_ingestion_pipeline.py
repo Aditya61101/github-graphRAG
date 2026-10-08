@@ -23,6 +23,7 @@ def build_repository_ingestion_pipeline(
     owner: str | None = None,
     examples: str = "",
     progress_callback=None,
+    publication_guard=None,
 ):
     database = os.environ.get("NEO4J_DATABASE", "neo4j")
 
@@ -74,4 +75,5 @@ def build_repository_ingestion_pipeline(
         full_name=full_name,
         owner=owner,
         progress_callback=progress_callback,
+        publication_guard=publication_guard,
     )

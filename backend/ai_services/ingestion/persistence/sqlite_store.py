@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 from typing import Any
+import os
+from cryptography.fernet import Fernet
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload, sessionmaker
@@ -33,8 +35,28 @@ class SqliteApplicationStore:
     """
 
     def __init__(self, session_factory: sessionmaker[Session] | None = None) -> None:
-        init_db()
+        if session_factory is None:
+            init_db()
         self.session_factory = session_factory or get_session_factory()
+        key = os.getenv('GITHUB_TOKEN_ENCRYPTION_KEY')
+        self.token_cipher = Fernet(key.encode()) if key else None
+
+    def encrypt_token(self, token: str) -> str:
+        if not self.token_cipher:
+            raise RuntimeError('GITHUB_TOKEN_ENCRYPTION_KEY is required to persist GitHub credentials')
+        return 'enc:v1:' + self.token_cipher.encrypt(token.encode()).decode()
+
+    def decrypt_token(self, token: str) -> str:
+        if not self.token_cipher or not token.startswith('enc:v1:'):
+            raise RuntimeError('Encrypted GitHub credential unavailable; reconnect required')
+        return self.token_cipher.decrypt(token.removeprefix('enc:v1:').encode()).decode()
+
+    def _connection_credential(self, connection):
+        if (connection and connection.credential_kind == 'github_app' and connection.access_status == 'ACTIVE'
+                and connection.access_token_expires_at
+                and connection.access_token_expires_at.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)):
+            return GitHubCredential(self.decrypt_token(connection.access_token), connection.token_type)
+        return None
 
     def upsert_github_login(
         self,
@@ -45,6 +67,7 @@ class SqliteApplicationStore:
         access_token: str = "",
         token_type: str = "Bearer",
         scope: str | None = None,
+        expires_at: datetime | None = None,
     ) -> tuple[UserModel, GitHubConnectionModel]:
         """Upsert application user and GitHub connection from GitHub OAuth callback.
 
@@ -53,12 +76,19 @@ class SqliteApplicationStore:
         - Repeated logins by the same GitHub account do NOT create duplicate User rows.
         """
         import uuid
+        if not str(github_user_id).isdigit():
+            raise ValueError('GitHub identity must be numeric')
+        encrypted_token = self.encrypt_token(access_token)
 
         with self.session_factory() as session:
             stmt = select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_user_id)
             )
             conn = session.scalars(stmt).first()
+            collision = session.scalars(select(UserModel).where(UserModel.username == username)).first()
+            if collision and (not conn or collision.id != conn.user_id):
+                # A renamed GitHub login is not proof of account identity.
+                username = f'{username}#{github_user_id}'
 
             if conn:
                 user = session.get(UserModel, conn.user_id)
@@ -76,36 +106,28 @@ class SqliteApplicationStore:
                     user.avatar_url = avatar_url or user.avatar_url
                     user.updated_at = utc_now()
 
-                conn.access_token = access_token
+                conn.access_token = encrypted_token
                 conn.token_type = token_type
                 conn.scope = scope
                 conn.updated_at = utc_now()
             else:
-                user_stmt = select(UserModel).where(UserModel.username == username)
-                user = session.scalars(user_stmt).first()
-                if not user:
-                    user = UserModel(
-                        id=f"usr_{uuid.uuid4().hex[:12]}",
-                        username=username,
-                        email=email,
-                        avatar_url=avatar_url,
-                    )
-                    session.add(user)
-                    session.flush()
-                else:
-                    user.email = email or user.email
-                    user.avatar_url = avatar_url or user.avatar_url
-                    user.updated_at = utc_now()
+                user = UserModel(id=f"usr_{uuid.uuid4().hex[:12]}", username=username,
+                                 email=email, avatar_url=avatar_url)
+                session.add(user)
+                session.flush()
 
                 conn = GitHubConnectionModel(
                     user_id=user.id,
                     github_user_id=str(github_user_id),
-                    access_token=access_token,
+                    access_token=encrypted_token,
                     token_type=token_type,
                     scope=scope,
                 )
                 session.add(conn)
 
+            conn.credential_kind = 'github_app'
+            conn.access_status = 'ACTIVE'
+            conn.access_token_expires_at = expires_at
             session.commit()
             session.refresh(user)
             session.refresh(conn)
@@ -129,9 +151,7 @@ class SqliteApplicationStore:
     def get_credential_for_user(self, user_id: str) -> GitHubCredential | None:
         """Resolve a GitHubCredential for the specified application user."""
         conn = self.get_user_github_connection(user_id)
-        if conn and conn.access_token:
-            return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
-        return None
+        return self._connection_credential(conn)
 
     def upsert_user(
         self,
@@ -181,7 +201,7 @@ class SqliteApplicationStore:
             conn = session.scalars(stmt).first()
 
             if conn:
-                conn.access_token = access_token
+                conn.access_token = self.encrypt_token(access_token)
                 conn.token_type = token_type
                 conn.scope = scope
                 conn.updated_at = utc_now()
@@ -189,7 +209,7 @@ class SqliteApplicationStore:
                 conn = GitHubConnectionModel(
                     user_id=user_id,
                     github_user_id=str(github_user_id),
-                    access_token=access_token,
+                    access_token=self.encrypt_token(access_token),
                     token_type=token_type,
                     scope=scope,
                 )
@@ -280,7 +300,6 @@ class SqliteApplicationStore:
         - get_repository(repository_identifier, user_id=user_id)
         - get_repository(repository_identifier) (unscoped, e.g. for webhooks)
         """
-        print(f"get_repository called with identifier_or_user_id={identifier_or_user_id}, repository_identifier={repository_identifier}, user_id={user_id}")
         if repository_identifier is not None:
             uid = identifier_or_user_id
             ident = repository_identifier
@@ -301,12 +320,7 @@ class SqliteApplicationStore:
                 )
             )
             if uid:
-                stmt = stmt.where(
-                    or_(
-                        RepositoryModel.user_id == uid,
-                        RepositoryModel.github_connection.has(user_id=uid),
-                    )
-                )
+                stmt = stmt.where(RepositoryModel.user_id == uid)
             return session.scalars(stmt).first()
 
     def list_repositories(self, user_id: str | None = None) -> list[RepositoryModel]:
@@ -314,12 +328,7 @@ class SqliteApplicationStore:
         with self.session_factory() as session:
             stmt = select(RepositoryModel)
             if user_id:
-                stmt = stmt.where(
-                    or_(
-                        RepositoryModel.user_id == user_id,
-                        RepositoryModel.github_connection.has(user_id=user_id),
-                    )
-                )
+                stmt = stmt.where(RepositoryModel.user_id == user_id)
             stmt = stmt.order_by(RepositoryModel.full_name)
             return list(session.scalars(stmt).all())
 
@@ -434,12 +443,7 @@ class SqliteApplicationStore:
                 )
                 conn = session.scalars(stmt).first()
 
-            if conn and conn.access_token:
-                return GitHubCredential(
-                    token=conn.access_token,
-                    token_type=conn.token_type,
-                )
-            return None
+            return self._connection_credential(conn)
 
     def get_credential_for_repository(self, repository_id: str) -> GitHubCredential | None:
         """Alias delegating to get_credential_by_repository_id (never resolves by repository name)."""
@@ -449,9 +453,7 @@ class SqliteApplicationStore:
         """Resolve a credential strictly for the given connection ID."""
         with self.session_factory() as session:
             conn = session.get(GitHubConnectionModel, connection_id)
-            if conn and conn.access_token:
-                return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
-            return None
+            return self._connection_credential(conn)
 
     def claim_or_create_adr(
         self,
@@ -653,8 +655,7 @@ class SqliteCredentialProvider(CredentialProvider):
         with self.store.session_factory() as session:
             if connection_id:
                 conn = session.get(GitHubConnectionModel, connection_id)
-                if conn and conn.access_token:
-                    return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
+                return self.store._connection_credential(conn)
 
             if user_id:
                 stmt = (
@@ -663,7 +664,6 @@ class SqliteCredentialProvider(CredentialProvider):
                     .order_by(GitHubConnectionModel.updated_at.desc())
                 )
                 conn = session.scalars(stmt).first()
-                if conn and conn.access_token:
-                    return GitHubCredential(token=conn.access_token, token_type=conn.token_type)
+                return self.store._connection_credential(conn)
 
             return None

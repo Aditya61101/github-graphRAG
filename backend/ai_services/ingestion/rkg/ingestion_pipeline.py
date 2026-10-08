@@ -41,6 +41,7 @@ class RepositoryIngestionPipeline:
         full_name: str | None = None,
         owner: str | None = None,
         progress_callback: Callable[[RepositoryIngestionResult], None] | None = None,
+        publication_guard=None,
     ):
         self.repository_root = repository_root
         self.repository_id = repository_id
@@ -55,6 +56,7 @@ class RepositoryIngestionPipeline:
         self.language_detector = language_detector
         self.graph_neighborhood_loader = graph_neighborhood_loader
         self.progress_callback = progress_callback
+        self.publication_guard = publication_guard
 
     def _record_progress(self, result: RepositoryIngestionResult) -> None:
         if self.progress_callback:
@@ -77,6 +79,8 @@ class RepositoryIngestionPipeline:
         )
         self._record_progress(progress)
 
+        if self.publication_guard:
+            await self.publication_guard()
         self.neo4j_writer.initialize_constraints(
             embedding_dimensions=self.knowledge_pipeline.embedding_dimensions,
         )
@@ -104,6 +108,8 @@ class RepositoryIngestionPipeline:
         progress.validated_relationships = validated_relationships
         self._record_progress(progress)
 
+        if self.publication_guard:
+            await self.publication_guard()
         self.neo4j_writer.write_relationships(
             validated_relationships,
             repository=self.repository_id,
@@ -119,6 +125,8 @@ class RepositoryIngestionPipeline:
         """Incrementally update the repository graph for changed and deleted files."""
         # Validate every replacement before destructive cleanup starts.
         self._validate_planned_files(added_or_modified_plans)
+        if self.publication_guard:
+            await self.publication_guard()
         # 1. Clean up deleted files from Neo4j
         if deleted_paths:
             self.neo4j_writer.delete_files(self.repository_id, deleted_paths)

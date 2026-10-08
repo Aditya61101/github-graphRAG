@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -55,11 +55,12 @@ async def test_fastapi_lifespan_shares_one_model_with_dependencies_and_agent(mon
     factory = MagicMock(return_value=reranker)
     monkeypatch.setattr(main, "Qwen3Reranker", factory)
     monkeypatch.setattr(main, "require_env", lambda name, default=None: default or "test")
+    monkeypatch.setattr(main.GitHubAppSettings, 'from_env', MagicMock(return_value=MagicMock()))
     driver = MagicMock()
     monkeypatch.setattr(main, "GraphDatabase", SimpleNamespace(driver=MagicMock(return_value=driver)))
     for name in (
         "AsyncAzureOpenAI", "AzureOpenAIEmbedder", "AzureChatOpenAI", "AzureOpenAILLM",
-        "SqliteApplicationStore", "SqliteCredentialProvider", "GitHubRepositorySource",
+        "SqliteApplicationStore", "GitHubAppService", "GitHubOAuth", "GitHubRepositorySource",
         "RepositoryIngestionService", "ADRNeo4jWriter", "ADRProcessingService",
         "ADRChunker", "ADRArchitecturalExtractor", "ADREntityResolver", "ADRService",
         "Neo4jGraphRepository", "RepositoryGraphService",
@@ -86,6 +87,10 @@ async def test_model_load_failure_fails_startup(monkeypatch):
     factory = MagicMock(side_effect=RuntimeError("model unavailable"))
     monkeypatch.setattr(main, "Qwen3Reranker", factory)
     monkeypatch.setattr(main, "require_env", lambda name: "neo4j")
+    monkeypatch.setattr(main.GitHubAppSettings, 'from_env', MagicMock(return_value=MagicMock()))
+    for name in ('SqliteApplicationStore', 'GitHubAppService', 'GitHubOAuth'):
+        monkeypatch.setattr(main, name, MagicMock())
+    monkeypatch.setattr(main.httpx, 'AsyncClient', MagicMock(return_value=SimpleNamespace(aclose=AsyncMock())))
     with pytest.raises(RuntimeError, match="model unavailable"):
         async with main.lifespan(FastAPI()):
             pytest.fail("Startup should not yield after a model-load failure")

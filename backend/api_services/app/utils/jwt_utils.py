@@ -14,7 +14,7 @@ security = HTTPBearer(auto_error=False)
 
 def create_access_token(data: dict[str, Any]) -> str:
     """Create a signed JWT access token containing application identity claims."""
-    payload = data.copy()
+    payload = {"sub": data["sub"]}
     payload["exp"] = datetime.now(timezone.utc) + timedelta(days=7)
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
@@ -29,8 +29,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
             detail="Authentication token has expired. Please sign in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jwt.InvalidTokenError as e:
-        print(f"JWT ERROR: {type(e).__name__}: {e}")
+    except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token.",

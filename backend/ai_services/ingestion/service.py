@@ -67,6 +67,7 @@ class RepositoryIngestionService:
         llm: AzureOpenAILLM | None = None,
         groq_client: Any | None = None,
         state_dir: Path | str = ".state",
+        github_app=None,
     ) -> None:
         self.repository_source = repository_source
         self.metadata_store = metadata_store
@@ -78,6 +79,12 @@ class RepositoryIngestionService:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, asyncio.Lock] = {}
+        self.github_app = github_app
+
+    async def _check_publication(self, repo_id: str):
+        if self.github_app:
+            repo = self.metadata_store.get_repository(repo_id)
+            await self.github_app.indexing_credential(repo.id, repo.installation_id)
 
     def _get_lock(self, repo_key: str) -> asyncio.Lock:
         if repo_key not in self._locks:
@@ -93,10 +100,17 @@ class RepositoryIngestionService:
         user_id: str | None = None,
         connection_id: str | None = None,
         trigger: str = "manual",
+        repository_id: str | None = None,
+        installation_id: str | None = None,
     ) -> IngestionResult:
         """Trigger initial or incremental repository ingestion with user credential."""
         from ai_services.ingestion.sources.interface import RepositoryAuthenticationError
 
+        if self.github_app and repository_id:
+            bound = self.metadata_store.get_repository(repository_id)
+            if not bound:
+                raise RepositoryAuthenticationError('Tracked repository binding is required')
+            repo_identifier = bound.full_name
         ref = self.repository_source.resolve_ref(repo_identifier, branch=branch)
 
         # Resolve credential:
@@ -104,10 +118,15 @@ class RepositoryIngestionService:
         # Webhook-triggered flow: connection_id -> Repository's GitHubConnection -> access token
         # NEVER select a credential merely from a repository name!
         cred = credential
-        if not cred and user_id:
-            cred = self.metadata_store.get_credential_for_user(user_id)
-        elif not cred and connection_id:
-            cred = self.metadata_store.get_credential_by_connection_id(connection_id)
+        if self.github_app:
+            record = self.metadata_store.get_repository(repository_id or ref.full_name)
+            if not record or record.installation_id != str(installation_id):
+                raise RepositoryAuthenticationError('Verified repository installation is required')
+            if trigger != 'webhook_push':
+                await self.github_app.authorize_tracked(user_id, record.id)
+            cred = await self.github_app.indexing_credential(record.id, record.installation_id)
+            connection_id = record.github_connection_id
+            user_id = record.user_id
 
         if not cred:
             raise RepositoryAuthenticationError(
@@ -118,6 +137,8 @@ class RepositoryIngestionService:
         lock = self._get_lock(ref.full_name)
         async with lock:
             metadata = await self.repository_source.get_metadata(ref, credential=cred)
+            if self.github_app and str(metadata.github_repository_id) != record.github_repository_id:
+                raise RepositoryAuthenticationError('GitHub repository identity mismatch')
 
             # Public repositories only
             if metadata.visibility == "private":
@@ -244,6 +265,7 @@ class RepositoryIngestionService:
                 full_name=metadata.full_name,
                 owner=metadata.owner,
                 progress_callback=audit.record_result,
+                publication_guard=lambda: self._check_publication(repo_id),
             )
             result = await pipeline.ingest(plan.files)
             audit.record_result(result)
@@ -253,12 +275,14 @@ class RepositoryIngestionService:
             audit.save_counts()
 
             # 4. Community Layer scoped to repo_id
+            await self._check_publication(repo_id)
             community_result = await self._run_community_pipeline(repository_id=repo_id)
             audit.counts.communities = community_result.community_count if community_result else None
             audit.finish("completed")
             logger.info("RKG stage counts repository=%s run=%s counts=%s", repo_id, run.id, audit.counts.to_dict())
 
             # 5. Record Success in SQLite
+            await self._check_publication(repo_id)
             self.metadata_store.record_ingestion_success(
                 repository_id=repo_id,
                 run_id=run.id,
@@ -364,6 +388,7 @@ class RepositoryIngestionService:
 
             if not deleted_paths and not added_or_modified_paths:
                 audit.finish("completed")
+                await self._check_publication(repo_id)
                 self.metadata_store.record_ingestion_success(
                     repository_id=repo_id,
                     run_id=run.id,
@@ -395,6 +420,7 @@ class RepositoryIngestionService:
                 full_name=metadata.full_name,
                 owner=metadata.owner,
                 progress_callback=audit.record_result,
+                publication_guard=lambda: self._check_publication(repo_id),
             )
             result = await pipeline.ingest_incremental(
                 added_or_modified_plans=file_plans,
@@ -407,12 +433,14 @@ class RepositoryIngestionService:
             audit.save_counts()
 
             # 4. Community Layer scoped to repo_id
+            await self._check_publication(repo_id)
             community_result = await self._run_community_pipeline(repository_id=repo_id)
             audit.counts.communities = community_result.community_count if community_result else None
             audit.finish("completed")
             logger.info("RKG stage counts repository=%s run=%s counts=%s", repo_id, run.id, audit.counts.to_dict())
 
             # 5. Record Success in SQLite
+            await self._check_publication(repo_id)
             self.metadata_store.record_ingestion_success(
                 repository_id=repo_id,
                 run_id=run.id,
@@ -490,8 +518,6 @@ class RepositoryIngestionService:
         tracked_repo = None
         if github_repo_id:
             tracked_repo = self.metadata_store.get_repository(github_repo_id)
-        if not tracked_repo:
-            tracked_repo = self.metadata_store.get_repository(full_name)
 
         if not tracked_repo:
             return IngestionResult(
@@ -538,31 +564,15 @@ class RepositoryIngestionService:
                 message=f"Commit '{after_sha}' is already indexed.",
             )
 
-        # Webhook flow: verified webhook -> github_repository_id -> tracked Repository -> Repository's GitHubConnection -> token
-        cred = None
-        if tracked_repo.github_connection_id:
-            cred = self.metadata_store.get_credential_by_connection_id(tracked_repo.github_connection_id)
-        elif tracked_repo.user_id:
-            cred = self.metadata_store.get_credential_for_user(tracked_repo.user_id)
-
-        if not cred:
-            return IngestionResult(
-                repository=full_name,
-                repository_id=tracked_repo.id,
-                status="failed",
-                indexed_commit_sha=tracked_repo.indexed_commit_sha,
-                is_incremental=False,
-                message=f"No valid GitHub credential configured for tracked repository '{full_name}'.",
-            )
-
-        # Trigger incremental ingestion
+        installation_id = str((payload.get('installation') or {}).get('id') or '')
+        if (not self.github_app or not github_repo_id or repo_data.get('private', True)
+                or tracked_repo.installation_id != installation_id):
+            return IngestionResult(full_name, tracked_repo.id, 'ignored',
+                tracked_repo.indexed_commit_sha, False, message='Push installation access is not verified')
         return await self.ingest_repository(
-            repo_identifier=tracked_repo.full_name,
-            branch=branch,
-            credential=cred,
-            user_id=tracked_repo.user_id,
-            connection_id=tracked_repo.github_connection_id,
-            trigger="webhook_push",
+            repo_identifier=tracked_repo.full_name, repository_id=tracked_repo.id,
+            installation_id=installation_id, branch=branch, user_id=tracked_repo.user_id,
+            trigger='webhook_push',
         )
 
     async def handle_github_pull_request_webhook(self, payload: dict[str, Any]) -> IngestionResult:

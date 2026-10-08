@@ -190,6 +190,10 @@ def graph_env():
     app = FastAPI()
     app.state.sqlite_store = store
     app.state.graph_service = graph_service
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    app.state.github_app = SimpleNamespace(authorize_tracked=AsyncMock(
+        side_effect=lambda user_id, identifier: store.get_repository(identifier)))
     app.include_router(repositories_router, prefix="/repositories")
 
     client = TestClient(app)

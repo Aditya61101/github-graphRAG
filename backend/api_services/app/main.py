@@ -10,7 +10,10 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import os
 
-from api_services.app.routers.auth import router as auth_router
+from api_services.app.routers.auth import router as auth_router, GitHubOAuth
+from ai_services.github_app.settings import GitHubAppSettings
+from ai_services.github_app.service import GitHubAppService
+import httpx
 from api_services.app.routers.query import router as query_router
 from api_services.app.routers.health import router as health_router
 from api_services.app.routers.webhook import router as webhook_router
@@ -34,7 +37,6 @@ from ai_services.ingestion.adr.resolver import ADREntityResolver
 from ai_services.ingestion.adr.service import ADRService
 from ai_services.ingestion.persistence.sqlite_store import (
     SqliteApplicationStore,
-    SqliteCredentialProvider,
 )
 from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
@@ -48,6 +50,12 @@ from shared.utils.llm_utils import AzureOpenAILLM
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    github_settings = GitHubAppSettings.from_env()
+    sqlite_store = SqliteApplicationStore()
+    github_client = httpx.AsyncClient(timeout=30)
+    github_app = GitHubAppService(sqlite_store, github_settings, github_client)
+    app.state.github_app = github_app
+    app.state.github_oauth = GitHubOAuth(github_settings)
     database = require_env("NEO4J_DATABASE") or None
     # One model per FastAPI worker; failures propagate and fail startup.
     reranker = await asyncio.to_thread(Qwen3Reranker, RETRIEVAL_SETTINGS)
@@ -97,13 +105,10 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize SQLite relational application store and credential provider
-    sqlite_store = SqliteApplicationStore()
-    cred_provider = SqliteCredentialProvider(sqlite_store)
 
     # Initialize GitHub repository source and ingestion service
     repo_source = GitHubRepositorySource(
         storage_dir=REPOS_STORAGE_DIR,
-        credential_provider=cred_provider,
     )
 
     groq_api_key = os.getenv("GROQ_API_KEY")
@@ -123,6 +128,7 @@ async def lifespan(app: FastAPI):
         embedder=embedder,
         llm=llm,
         groq_client=groq_client,
+        github_app=github_app,
     )
 
     if embedder is None:
@@ -200,6 +206,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         driver.close()
+        await github_client.aclose()
 
 
 app = FastAPI(
@@ -210,7 +217,10 @@ app = FastAPI(
 
 app.add_middleware(
     SessionMiddleware,
-    secret_key="super-secret-session-key",
+    secret_key=os.getenv("OAUTH_SESSION_SECRET", ""),
+    max_age=600,
+    same_site="lax",
+    https_only=os.getenv("GITHUB_APP_CALLBACK_URL", "").startswith("https://"),
 )
 
 app.add_middleware(

@@ -9,6 +9,7 @@ class IngestRepositoryRequest(BaseModel):
         ...,
         description="GitHub repository identifier, e.g. 'owner/repo' or https://github.com/owner/repo",
     )
+    installation_id: str | None = Field(default=None, description="Selection hint; verified against current user/App access")
     branch: str | None = Field(
         default=None,
         description="Optional branch or ref to index and track. Defaults to the repository's default branch.",
@@ -55,11 +56,14 @@ class RepositoryResponse(BaseModel):
     github_connection_id: str | None = None
     indexed_commit_sha: str | None = None
     status: str
+    installation_id: str | None = None
+    access_state: str = "RECONNECT_REQUIRED"
     created_at: str | None = None
     updated_at: str | None = None
 
 
 class AvailableRepositoryResponse(BaseModel):
+    installation_id: str
     id: str | None = Field(
         default=None,
         description="Internal tracked repository ID (e.g. repo_12345) if already indexed in DecisionGuard, otherwise null.",

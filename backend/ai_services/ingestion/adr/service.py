@@ -192,10 +192,7 @@ class ADRService:
             raise RepositoryNotFoundError(f"Repository '{repository_id}' was not found.")
 
         is_owner = (repo.user_id == user_id)
-        has_connection = bool(
-            repo.github_connection and repo.github_connection.user_id == user_id
-        )
-        if not (is_owner or has_connection):
+        if not is_owner:
             logger.warning(
                 f"ADR upload forbidden: user '{user_id}' denied access to repository '{repository_id}' (owned by '{repo.user_id}')."
             )

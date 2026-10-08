@@ -46,10 +46,7 @@ class RepositoryGraphService:
             raise RepositoryNotFoundError(f"Repository '{repository_identifier}' was not found.")
 
         is_owner = (repo.user_id == user_id)
-        has_connection = bool(
-            repo.github_connection and repo.github_connection.user_id == user_id
-        )
-        if not (is_owner or has_connection):
+        if not is_owner:
             logger.warning(
                 f"Graph fetch forbidden: user '{user_id}' denied access to repository '{repository_identifier}'."
             )

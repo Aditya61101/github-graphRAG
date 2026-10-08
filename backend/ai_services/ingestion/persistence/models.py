@@ -58,6 +58,9 @@ class GitHubConnectionModel(Base):
     access_token = Column(Text, nullable=False)  # Never expose in API responses or logs!
     token_type = Column(String(32), default="Bearer", nullable=False)
     scope = Column(String(255), nullable=True)
+    credential_kind = Column(String(32), default="legacy_oauth", nullable=False)
+    access_token_expires_at = Column(DateTime, nullable=True)
+    access_status = Column(String(32), default="RECONNECT_REQUIRED", nullable=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -105,6 +108,8 @@ class RepositoryModel(Base):
         index=True,
     )
     indexed_commit_sha = Column(String(64), nullable=True, index=True)
+    installation_id = Column(String(64), ForeignKey("github_installations.id"), nullable=True)
+    access_state = Column(String(32), default="RECONNECT_REQUIRED", nullable=False)
     status = Column(String(32), default="IDLE", nullable=False)  # IDLE, INDEXING, COMPLETED, FAILED
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
@@ -132,10 +137,43 @@ class RepositoryModel(Base):
             "user_id": self.user_id,
             "github_connection_id": self.github_connection_id,
             "indexed_commit_sha": self.indexed_commit_sha,
+            "installation_id": self.installation_id,
+            "access_state": self.access_state,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class GitHubInstallationModel(Base):
+    __tablename__ = "github_installations"
+    id = Column(String(64), primary_key=True)
+    app_id = Column(String(64), nullable=False)
+    account_id = Column(String(64), nullable=False)
+    account_login = Column(String(100), nullable=False)
+    account_type = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False)
+    repository_selection = Column(String(32), nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
+    reconciled_at = Column(DateTime, nullable=True)
+
+
+class InstallationRepositoryModel(Base):
+    __tablename__ = "installation_repositories"
+    installation_id = Column(String(64), ForeignKey("github_installations.id"), primary_key=True)
+    github_repository_id = Column(String(64), primary_key=True)
+    full_name = Column(String(200), nullable=False)
+    is_private = Column(Integer, nullable=False)
+    granted = Column(Integer, default=1, nullable=False)
+    payload = Column(Text, nullable=False)
+
+
+class ConversationScopeModel(Base):
+    __tablename__ = "conversation_scopes"
+    user_id = Column(String(64), ForeignKey("users.id"), primary_key=True)
+    conversation_id = Column(String(255), primary_key=True)
+    repository_id = Column(String(64), ForeignKey("repositories.id"), nullable=False)
 
 
 class IngestionRunModel(Base):

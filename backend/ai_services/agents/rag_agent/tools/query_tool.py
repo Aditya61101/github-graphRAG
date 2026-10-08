@@ -46,7 +46,9 @@ def create_query_graph_rag_tool(
         # The API-authorized scope cannot be overridden by a model tool argument.
         if state_repo and repository_id and repository_id != state_repo:
             raise ValueError("Tool repository does not match the authorized repository")
-        target_repo_id = state_repo or repository_id
+        if not state_repo:
+            raise ValueError('Missing backend-authorized repository scope')
+        target_repo_id = state_repo
 
         result: HybridRetrievalResult = await hybrid_retrieve(
             query=query,

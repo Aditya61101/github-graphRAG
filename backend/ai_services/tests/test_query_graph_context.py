@@ -6,7 +6,9 @@ from fastapi.testclient import TestClient
 
 from ai_services.agents.rag_agent.dataclasses.result import RAGAgentResult
 from ai_services.graph import GraphContext
-from api_services.app.main import app
+from fastapi import FastAPI
+from api_services.app.routers.query import router as query_router
+from api_services.app.routers.repositories import router as repository_router
 from api_services.app.utils.jwt_utils import create_access_token
 from api_services.app.utils.query_response_mapper import build_api_response
 
@@ -45,6 +47,9 @@ def test_existing_query_sources_behavior_preserved():
 def test_fastapi_query_endpoints_return_graph_context():
     """12. API endpoints: POST /query and POST /repositories/{repo_id}/query return graph_context."""
     from ai_services.ingestion.persistence.models import UserModel
+    app = FastAPI()
+    app.include_router(query_router, prefix='/query')
+    app.include_router(repository_router, prefix='/repositories')
     client = TestClient(app)
     token = create_access_token({"sub": "user_test_gc"})
 
@@ -76,6 +81,8 @@ def test_fastapi_query_endpoints_return_graph_context():
 
     app.state.rag_agent = mock_rag_agent
     app.state.sqlite_store = mock_store
+    app.state.github_app = MagicMock()
+    app.state.github_app.authorize_tracked = AsyncMock(return_value=mock_repo)
 
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -92,6 +99,7 @@ def test_fastapi_query_endpoints_return_graph_context():
     assert resp.status_code == 200
     mock_rag_agent.query.assert_awaited_with(
         conversation_id="thread-1", query="explain order service", repository_id="repo_test_1",
+        user_id="user_test_gc",
     )
     data = resp.json()
     assert data["answer"] == "Grounded answer."

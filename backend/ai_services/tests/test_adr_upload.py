@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import zipfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -355,6 +357,9 @@ def test_env():
         app.include_router(repositories_router, prefix="/repositories")
         app.state.sqlite_store = store
         app.state.adr_service = adr_service
+        # This suite isolates ADR processing; live App authorization is covered separately.
+        app.state.github_app = SimpleNamespace(authorize_tracked=AsyncMock(
+            side_effect=lambda user_id, identifier: store.get_repository(identifier)))
 
         client = TestClient(app)
 

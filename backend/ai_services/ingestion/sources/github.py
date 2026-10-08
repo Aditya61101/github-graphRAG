@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class GitHubRepositorySource(RepositorySource):
-    """GitHub repository provider handling remote metadata, clones, and diffs with user credentials."""
+    """GitHub metadata, clones, and diffs using explicitly supplied credentials."""
 
     def __init__(
         self,
@@ -78,7 +78,7 @@ class GitHubRepositorySource(RepositorySource):
             try:
                 response = await client.get(url, headers=self._get_api_headers(cred))
             except Exception as exc:
-                cleaned_msg = sanitize_sensitive_text(str(exc))
+                cleaned_msg = self._safe_git_error(str(exc), cred)
                 raise RepositorySourceError(f"Failed to connect to GitHub API: {cleaned_msg}") from None
 
         if response.status_code == 404:
@@ -86,12 +86,12 @@ class GitHubRepositorySource(RepositorySource):
                 f"Repository '{ref.full_name}' was not found on GitHub."
             )
         if response.status_code in {401, 403}:
-            cleaned_err = sanitize_sensitive_text(response.text)
+            cleaned_err = self._safe_git_error(response.text, cred)
             raise RepositoryAuthenticationError(
                 f"Authentication failed for repository '{ref.full_name}': {cleaned_err}"
             )
         if response.status_code != 200:
-            cleaned_err = sanitize_sensitive_text(response.text)
+            cleaned_err = self._safe_git_error(response.text, cred)
             raise RepositorySourceError(
                 f"GitHub API returned unexpected status {response.status_code}: {cleaned_err}"
             )
@@ -122,19 +122,6 @@ class GitHubRepositorySource(RepositorySource):
     def _repo_clone_path(self, ref: RepositoryRef) -> Path:
         return self.storage_dir / ref.owner / ref.name
 
-    def _build_git_auth_args(self, credential: GitHubCredential | None) -> list[str]:
-        # Use GitHub HTTPS token authentication without putting the token
-        # directly into the repository URL.
-        if credential and credential.token:
-            auth = base64.b64encode(
-                f"x-access-token:{credential.token}".encode("utf-8")
-            ).decode("ascii")
-            return [
-                "-c",
-                f"http.extraheader=Authorization: Basic {auth}",
-            ]
-        return []
-
     def _run_git(
         self,
         args: Sequence[str],
@@ -142,11 +129,25 @@ class GitHubRepositorySource(RepositorySource):
         cwd: Path | None = None,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        cmd = ["git"] + self._build_git_auth_args(credential) + list(args)
+        cmd = ["git"] + list(args)
         env = os.environ.copy()
         # Never allow Git to invoke interactive credential helpers/browser auth
         # from a background ingestion process.
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = ""
+        env["SSH_ASKPASS"] = ""
+        # Reset inherited credentials: never fall back to a developer's user
+        # token or send a previously configured Authorization header.
+        env['GIT_CONFIG_COUNT'] = '2'
+        env['GIT_CONFIG_KEY_0'] = 'credential.helper'
+        env['GIT_CONFIG_VALUE_0'] = ''
+        env['GIT_CONFIG_KEY_1'] = 'http.extraheader'
+        env['GIT_CONFIG_VALUE_1'] = ''
+        if credential and credential.token:
+            auth = base64.b64encode(f'x-access-token:{credential.token}'.encode()).decode()
+            env['GIT_CONFIG_COUNT'] = '3'
+            env['GIT_CONFIG_KEY_2'] = 'http.extraheader'
+            env['GIT_CONFIG_VALUE_2'] = f'Authorization: Basic {auth}'
 
         res = subprocess.run(
             cmd,
@@ -159,9 +160,23 @@ class GitHubRepositorySource(RepositorySource):
             env=env,
         )
         if check and res.returncode != 0:
-            cleaned_err = sanitize_sensitive_text(res.stderr.strip())
+            cleaned_err = self._safe_git_error(res.stderr.strip(), credential)
+            if self._is_auth_error(res.stderr):
+                raise RepositoryAuthenticationError('GitHub Git credentials expired or access denied')
             raise RepositorySourceError(f"Git command failed: {cleaned_err}")
         return res
+
+    @staticmethod
+    def _is_auth_error(text: str) -> bool:
+        return any(value in text.lower() for value in ('authentication failed', '401', '403', 'could not read username', 'access denied'))
+
+    @staticmethod
+    def _safe_git_error(text: str, credential) -> str:
+        if credential:
+            text = text.replace(credential.token, '[REDACTED]')
+            encoded = base64.b64encode(f'x-access-token:{credential.token}'.encode()).decode()
+            text = text.replace(encoded, '[REDACTED]')
+        return sanitize_sensitive_text(text)
 
     async def prepare_snapshot(
         self,
@@ -192,7 +207,9 @@ class GitHubRepositorySource(RepositorySource):
 
             res = self._run_git(clone_args, credential=cred, check=False)
             if res.returncode != 0:
-                cleaned_err = sanitize_sensitive_text(res.stderr.strip())
+                cleaned_err = self._safe_git_error(res.stderr.strip(), cred)
+                if self._is_auth_error(res.stderr):
+                    raise RepositoryAuthenticationError('GitHub Git credentials expired or access denied')
                 raise RepositorySourceError(
                     f"git clone failed for {ref.full_name}: {cleaned_err}"
                 )
@@ -243,8 +260,10 @@ class GitHubRepositorySource(RepositorySource):
                 ["fetch", "origin", "--prune"], credential=cred, cwd=clone_path, check=False
             )
             if fetch_res.returncode != 0:
-                cleaned_err = sanitize_sensitive_text(fetch_res.stderr.strip())
-                raise CorruptedCloneError(
+                cleaned_err = self._safe_git_error(fetch_res.stderr.strip(), cred)
+                if self._is_auth_error(fetch_res.stderr):
+                    raise RepositoryAuthenticationError('GitHub Git credentials expired or access denied')
+                raise RepositorySourceError(
                     f"git fetch failed in {clone_path}: {cleaned_err}"
                 )
 

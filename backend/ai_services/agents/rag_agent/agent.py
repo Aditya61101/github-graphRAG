@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+from hashlib import sha256
+import json
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -84,7 +86,11 @@ class RAGQueryAgent:
         conversation_id: str,
         query: str,
         repository_id: str | None = None,
+        user_id: str = "local",
     ) -> RAGAgentResult:
+        if not repository_id:
+            raise ValueError('An authorized repository is required')
+        thread_id = sha256(json.dumps([user_id, repository_id, conversation_id]).encode()).hexdigest()
         state_input: dict[str, Any] = {
             "messages": [
                 {
@@ -101,7 +107,7 @@ class RAGQueryAgent:
             state_input,
             {
                 "configurable": {
-                    "thread_id": conversation_id,
+                    "thread_id": thread_id,
                 }
             },
         )
@@ -133,12 +139,12 @@ class RAGQueryAgent:
             graph_context=graph_context,
         )
 
-    def get_state(self, conversation_id: str):
+    def get_state(self, conversation_id: str, repository_id: str, user_id: str = "local"):
         """Return the current persisted state for debugging/inspection."""
         return self.agent.get_state(
             {
                 "configurable": {
-                    "thread_id": conversation_id,
+                    "thread_id": sha256(json.dumps([user_id, repository_id, conversation_id]).encode()).hexdigest(),
                 }
             }
         )
