@@ -1,196 +1,291 @@
+import { useState } from "react";
+
 import {
   BlocksIcon,
-  GiftIcon,
   GlobeIcon,
+  MailIcon,
   Settings2Icon,
-  Trash2Icon,
+  ShieldCheckIcon,
 } from "lucide-react";
 
+import { AppHeader } from "@/components/core/app-header";
+import { GithubIcon } from "@/components/icons";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
+import { useAuth } from "@/contexts/auth-context";
 
-const settingsNavigation = [
+const SETTINGS_NAVIGATION = [
   {
+    id: "general",
     label: "General",
     icon: Settings2Icon,
-    active: true,
   },
   {
+    id: "connected-apps",
     label: "Connected apps",
     icon: BlocksIcon,
-    active: false,
   },
-];
+] as const;
 
-const connectedApps = [
+const CONNECTED_APPS = [
   {
-    name: "GitHub",
-    description: "Sync repositories, pull requests, and code insights.",
-    icon: GiftIcon,
+    name: "Confluence",
+    description:
+      "Import architecture decision records and internal engineering documentation.",
+    icon: GlobeIcon,
     connected: true,
+    status: "24 synced pages",
   },
   {
-    name: "Vercel",
-    description: "Deploy and preview GraphRAG applications.",
+    name: "Google Drive",
+    description:
+      "Connect shared folders containing ADRs, RFCs, and technical specifications.",
     icon: GlobeIcon,
     connected: false,
+    status: "Not connected",
   },
 ];
 
 export default function SettingsPage() {
+  const [activeTab, setActiveTab] =
+    useState<(typeof SETTINGS_NAVIGATION)[number]["id"]>("general");
+
+  const { user } = useAuth();
+
+  const headerCrumbs = [
+    { label: "Settings", pathname: "/settings" },
+    {
+      label: SETTINGS_NAVIGATION.find((s) => s.id === activeTab)!.label,
+      pathname: "/settings",
+    },
+  ];
+
+  const displayName = user?.username ?? "User";
+  const email = user?.email ?? "user@example.com";
+
   return (
-    <div className="flex flex-1 flex-col gap-8 p-4 pt-0">
-      <section className="space-y-1">
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          Manage your project preferences, integrations, and workspace
-          configuration.
-        </p>
-      </section>
+    <>
+      <AppHeader crumbs={headerCrumbs} />
 
-      <section className="grid gap-8 lg:grid-cols-[240px_1fr]">
-        <aside className="space-y-2">
-          {settingsNavigation.map((item) => {
-            const Icon = item.icon;
+      <div className="flex flex-1 flex-col gap-6 p-4 pt-0">
+        <section className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+          <p className="text-sm text-muted-foreground">
+            Manage your account, profile preferences, and connected
+            integrations.
+          </p>
+        </section>
 
-            return (
-              <button
-                key={item.label}
-                className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm transition-colors ${
-                  item.active
-                    ? "bg-muted font-medium text-foreground"
-                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                }`}
-              >
-                <Icon className="size-4" />
-                {item.label}
-              </button>
-            );
-          })}
-        </aside>
+        <section className="grid gap-6 lg:grid-cols-[220px_1fr]">
+          <aside className="space-y-2">
+            {SETTINGS_NAVIGATION.map((item) => {
+              const Icon = item.icon;
 
-        <div className="space-y-8">
-          <section className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">General</h2>
-            <p className="text-sm text-muted-foreground">
-              Configure your workspace details and project preferences.
-            </p>
-          </section>
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveTab(item.id)}
+                  className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm transition-colors ${
+                    activeTab === item.id
+                      ? "bg-muted font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  }`}
+                >
+                  <Icon className="size-4" />
+                  {item.label}
+                </button>
+              );
+            })}
+          </aside>
 
-          <div className="rounded-xl border">
-            <div className="space-y-6 p-6">
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="project-name">Project name</Label>
-                  <Input id="project-name" placeholder="GraphRAG Workspace" />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="project-slug">Project slug</Label>
-                  <Input id="project-slug" placeholder="graphrag-workspace" />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="project-description">Project description</Label>
-                <Input
-                  id="project-description"
-                  placeholder="Describe your GraphRAG workspace and integrations"
-                />
-              </div>
-
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="default-branch">Default branch</Label>
-                  <Input id="default-branch" placeholder="main" />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="visibility">Visibility</Label>
-                  <Input id="visibility" placeholder="Private" />
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3">
-                <Button variant="outline">Cancel</Button>
-                <Button>Save changes</Button>
-              </div>
-            </div>
-          </div>
-
-          <section className="space-y-4 rounded-xl border p-6">
-            <div>
-              <h3 className="text-lg font-semibold">Connected apps</h3>
-              <p className="text-sm text-muted-foreground">
-                Connect external services to enhance your GraphRAG workflow.
-              </p>
-            </div>
-
-            <Separator />
-
-            <div className="space-y-4">
-              {connectedApps.map((app) => {
-                const Icon = app.icon;
-
-                return (
-                  <div
-                    key={app.name}
-                    className="flex flex-col gap-4 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="flex size-10 items-center justify-center rounded-lg bg-muted">
-                        <Icon className="size-5" />
-                      </div>
-
-                      <div>
-                        <h4 className="font-medium">{app.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {app.description}
-                        </p>
-                      </div>
-                    </div>
-
-                    <Button variant={app.connected ? "outline" : "default"}>
-                      {app.connected ? "Disconnect" : "Connect"}
-                    </Button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="rounded-xl border border-destructive/40">
-            <div className="space-y-4 p-6">
-              <div>
-                <h3 className="text-lg font-semibold text-destructive">
-                  Delete project
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  Permanently remove this project, repository mappings, and
-                  generated GraphRAG data. This action cannot be undone.
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="font-medium">Delete this project</p>
-                  <p className="text-sm text-muted-foreground">
-                    Make sure you have exported any required data before
-                    deletion.
+          <div className="space-y-6">
+            {activeTab === "general" && (
+              <section className="rounded-xl border bg-background">
+                <div className="border-b px-6 py-4">
+                  <h2 className="text-xl font-semibold tracking-tight">
+                    General
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Manage your profile information and account preferences.
                   </p>
                 </div>
 
-                <Button variant="destructive">
-                  <Trash2Icon className="size-4" />
-                  Delete project
-                </Button>
-              </div>
-            </div>
-          </section>
-        </div>
-      </section>
-    </div>
+                <div className="space-y-6 p-6">
+                  <div className="flex items-center gap-4 rounded-xl border p-4">
+                    <Avatar className="size-16 rounded-full border">
+                      <AvatarImage src={user?.avatarUrl} alt={displayName} />
+
+                      <AvatarFallback className="rounded-full bg-primary/10 text-primary">
+                        {displayName.charAt(0).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+
+                    <div>
+                      <h3 className="text-lg font-semibold">{displayName}</h3>
+
+                      <p className="text-sm text-muted-foreground">
+                        Authenticated GitHub account
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-5 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="full-name">Full name</Label>
+                      <Input id="full-name" value={displayName} readOnly />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="display-name">Display name</Label>
+                      <Input id="display-name" value={displayName} readOnly />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-5 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="email">Email address</Label>
+
+                      <div className="relative">
+                        <MailIcon className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+
+                        <Input
+                          id="email"
+                          value={email}
+                          className="pl-9"
+                          readOnly
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="role">Workspace role</Label>
+                      <Input id="role" value="Administrator" readOnly />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div className="rounded-xl border p-4">
+                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                        Projects
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold">5</p>
+                    </div>
+
+                    <div className="rounded-xl border p-4">
+                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                        Repositories
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold">12</p>
+                    </div>
+
+                    <div className="rounded-xl border p-4">
+                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                        Indexed entities
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold">82K</p>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-3">
+                    <Button variant="outline">Cancel</Button>
+                    <Button>Save changes</Button>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {activeTab === "connected-apps" && (
+              <section className="rounded-xl border bg-background">
+                <div className="border-b px-6 py-4">
+                  <h2 className="text-xl font-semibold tracking-tight">
+                    Connected apps
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Manage integrations connected to your GraphRAG workspace.
+                  </p>
+                </div>
+
+                <div className="space-y-6 p-6">
+                  <div>
+                    <div className="mb-4 flex items-center gap-2">
+                      <BlocksIcon className="size-4 text-primary" />
+                      <h3 className="font-semibold">ADR integrations</h3>
+                    </div>
+
+                    <div className="space-y-4">
+                      {CONNECTED_APPS.map((app) => {
+                        const Icon = app.icon;
+
+                        return (
+                          <div
+                            key={app.name}
+                            className="flex flex-col gap-4 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between"
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className="flex size-11 items-center justify-center rounded-lg bg-muted">
+                                <Icon className="size-5" />
+                              </div>
+
+                              <div>
+                                <h4 className="font-medium">{app.name}</h4>
+
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  {app.description}
+                                </p>
+
+                                <p className="mt-3 text-xs font-medium text-muted-foreground">
+                                  {app.status}
+                                </p>
+                              </div>
+                            </div>
+
+                            <Button
+                              variant={app.connected ? "outline" : "default"}
+                            >
+                              {app.connected ? "Manage" : "Connect"}
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-4 flex items-center gap-2">
+                      <ShieldCheckIcon className="size-4 text-emerald-500" />
+                      <h3 className="font-semibold">Authenticated provider</h3>
+                    </div>
+
+                    <div className="flex flex-col gap-4 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex items-start gap-3">
+                        <div className="flex size-11 items-center justify-center rounded-lg bg-violet-500/15 text-violet-500">
+                          <GithubIcon className="size-5" />
+                        </div>
+
+                        <div>
+                          <h4 className="font-medium">
+                            GitHub ({displayName})
+                          </h4>
+                          <p className="text-sm text-muted-foreground">
+                            Connected through GitHub OAuth for repositories,
+                            commits, PRs, and GraphRAG ingestion workflows.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                        Connected
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+          </div>
+        </section>
+      </div>
+    </>
   );
 }

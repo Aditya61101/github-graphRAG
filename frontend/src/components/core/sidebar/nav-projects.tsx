@@ -7,7 +7,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 
 import type { Project } from "@/types/project";
 
@@ -16,6 +16,8 @@ type NavProjectsProps = {
 };
 
 export function NavProjects({ projects }: NavProjectsProps) {
+  const location = useLocation();
+
   if (projects.length === 0) {
     return null;
   }
@@ -27,6 +29,9 @@ export function NavProjects({ projects }: NavProjectsProps) {
         {projects.map((project) => (
           <SidebarMenuItem key={project.id}>
             <SidebarMenuButton
+              isActive={location.pathname.startsWith(
+                `/projects/${project.id}`
+              )}
               render={
                 <Link to={`/projects/${project.id}`}>
                   <Frame />
