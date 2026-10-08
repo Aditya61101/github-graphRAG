@@ -17,8 +17,139 @@ import { projectService } from "@/api/project-service";
 import { AppHeader } from "@/components/core/app-header";
 import { EmptyState } from "@/components/core/feedback/empty-state";
 import { ErrorState } from "@/components/core/feedback/error-state";
-import { Button } from "@/components/ui/button";
 import { GithubIcon } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+
+function ProjectDetailsSkeleton() {
+  return (
+    <>
+      <AppHeader
+        crumbs={[{ label: "Projects", pathname: "/projects" }]}
+      />
+
+      <div className="flex flex-1 flex-col gap-5 p-4 pt-0">
+        <section className="rounded-xl border bg-background p-5">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="w-full space-y-4">
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-6 w-16 rounded-full" />
+                <Skeleton className="h-6 w-28 rounded-full" />
+              </div>
+
+              <div className="space-y-3">
+                <Skeleton className="h-8 w-72" />
+                <Skeleton className="h-4 w-full max-w-3xl" />
+                <Skeleton className="h-4 w-full max-w-2xl" />
+              </div>
+            </div>
+
+            <Skeleton className="h-10 w-40" />
+          </div>
+        </section>
+
+        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <div
+              key={index}
+              className="rounded-xl border bg-background p-4"
+            >
+              <div className="mb-4 flex items-start justify-between">
+                <div className="space-y-3">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-8 w-20" />
+                </div>
+
+                <Skeleton className="size-10 rounded-lg" />
+              </div>
+
+              <Skeleton className="h-4 w-full" />
+            </div>
+          ))}
+        </section>
+
+        <section className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
+          <div className="rounded-xl border bg-background">
+            <div className="border-b px-5 py-4">
+              <Skeleton className="h-6 w-52" />
+              <Skeleton className="mt-2 h-4 w-80" />
+            </div>
+
+            <div className="space-y-4 p-5">
+              <div className="rounded-xl border p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <Skeleton className="size-11 rounded-lg" />
+
+                    <div className="space-y-3">
+                      <Skeleton className="h-5 w-44" />
+                      <Skeleton className="h-4 w-96 max-w-full" />
+                      <Skeleton className="h-4 w-80 max-w-full" />
+                    </div>
+                  </div>
+
+                  <Skeleton className="h-6 w-20 rounded-full" />
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <div key={index} className="rounded-lg border p-3">
+                    <Skeleton className="h-3 w-24" />
+                    <Skeleton className="mt-3 h-4 w-32" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border bg-background">
+            <div className="border-b px-5 py-4">
+              <Skeleton className="h-6 w-32" />
+              <Skeleton className="mt-2 h-4 w-full" />
+            </div>
+
+            <div className="space-y-3 p-5">
+              {Array.from({ length: 3 }).map((_, index) => (
+                <div key={index} className="rounded-xl border p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <Skeleton className="size-10 rounded-lg" />
+
+                      <div className="space-y-3">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-4 w-56" />
+                        <Skeleton className="h-4 w-40" />
+                      </div>
+                    </div>
+
+                    <Skeleton className="h-9 w-20" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-destructive/20 bg-background">
+          <div className="border-b border-destructive/10 px-5 py-4">
+            <Skeleton className="h-6 w-36" />
+            <Skeleton className="mt-2 h-4 w-full max-w-2xl" />
+          </div>
+
+          <div className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-3">
+              <Skeleton className="h-5 w-32" />
+              <Skeleton className="h-4 w-full max-w-xl" />
+            </div>
+
+            <Skeleton className="h-10 w-36" />
+          </div>
+        </section>
+      </div>
+    </>
+  );
+}
 
 export default function ProjectDetailsPage() {
   const { projectId } = useParams();
@@ -49,7 +180,7 @@ export default function ProjectDetailsPage() {
   ];
 
   if (isLoading) {
-    return null;
+    return <ProjectDetailsSkeleton />;
   }
 
   if (isError) {
