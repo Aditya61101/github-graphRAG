@@ -20,7 +20,7 @@ export const projectService = {
     const projects = await new Promise<Project>((resolve) => {
       setTimeout(() => {
         resolve(MOCK_PROJECTS.find((p) => p.id === projectId)!);
-      }, 2000);
+      }, 1000);
     });
     return projects;
   },
@@ -35,7 +35,7 @@ export const projectService = {
           repositoryName: "Connected Repository",
           updatedAt: new Date().toLocaleDateString("en-GB"),
         });
-      }, 2000);
+      }, 1000);
     });
 
     MOCK_PROJECTS.push(project);
