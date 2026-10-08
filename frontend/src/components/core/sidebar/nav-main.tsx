@@ -7,7 +7,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 
 type NavMainProps = {
   items: {
@@ -23,6 +23,8 @@ type NavMainProps = {
 };
 
 export function NavMain({ items }: NavMainProps) {
+  const location = useLocation();
+
   return (
     <SidebarGroup>
       <SidebarGroupLabel>Platform</SidebarGroupLabel>
@@ -30,7 +32,11 @@ export function NavMain({ items }: NavMainProps) {
         {items.map((item) => (
           <SidebarMenuItem key={item.title}>
             <SidebarMenuButton
-              // isActive
+              isActive={
+                item.url === "/"
+                  ? location.pathname === item.url
+                  : location.pathname.startsWith(item.url)
+              }
               tooltip={item.title}
               render={
                 <Link to={item.url}>
