@@ -6,6 +6,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 
+import { AppHeader } from "@/components/core/app-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,15 +41,22 @@ const connectedApps = [
 ];
 
 export default function SettingsPage() {
+  const headerCrumbs = [
+    { label: "Settings", pathname: "/settings" },
+  ];
+
   return (
-    <div className="flex flex-1 flex-col gap-8 p-4 pt-0">
-      <section className="space-y-1">
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          Manage your project preferences, integrations, and workspace
-          configuration.
-        </p>
-      </section>
+    <>
+      <AppHeader crumbs={headerCrumbs} />
+
+      <div className="flex flex-1 flex-col gap-8 p-4 pt-0">
+        <section className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+          <p className="text-sm text-muted-foreground">
+            Manage your project preferences, integrations, and workspace
+            configuration.
+          </p>
+        </section>
 
       <section className="grid gap-8 lg:grid-cols-[240px_1fr]">
         <aside className="space-y-2">
@@ -191,6 +199,7 @@ export default function SettingsPage() {
           </section>
         </div>
       </section>
-    </div>
+      </div>
+    </>
   );
 }
