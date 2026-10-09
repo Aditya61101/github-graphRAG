@@ -33,6 +33,9 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GithubIcon } from "@/components/icons";
 import { toast } from "@/components/ui/toast";
+import { Link } from "react-router";
+import { useAuth } from "@/contexts/auth-context";
+import { getApiErrorMessage, isAccessDenied } from "@/lib/api-error";
 
 type CreateProjectProps = {
   open: boolean;
@@ -46,6 +49,7 @@ export function CreateProject({
 }: PropsWithChildren<CreateProjectProps>) {
   const isMobile = useIsMobile();
   const queryClient = useQueryClient();
+  const { user, refreshStatus } = useAuth();
 
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
@@ -54,17 +58,28 @@ export function CreateProject({
     string | undefined
   >();
 
-  const { data: repositories, isLoading } = useQuery({
-    queryKey: ["repositories"],
-    queryFn: repositoryService.getRepositories,
-    initialData: [],
+  const {
+    data: repositories = [],
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ["repositories", user?.id],
+    queryFn: ({ signal }) => repositoryService.getRepositories(signal),
+    enabled: open && Boolean(user),
+    retry: false,
   });
+  const selectedRepository = repositories.find(
+    (repository) => repository.id === selectedRepositoryId
+  );
 
   const filteredRepositories = useMemo(() => {
     const normalizedSearch = search.toLowerCase();
 
     return repositories.filter((repository) =>
-      repository.name.toLowerCase().includes(normalizedSearch)
+      repository.fullName.toLowerCase().includes(normalizedSearch)
     );
   }, [repositories, search]);
 
@@ -153,8 +168,12 @@ export function CreateProject({
                 <span className="ml-2 text-destructive">*</span>
               </h3>
               <p className="text-sm text-muted-foreground">
-                Select a GitHub repository to associate with this project.
+                Select a public repository granted to the DecisionGuard GitHub
+                App.
               </p>
+              <Button variant="link" size="sm" render={<Link to="/install" />}>
+                Manage GitHub repository access
+              </Button>
             </div>
 
             <div className="rounded-xl border bg-background">
@@ -176,6 +195,30 @@ export function CreateProject({
                     {Array.from({ length: 6 }).map((_, index) => (
                       <Skeleton key={index} className="h-20 rounded-lg" />
                     ))}
+                  </div>
+                ) : isError ? (
+                  <div className="space-y-3 p-6 text-center">
+                    <p role="alert" className="text-sm text-destructive">
+                      {getApiErrorMessage(
+                        error,
+                        "Could not load repositories. Please try again."
+                      )}
+                    </p>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        void refetch();
+                        void refreshStatus();
+                      }}
+                      disabled={isFetching}
+                    >
+                      Try again
+                    </Button>
+                    {isAccessDenied(error) && (
+                      <Button variant="link" render={<Link to="/install" />}>
+                        Check GitHub access
+                      </Button>
+                    )}
                   </div>
                 ) : filteredRepositories.length > 0 ? (
                   filteredRepositories.map((repository) => {
@@ -200,7 +243,7 @@ export function CreateProject({
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <p className="truncate font-medium">
-                                {repository.name}
+                                {repository.fullName}
                               </p>
 
                               {repository.isPrivate && (
@@ -218,7 +261,12 @@ export function CreateProject({
 
                             <div className="mt-3 flex items-center gap-2 text-xs text-nowrap text-muted-foreground">
                               <GitBranchIcon className="size-3.5" />
-                              Last updated {repository.updatedAt}
+                              {repository.updatedAt
+                                ? `Last updated ${new Date(repository.updatedAt).toLocaleDateString("en-GB")}`
+                                : "Update date unavailable"}
+                              <span>
+                                {repository.status.replaceAll("_", " ")}
+                              </span>
                             </div>
                           </div>
                         </div>
@@ -235,11 +283,22 @@ export function CreateProject({
                   <div className="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center">
                     <GithubIcon className="size-10 text-muted-foreground" />
                     <div>
-                      <p className="font-medium">No repositories found</p>
+                      <p className="font-medium">
+                        {repositories.length
+                          ? "No matching repositories"
+                          : "No granted public repositories"}
+                      </p>
                       <p className="text-sm text-muted-foreground">
-                        Try adjusting your search query.
+                        {repositories.length
+                          ? "Try adjusting your search query."
+                          : "Choose public repositories for the App on GitHub, then check access again."}
                       </p>
                     </div>
+                    {!repositories.length && (
+                      <Button variant="outline" render={<Link to="/install" />}>
+                        Connect repositories on GitHub
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>
@@ -253,7 +312,9 @@ export function CreateProject({
             disabled={
               !projectName.trim() ||
               !projectDescription.trim() ||
-              !selectedRepositoryId ||
+              !selectedRepository ||
+              isError ||
+              isFetching ||
               isPending
             }
           >

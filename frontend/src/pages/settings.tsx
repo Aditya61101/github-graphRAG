@@ -63,7 +63,7 @@ export default function SettingsPage() {
   ];
 
   const displayName = user?.username ?? "User";
-  const email = user?.email ?? "user@example.com";
+  const email = user?.email ?? "";
 
   return (
     <>

@@ -1,84 +1,102 @@
 import {
   createContext,
+  useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type PropsWithChildren,
 } from "react";
-import { jwtDecode } from "jwt-decode";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+
+import { authService } from "@/api/auth-service";
+import { isValidToken, mapAuthUser } from "@/lib/auth-flow";
+import { getApiErrorMessage } from "@/lib/api-error";
+import type { AuthStatus, User } from "@/types/auth";
 
 type AuthContextType = {
   token: string | null;
   user: User | null;
+  status: AuthStatus | undefined;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (token: string) => void;
+  isRefreshing: boolean;
+  statusError: string | null;
+  login: (token: string) => boolean;
   logout: () => void;
-};
-
-type User = {
-  username: string;
-  email: string;
-  avatarUrl?: string;
-};
-
-type JwtPayload = {
-  sub: string;
-  username: string;
-  email: string;
-  avatar_url?: string;
-  exp: number;
+  refreshStatus: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const decodeUserFromToken = (token: string): User => {
-  const decoded = jwtDecode<JwtPayload>(token);
-  return {
-    username: decoded.username,
-    email: decoded.email,
-    avatarUrl: decoded.avatar_url,
-  };
-};
+function restoreToken(): string | null {
+  // The callback will replace the token. Do not send a stale account's token
+  // to /auth/me before that effect runs (an old 401 could interrupt login).
+  if (window.location.pathname === "/auth/success") return null;
+  const stored = localStorage.getItem("token");
+  if (stored && isValidToken(stored)) return stored;
+  localStorage.removeItem("token");
+  return null;
+}
 
 export function AuthProvider({ children }: PropsWithChildren) {
-  const [isLoading, setIsLoading] = useState(true);
-  const [token, setToken] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(null);
+  const queryClient = useQueryClient();
+  const [token, setToken] = useState<string | null>(restoreToken);
+  const {
+    data: status,
+    error,
+    isPending,
+    isFetching,
+    refetch,
+  } = useQuery({
+    queryKey: ["auth", token],
+    queryFn: ({ signal }) => authService.getStatus(signal),
+    enabled: Boolean(token),
+    retry: false,
+    staleTime: 60_000,
+  });
 
-  useEffect(() => {
-    const storedToken = localStorage.getItem("token");
+  const login = useCallback(
+    (newToken: string) => {
+      if (!isValidToken(newToken)) return false;
+      if (localStorage.getItem("token") !== newToken) queryClient.clear();
+      localStorage.setItem("token", newToken);
+      setToken(newToken);
+      return true;
+    },
+    [queryClient]
+  );
 
-    if (storedToken) {
-      setToken(storedToken);
-      setUser(decodeUserFromToken(storedToken));
-    }
-    setIsLoading(false);
-  }, []);
-
-  const login = (newToken: string) => {
-    localStorage.setItem("token", newToken);
-    setToken(newToken);
-    setUser(decodeUserFromToken(newToken));
-  };
-
-  const logout = () => {
+  const logout = useCallback(() => {
     localStorage.removeItem("token");
+    queryClient.clear();
     setToken(null);
-    setUser(null);
-  };
+  }, [queryClient]);
+
+  const refreshStatus = useCallback(async () => {
+    await refetch();
+    await queryClient.invalidateQueries({ queryKey: ["repositories"] });
+  }, [refetch, queryClient]);
 
   const value = useMemo(
     () => ({
       token,
-      user,
+      user: token && status ? mapAuthUser(status) : null,
+      status: token ? status : undefined,
       isAuthenticated: Boolean(token),
-      isLoading,
+      isLoading: Boolean(token) && isPending,
+      isRefreshing: isFetching,
+      statusError:
+        token && error
+          ? getApiErrorMessage(
+              error,
+              "Could not reach the backend. Please retry; your installation status has not been confirmed."
+            )
+          : null,
       login,
       logout,
+      refreshStatus,
     }),
-    [token, isLoading, user]
+    [token, status, error, isPending, isFetching, login, logout, refreshStatus]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -86,10 +104,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-
-  if (!context) {
-    throw new Error("useAuth must be used within AuthProvider");
-  }
-
+  if (!context) throw new Error("useAuth must be used within AuthProvider");
   return context;
 }

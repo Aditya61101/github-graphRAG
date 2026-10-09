@@ -11,16 +11,20 @@ import {
 import { Field, FieldGroup } from "@/components/ui/field";
 import { Logo } from "@/components/core/logo";
 import { useAuth } from "@/contexts/auth-context";
+import { authService } from "@/api/auth-service";
+import { LoadingScreen } from "@/components/core/loading-screen";
 
 export default function LoginPage() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) return <LoadingScreen />;
 
   if (isAuthenticated) {
     return <Navigate to="/" replace />;
   }
 
   const loginWithGithub = () => {
-    window.location.href = `${import.meta.env.VITE_BACKEND_URL}/auth/github/login`;
+    authService.loginWithGithub();
   };
 
   return (

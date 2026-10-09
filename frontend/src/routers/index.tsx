@@ -8,9 +8,14 @@ import ProjectsPage from "@/pages/projects";
 import ProjectDetailsPage from "@/pages/project-details";
 import ExplorePage from "@/pages/explore";
 import SettingsPage from "@/pages/settings";
+import InstallPage from "@/pages/install";
 
 export const appRouter = createBrowserRouter([
   ...authRoutes,
+  {
+    element: <ProtectedRouter requireInstallation={false} />,
+    children: [{ path: "/install", element: <InstallPage /> }],
+  },
   {
     element: <ProtectedRouter />,
     children: [
