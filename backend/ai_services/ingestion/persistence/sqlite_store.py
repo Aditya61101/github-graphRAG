@@ -6,7 +6,8 @@ from typing import Any
 import os
 from cryptography.fernet import Fernet
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
 from ai_services.ingestion.persistence.database import get_session_factory, init_db
@@ -14,6 +15,7 @@ from ai_services.ingestion.persistence.models import (
     ADRModel,
     GitHubConnectionModel,
     IngestionRunModel,
+    PullRequestRevisionModel,
     RepositoryModel,
     UserModel,
     utc_now,
@@ -40,6 +42,44 @@ class SqliteApplicationStore:
         self.session_factory = session_factory or get_session_factory()
         key = os.getenv('GITHUB_TOKEN_ENCRYPTION_KEY')
         self.token_cipher = Fernet(key.encode()) if key else None
+
+    def claim_pr_revision(self, repository_id, event) -> bool:
+        """Unique insert/conditional update atomically excludes running/completed jobs."""
+        values = dict(revision_key=event.revision_key, repository_id=repository_id,
+            github_repository_id=str(event.github_repository_id), pull_request_number=event.pull_request_number,
+            base_sha=event.base_sha, head_sha=event.head_sha, delivery_id=event.delivery_id,
+            status='RUNNING', attempts=1, started_at=utc_now())
+        with self.session_factory() as session:
+            result = session.execute(insert(PullRequestRevisionModel).values(**values).on_conflict_do_nothing())
+            claimed = result.rowcount == 1
+            if not claimed:
+                result = session.execute(update(PullRequestRevisionModel).where(
+                    PullRequestRevisionModel.revision_key == event.revision_key,
+                    PullRequestRevisionModel.status.in_(['FAILED', 'SUPERSEDED'])).values(
+                    status='RUNNING', delivery_id=event.delivery_id, started_at=utc_now(), completed_at=None,
+                    error=None, error_type=None, attempts=PullRequestRevisionModel.attempts + 1))
+                claimed = result.rowcount == 1
+            session.commit()
+            return claimed
+
+    def finish_pr_revision(self, revision_key, status, error_type=None, error=None):
+        with self.session_factory() as session:
+            session.execute(update(PullRequestRevisionModel).where(
+                PullRequestRevisionModel.revision_key == revision_key).values(
+                status=status, completed_at=utc_now(), error_type=error_type, error=error))
+            session.commit()
+
+    def get_pr_revision(self, revision_key):
+        with self.session_factory() as session:
+            return session.get(PullRequestRevisionModel, revision_key)
+
+    def recover_interrupted_pr_revisions(self):
+        # Called once at single-worker startup, never by a request or second job.
+        with self.session_factory() as session:
+            session.execute(update(PullRequestRevisionModel).where(
+                PullRequestRevisionModel.status == 'RUNNING').values(status='FAILED',
+                completed_at=utc_now(), error_type='ProcessInterrupted', error='Worker stopped; redeliver to retry'))
+            session.commit()
 
     def encrypt_token(self, token: str) -> str:
         if not self.token_cipher:

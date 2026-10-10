@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 from typing import Sequence
 
 import httpx
@@ -30,6 +31,10 @@ from .interface import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class GitOutputLimitError(RepositorySourceError):
+    """Git output exceeded an explicit bound; no truncated result is returned."""
 
 
 class GitHubRepositorySource(RepositorySource):
@@ -128,7 +133,10 @@ class GitHubRepositorySource(RepositorySource):
         credential: GitHubCredential | None = None,
         cwd: Path | None = None,
         check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
+        binary: bool = False,
+        max_output_bytes: int | None = None,
+        timeout_seconds: int | None = None,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         cmd = ["git"] + list(args)
         env = os.environ.copy()
         # Never allow Git to invoke interactive credential helpers/browser auth
@@ -149,19 +157,45 @@ class GitHubRepositorySource(RepositorySource):
             env['GIT_CONFIG_KEY_2'] = 'http.extraheader'
             env['GIT_CONFIG_VALUE_2'] = f'Authorization: Basic {auth}'
 
+        if max_output_bytes is not None:
+            # Spool bounded-reader commands to disk rather than materializing
+            # potentially huge diffs in memory. Content is size-checked first.
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+                try:
+                    result = subprocess.run(cmd, cwd=str(cwd) if cwd else None,
+                        stdout=output, stderr=errors, env=env, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    raise RepositorySourceError('Git operation timed out') from None
+                size = output.tell()
+                output.seek(0)
+                errors.seek(0)
+                stderr = errors.read(8192).decode('utf-8', errors='replace')
+                if check and result.returncode:
+                    if self._is_auth_error(stderr):
+                        raise RepositoryAuthenticationError('GitHub Git credentials expired or access denied')
+                    raise RepositorySourceError(self._safe_git_error(stderr, credential))
+                if size > max_output_bytes:
+                    raise GitOutputLimitError('Git output exceeds the configured limit')
+                stdout = output.read()
+                return subprocess.CompletedProcess(cmd, result.returncode,
+                    stdout if binary else stdout.decode('utf-8', errors='surrogateescape'),
+                    stderr.encode() if binary else stderr)
+
         res = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
             capture_output=True,
-            text=True,
+            text=not binary,
             check=False,
-            encoding="utf-8",
-            errors="replace",
+            encoding=None if binary else "utf-8",
+            errors=None if binary else "replace",
             env=env,
+            timeout=timeout_seconds,
         )
         if check and res.returncode != 0:
-            cleaned_err = self._safe_git_error(res.stderr.strip(), credential)
-            if self._is_auth_error(res.stderr):
+            stderr = res.stderr.decode('utf-8', errors='replace') if binary else res.stderr
+            cleaned_err = self._safe_git_error(stderr.strip(), credential)
+            if self._is_auth_error(stderr):
                 raise RepositoryAuthenticationError('GitHub Git credentials expired or access denied')
             raise RepositorySourceError(f"Git command failed: {cleaned_err}")
         return res

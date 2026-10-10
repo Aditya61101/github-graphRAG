@@ -176,6 +176,24 @@ class ConversationScopeModel(Base):
     repository_id = Column(String(64), ForeignKey("repositories.id"), nullable=False)
 
 
+class PullRequestRevisionModel(Base):
+    """Operational metadata only; never source contents or serialized change sets."""
+    __tablename__ = 'pull_request_revisions'
+    revision_key = Column(String(64), primary_key=True)
+    repository_id = Column(String(64), ForeignKey('repositories.id', ondelete='CASCADE'), nullable=False)
+    github_repository_id = Column(String(64), nullable=False)
+    pull_request_number = Column(Integer, nullable=False)
+    base_sha = Column(String(40), nullable=False)
+    head_sha = Column(String(40), nullable=False)
+    delivery_id = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False)
+    attempts = Column(Integer, nullable=False, default=1)
+    started_at = Column(DateTime, nullable=False, default=utc_now)
+    completed_at = Column(DateTime, nullable=True)
+    error_type = Column(String(100), nullable=True)
+    error = Column(String(500), nullable=True)
+
+
 class IngestionRunModel(Base):
     """Tracks operational state and history for repository ingestion jobs."""
 

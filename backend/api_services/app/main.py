@@ -39,6 +39,7 @@ from ai_services.ingestion.persistence.sqlite_store import (
     SqliteApplicationStore,
 )
 from ai_services.ingestion.service import RepositoryIngestionService
+from ai_services.ingestion.pr.service import PullRequestIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
 from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
@@ -130,6 +131,12 @@ async def lifespan(app: FastAPI):
         groq_client=groq_client,
         github_app=github_app,
     )
+    sqlite_store.recover_interrupted_pr_revisions()
+    pr_ingestion_service = PullRequestIngestionService(
+        repository_source=repo_source, metadata_store=sqlite_store, github_app=github_app,
+        repository_lock=ingestion_service._get_lock, state_dir=ingestion_service.state_dir,
+    )
+    app.state.pr_ingestion_service = pr_ingestion_service
 
     if embedder is None:
         raise RuntimeError("ADR Phase 2 requires the configured embedding service")
@@ -183,6 +190,7 @@ async def lifespan(app: FastAPI):
         reranker=reranker,
         retrieval_settings=RETRIEVAL_SETTINGS,
         ingestion_service=ingestion_service,
+        pr_ingestion_service=pr_ingestion_service,
         sqlite_store=sqlite_store,
         adr_service=adr_service,
         graph_service=graph_service,

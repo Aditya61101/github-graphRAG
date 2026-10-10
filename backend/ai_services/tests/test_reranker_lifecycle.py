@@ -61,7 +61,7 @@ async def test_fastapi_lifespan_shares_one_model_with_dependencies_and_agent(mon
     for name in (
         "AsyncAzureOpenAI", "AzureOpenAIEmbedder", "AzureChatOpenAI", "AzureOpenAILLM",
         "SqliteApplicationStore", "GitHubAppService", "GitHubOAuth", "GitHubRepositorySource",
-        "RepositoryIngestionService", "ADRNeo4jWriter", "ADRProcessingService",
+        "RepositoryIngestionService", "PullRequestIngestionService", "ADRNeo4jWriter", "ADRProcessingService",
         "ADRChunker", "ADRArchitecturalExtractor", "ADREntityResolver", "ADRService",
         "Neo4jGraphRepository", "RepositoryGraphService",
     ):
@@ -77,6 +77,9 @@ async def test_fastapi_lifespan_shares_one_model_with_dependencies_and_agent(mon
         assert agent_factory.call_args.kwargs["reranker"] is reranker
         assert agent_factory.call_args.kwargs["retrieval_settings"] is main.RETRIEVAL_SETTINGS
         factory.assert_called_once_with(main.RETRIEVAL_SETTINGS)
+        assert app.state.pr_ingestion_service is app.state.deps.pr_ingestion_service
+        assert main.PullRequestIngestionService.call_args.kwargs['repository_source'] is main.GitHubRepositorySource.return_value
+        assert main.PullRequestIngestionService.call_args.kwargs['repository_lock'] == main.RepositoryIngestionService.return_value._get_lock
     driver.close.assert_called_once()
 
 

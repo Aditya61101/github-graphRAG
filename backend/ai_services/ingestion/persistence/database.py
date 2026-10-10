@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base
+from .models import Base, PullRequestRevisionModel
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "decisionguard.db"
 
@@ -49,6 +49,8 @@ def init_db() -> None:
         if 'app_schema_version' in tables:
             if conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar() != 1:
                 raise RuntimeError('Unsupported application database schema version')
+            # Additive PR metadata table only; no existing columns are altered.
+            PullRequestRevisionModel.__table__.create(conn, checkfirst=True)
         else:
             Base.metadata.create_all(conn)
             conn.exec_driver_sql('CREATE TABLE app_schema_version (version INTEGER NOT NULL)')
