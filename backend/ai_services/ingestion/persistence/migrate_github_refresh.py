@@ -7,7 +7,7 @@ def upgrade(engine):
         if 'app_schema_version' not in inspect(conn).get_table_names():
             raise RuntimeError('Run migrate_github_app first')
         version = conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar()
-        if version == 2:
+        if version in {2, 3}:
             return
         if version != 1:
             raise RuntimeError('Unsupported application database schema version')

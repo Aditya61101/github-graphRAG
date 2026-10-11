@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { useAuth } from "@/contexts/auth-context";
-import { getAuthDestination, getCallbackDestination } from "@/lib/auth-flow";
+import { getAuthDestination } from "@/lib/auth-flow";
+import { parseInstallationOutcome } from "@/lib/onboarding-flow";
 import { LoadingScreen } from "@/components/core/loading-screen";
 import { AuthStatusError } from "@/components/core/auth-status-error";
 
@@ -13,7 +14,9 @@ export default function AuthSuccess() {
     const params = new URLSearchParams(window.location.search);
     return {
       token: params.get("token"),
-      destination: getCallbackDestination(params.get("next")),
+      installationOutcome: parseInstallationOutcome(
+        params.get("installation_outcome")
+      ),
     };
   });
 
@@ -32,12 +35,21 @@ export default function AuthSuccess() {
 
   useEffect(() => {
     if (token !== callback.token || isLoading || statusError || !status) return;
-    const destination = getAuthDestination(status);
-    // Current verified access takes precedence over the initial callback hint.
-    navigate(
-      destination === callback.destination ? callback.destination : destination,
-      { replace: true }
-    );
+    // An unsuccessful installation attempt needs a recoverable access screen,
+    // including for completed users. This hint never changes completion.
+    const needsRecovery =
+      callback.installationOutcome !== null &&
+      callback.installationOutcome !== "success";
+    const destination = needsRecovery ? "/install" : getAuthDestination(status);
+    // Persisted completion from /auth/me is authoritative. Callback parameters
+    // cannot complete onboarding or choose an arbitrary destination.
+    navigate(destination, {
+      replace: true,
+      state:
+        destination === "/install"
+          ? { installationOutcome: callback.installationOutcome }
+          : null,
+    });
   }, [callback, token, status, isLoading, statusError, navigate]);
 
   if (token === callback.token && statusError) return <AuthStatusError />;

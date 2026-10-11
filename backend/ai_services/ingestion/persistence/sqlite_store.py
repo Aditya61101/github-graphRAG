@@ -199,6 +199,19 @@ class SqliteApplicationStore:
         with self.session_factory() as session:
             return session.get(UserModel, user_id)
 
+    def complete_onboarding(self, user_id: str) -> UserModel:
+        """Record the first completion only; concurrent/repeated calls retain it."""
+        with self.session_factory() as session:
+            session.execute(update(UserModel).where(
+                UserModel.id == user_id,
+                UserModel.onboarding_completed_at.is_(None),
+            ).values(onboarding_completed_at=utc_now()))
+            user = session.get(UserModel, user_id)
+            if user is None:
+                raise ValueError('User does not exist')
+            session.commit()
+            return user
+
     def get_user_github_connection(self, user_id: str) -> GitHubConnectionModel | None:
         """Fetch the active GitHub connection for an authenticated application user."""
         with self.session_factory() as session:

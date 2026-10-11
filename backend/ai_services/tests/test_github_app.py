@@ -158,9 +158,9 @@ def test_login_pkce_fixed_callback_and_existing_installation(env):
     assert 'scope' not in params
     response = callback(env, params['state'][0])
     assert response.status_code == 307
-    assert parse_qs(urlparse(response.headers['location']).query)['next'] == ['/dashboard']
+    assert parse_qs(urlparse(response.headers['location']).query)['next'] == ['/install']
     me = env.client.get('/auth/me', headers=env.headers).json()
-    assert not me['installation_onboarding_required'] and not me['reconnect_required']
+    assert me['installation_onboarding_required'] and not me['reconnect_required']
     assert 'access_token' not in json.dumps(me)
 
 
@@ -205,11 +205,13 @@ def test_installation_completion_before_or_after_webhook(env, webhook_first):
 def test_installation_hint_and_account_switch_cannot_grant_access(env):
     response = env.client.post('/auth/github/install', headers=env.headers)
     state = parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
-    assert callback(env, state, installation_id='999').status_code == 403
+    response = callback(env, state, installation_id='999', setup_action='install')
+    assert parse_qs(urlparse(response.headers['location']).query)['installation_outcome'] == ['access_denied']
+    assert env.store.get_user(env.user.id).onboarding_completed_at is None
     response = env.client.post('/auth/github/install', headers=env.headers)
     state = parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
     env.state['identity'] = {'id': 2, 'login': 'bob'}
-    assert callback(env, state, installation_id='10').status_code == 403
+    assert callback(env, state, installation_id='10', setup_action='install').status_code == 403
     assert env.store.get_user_github_connection(env.user.id).github_user_id == '1'
 
 
@@ -396,7 +398,9 @@ def test_pending_installation_does_not_become_active(env):
     env.state['user_installations'] = []
     started = env.client.post('/auth/github/install', headers=env.headers)
     state = parse_qs(urlparse(started.json()['installation_url']).query)['state'][0]
-    assert callback(env, state, installation_id='20', setup_action='install').status_code == 403
+    response = callback(env, state, installation_id='20', setup_action='request')
+    assert parse_qs(urlparse(response.headers['location']).query)['installation_outcome'] == ['pending_approval']
+    assert env.store.get_user(env.user.id).onboarding_completed_at is None
     with env.store.session_factory() as session:
         assert session.get(GitHubInstallationModel, '20') is None
 

@@ -11,7 +11,17 @@ const location = {
   },
 };
 const status = {
-  user: { id: "usr_1", username: "alice", email: null, avatar_url: null },
+  user: {
+    id: "usr_1",
+    username: "alice",
+    email: null,
+    avatar_url: null,
+    onboarding_completed_at: "2026-10-11T00:00:00",
+  },
+  onboarding_completed: true,
+  onboarding_completed_at: "2026-10-11T00:00:00",
+  next: "/projects",
+  installation_discovery_status: "not_requested",
   installations: [],
   installation_onboarding_required: false,
   reconnect_required: false,
@@ -64,18 +74,20 @@ test("malformed, expired, and subject-less tokens are rejected", () => {
   }
 });
 
-test("current status sends returning users to projects, missing grants or reconnect to install", () => {
+test("persisted completion routes returning users to projects even without grants or during reconnect", () => {
   assert.equal(flow.getAuthDestination(status), "/projects");
   assert.equal(
     flow.getAuthDestination({
       ...status,
-      installation_onboarding_required: true,
+      onboarding_completed: false,
+      onboarding_completed_at: null,
+      installation_onboarding_required: false,
     }),
     "/install"
   );
   assert.equal(
     flow.getAuthDestination({ ...status, reconnect_required: true }),
-    "/install"
+    "/projects"
   );
 });
 

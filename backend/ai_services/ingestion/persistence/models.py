@@ -31,6 +31,7 @@ class UserModel(Base):
     username = Column(String(100), nullable=False, unique=True, index=True)
     email = Column(String(255), nullable=True, index=True)
     avatar_url = Column(String(500), nullable=True)
+    onboarding_completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -42,6 +43,7 @@ class UserModel(Base):
             "username": self.username,
             "email": self.email,
             "avatar_url": self.avatar_url,
+            "onboarding_completed_at": self.onboarding_completed_at.isoformat() if self.onboarding_completed_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

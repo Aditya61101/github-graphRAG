@@ -9,9 +9,13 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { authService } from "@/api/auth-service";
-import { isValidToken, mapAuthUser } from "@/lib/auth-flow";
+import {
+  isValidToken,
+  mapAuthUser,
+  mergeOnboardingCompletion,
+} from "@/lib/auth-flow";
 import { getApiErrorMessage } from "@/lib/api-error";
-import type { AuthStatus, User } from "@/types/auth";
+import type { AuthStatus, OnboardingCompletion, User } from "@/types/auth";
 
 type AuthContextType = {
   token: string | null;
@@ -24,6 +28,7 @@ type AuthContextType = {
   login: (token: string) => boolean;
   logout: () => void;
   refreshStatus: () => Promise<void>;
+  confirmOnboarding: (result: OnboardingCompletion) => void;
 };
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -77,6 +82,20 @@ export function AuthProvider({ children }: PropsWithChildren) {
     await queryClient.invalidateQueries({ queryKey: ["repositories"] });
   }, [refetch, queryClient]);
 
+  const confirmOnboarding = useCallback(
+    (result: OnboardingCompletion) => {
+      if (!token || localStorage.getItem("token") !== token) {
+        throw new Error("Your session changed. Please sign in again.");
+      }
+      queryClient.setQueryData<AuthStatus>(["auth", token], (current) => {
+        if (!current)
+          throw new Error("Your account has not been verified. Please retry.");
+        return mergeOnboardingCompletion(current, result);
+      });
+    },
+    [queryClient, token]
+  );
+
   const value = useMemo(
     () => ({
       token,
@@ -95,8 +114,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
       login,
       logout,
       refreshStatus,
+      confirmOnboarding,
     }),
-    [token, status, error, isPending, isFetching, login, logout, refreshStatus]
+    [
+      token,
+      status,
+      error,
+      isPending,
+      isFetching,
+      login,
+      logout,
+      refreshStatus,
+      confirmOnboarding,
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

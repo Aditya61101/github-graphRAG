@@ -138,7 +138,7 @@ async def test_persistence_failure_never_returns_rotated_token(env, monkeypatch)
     assert env.store.get_user_github_connection(env.user.id).refresh_token == original.refresh_token
 
 
-def test_me_discovers_installations_after_refresh(env):
+def test_onboarding_discovers_installations_after_refresh(env):
     credentials(env)
     original = env.service.client
     refreshes = []
@@ -151,11 +151,11 @@ def test_me_discovers_installations_after_refresh(env):
             assert request.headers['Authorization'] == 'Bearer rotated-access'
         return await original.send(request)
     env.service.client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
-    response = env.client.get('/auth/me', headers=env.headers)
+    response = env.client.get('/auth/onboarding', headers=env.headers)
     assert response.status_code == 200
     assert response.json()['installations'][0]['id'] == '10'
-    assert not response.json()['reconnect_required']
-    assert not response.json()['installation_onboarding_required']
+    assert response.json()['installation_discovery_status'] == 'complete'
+    assert response.json()['eligible'] and not response.json()['onboarding_completed']
     assert len(refreshes) == 1
     assert 'rotated-' not in response.text
 
@@ -163,7 +163,7 @@ def test_me_discovers_installations_after_refresh(env):
 @pytest.mark.parametrize('status', [403, 429, 503])
 def test_discovery_failure_is_not_an_empty_installation_result(env, status):
     env.state['user_status'] = status
-    response = env.client.get('/auth/me', headers=env.headers)
+    response = env.client.get('/auth/onboarding', headers=env.headers)
     assert response.status_code == (403 if status == 403 else 503)
     assert 'installations' not in response.json()
     assert env.store.get_user_github_connection(env.user.id).access_status == 'ACTIVE'
@@ -171,7 +171,7 @@ def test_discovery_failure_is_not_an_empty_installation_result(env, status):
 
 def test_installation_auth_failure_does_not_require_user_reconnection(env):
     env.service.reconcile = AsyncMock(side_effect=GitHubAppError(401, 'Installation authentication failed'))
-    response = env.client.get('/auth/me', headers=env.headers)
+    response = env.client.get('/auth/onboarding', headers=env.headers)
     assert response.status_code == 502
     assert 'reconnect_required' not in response.json()
     assert env.store.get_user_github_connection(env.user.id).access_status == 'ACTIVE'
@@ -339,16 +339,21 @@ def test_schema_one_requires_explicit_refresh_upgrade(env, monkeypatch):
     with pytest.raises(RuntimeError, match='migrate_github_refresh'):
         database.init_db()
     upgrade(env.engine)
+    with pytest.raises(RuntimeError, match='migrate_onboarding'):
+        database.init_db()
+    from ai_services.ingestion.persistence.migrate_onboarding import upgrade as upgrade_onboarding
+    upgrade_onboarding(env.engine)
     database.init_db()
 
 
-def test_new_database_starts_at_schema_two(tmp_path, monkeypatch):
+def test_new_database_starts_at_schema_three(tmp_path, monkeypatch):
     from ai_services.ingestion.persistence import database
     engine = create_engine(f'sqlite:///{tmp_path / "new.db"}')
     monkeypatch.setattr(database, 'get_engine', lambda: engine)
     database.init_db()
     with engine.connect() as conn:
-        assert conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar() == 2
+        assert conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar() == 3
+        assert 'onboarding_completed_at' in {c['name'] for c in inspect(conn).get_columns('users')}
         assert 'refresh_token' in {c['name'] for c in inspect(conn).get_columns('github_connections')}
     engine.dispose()
 

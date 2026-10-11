@@ -1,140 +1,132 @@
 import { useState } from "react";
-import { Link } from "react-router";
-import { Loader, RefreshCwIcon } from "lucide-react";
-
+import { Navigate, useLocation, useNavigate } from "react-router";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { authService } from "@/api/auth-service";
 import { useAuth } from "@/contexts/auth-context";
-import { getApiErrorMessage } from "@/lib/api-error";
-import { GithubIcon } from "@/components/icons";
-import { Logo } from "@/components/core/logo";
-import { Button } from "@/components/ui/button";
+import { OnboardingScreen } from "@/components/onboarding/onboarding-screen";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  getOnboardingError,
+  parseInstallationOutcome,
+} from "@/lib/onboarding-flow";
+import type { InstallationOutcome } from "@/types/auth";
 
 export default function InstallPage() {
-  const { user, status, isRefreshing, refreshStatus, logout } = useAuth();
-  const [isStarting, setIsStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const reconnect = status?.reconnect_required;
-  const ready =
-    status && !reconnect && !status.installation_onboarding_required;
+  const { user, token, status, confirmOnboarding, logout } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  // A deliberate visit after onboarding manages access; completing onboarding
+  // during this visit must still send a first-time user directly to projects.
+  const [manageAccess] = useState(status?.onboarding_completed === true);
+  const callbackState = location.state as {
+    installationOutcome?: unknown;
+  } | null;
+  const hint = parseInstallationOutcome(callbackState?.installationOutcome);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionOutcome, setActionOutcome] =
+    useState<InstallationOutcome | null>(null);
+  const discovery = useQuery({
+    queryKey: ["onboarding", token],
+    queryFn: async ({ signal }) => {
+      const result = await authService.getOnboarding(signal);
+      // Persisted completion takes precedence over repository availability.
+      if (result.onboarding_completed) confirmOnboarding(result);
+      return result;
+    },
+    enabled: Boolean(token) && (manageAccess || !status?.onboarding_completed),
+    retry: false,
+    staleTime: 0,
+  });
 
-  const startInstallation = async () => {
-    setError(null);
-    setIsStarting(true);
-    try {
-      const url = await authService.startInstallation();
-      window.location.assign(url);
-    } catch (error) {
-      setError(
-        getApiErrorMessage(
-          error,
-          "Could not start installation. Please try again."
-        )
-      );
-      setIsStarting(false);
-    }
+  const reportError = (error: unknown) => {
+    const failure = getOnboardingError(error);
+    setActionError(failure.message);
+    setActionOutcome(failure.outcome);
   };
+  const install = useMutation({
+    mutationFn: authService.startInstallation,
+    onSuccess: (url) => window.location.assign(url),
+    onError: reportError,
+  });
+  const complete = useMutation({
+    mutationFn: async () => {
+      const result = await authService.completeOnboarding();
+      confirmOnboarding(result);
+    },
+    onSuccess: () => navigate("/projects", { replace: true }),
+    onError: reportError,
+  });
+  const verify = useMutation({
+    mutationFn: async () => {
+      const result = await authService.verifyInstallation();
+      if (result.onboarding_completed) confirmOnboarding(result);
+      return result;
+    },
+    onSuccess: (result) => {
+      setActionOutcome(result.installation_outcome);
+      if (
+        result.installation_outcome === "success" &&
+        result.onboarding_completed
+      )
+        navigate("/projects", { replace: true });
+    },
+    onError: reportError,
+  });
 
+  if (status?.onboarding_completed && !manageAccess)
+    return <Navigate to="/projects" replace />;
+
+  const failure = discovery.error ? getOnboardingError(discovery.error) : null;
+  const outcome =
+    actionOutcome ??
+    (discovery.data ? discovery.data.installation_outcome : hint);
+  const resetAction = () => {
+    setActionError(null);
+    setActionOutcome(null);
+  };
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-muted p-6 md:p-10">
-      <div className="flex w-full max-w-lg flex-col gap-6">
-        <Logo />
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-xl">
-              {reconnect
-                ? "Reconnect GitHub"
-                : "Connect DecisionGuard to GitHub"}
-            </CardTitle>
-            <CardDescription>
-              Signed in as {user?.username}.{" "}
-              {reconnect
-                ? "Your GitHub authorization needs to be renewed before repository access can be verified."
-                : "Install the GitHub App and choose which repositories to grant access to on GitHub. This prototype supports public repositories only."}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {!reconnect && !ready && (
-              <p className="text-sm text-muted-foreground">
-                No usable public repository grants were found. If an
-                installation is awaiting organization approval, complete that
-                approval on GitHub and check access again.
-              </p>
-            )}
-            {status && status.installations.length > 0 && (
-              <ul className="space-y-2">
-                {status.installations.map((installation) => (
-                  <li
-                    key={installation.id}
-                    className="rounded-lg border p-3 text-sm"
-                  >
-                    <span className="font-medium">
-                      {installation.account_login}
-                    </span>
-                    <span className="ml-2 text-muted-foreground">
-                      {installation.public_repository_count} accessible public
-                      repositories
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {error && (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            )}
-            <div className="flex flex-col gap-3">
-              {reconnect ? (
-                <Button onClick={authService.loginWithGithub}>
-                  <GithubIcon />
-                  Reconnect GitHub
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => void startInstallation()}
-                  disabled={isStarting || isRefreshing}
-                >
-                  {isStarting ? (
-                    <Loader className="animate-spin" />
-                  ) : (
-                    <GithubIcon />
-                  )}
-                  {isStarting
-                    ? "Opening GitHub..."
-                    : ready
-                      ? "Manage repository access on GitHub"
-                      : "Install DecisionGuard"}
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                onClick={() => void refreshStatus()}
-                disabled={isStarting || isRefreshing}
-              >
-                <RefreshCwIcon
-                  className={isRefreshing ? "animate-spin" : undefined}
-                />
-                Check access again
-              </Button>
-              {ready && (
-                <Button variant="outline" render={<Link to="/projects" />}>
-                  Continue to projects
-                </Button>
-              )}
-              <Button variant="ghost" onClick={logout}>
-                Sign out
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+    <OnboardingScreen
+      manageAccess={manageAccess}
+      onReturnProjects={() => navigate("/projects")}
+      username={user?.username}
+      data={discovery.data}
+      isLoading={discovery.isPending && !discovery.error}
+      isRefreshing={discovery.isFetching}
+      busy={install.isPending || complete.isPending || verify.isPending}
+      action={
+        install.isPending
+          ? "install"
+          : complete.isPending
+            ? "complete"
+            : verify.isPending
+              ? "verify"
+              : null
+      }
+      discoveryError={failure?.message ?? null}
+      actionError={actionError}
+      outcome={outcome}
+      reconnect={
+        status?.reconnect_required === true ||
+        actionOutcome === "reauthorization_required" ||
+        failure?.outcome === "reauthorization_required"
+      }
+      onInstall={() => {
+        resetAction();
+        install.mutate();
+      }}
+      onComplete={() => {
+        resetAction();
+        complete.mutate();
+      }}
+      onVerify={() => {
+        resetAction();
+        verify.mutate();
+      }}
+      onRefresh={() => {
+        resetAction();
+        void discovery.refetch();
+      }}
+      onReconnect={authService.loginWithGithub}
+      onLogout={logout}
+    />
   );
 }

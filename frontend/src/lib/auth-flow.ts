@@ -1,5 +1,5 @@
 import { jwtDecode } from "jwt-decode";
-import type { AuthStatus, User } from "@/types/auth";
+import type { AuthStatus, OnboardingCompletion, User } from "@/types/auth";
 
 export function isValidToken(token: string): boolean {
   try {
@@ -27,9 +27,31 @@ export function mapAuthUser(status: AuthStatus): User {
 export function getAuthDestination(
   status: AuthStatus
 ): "/install" | "/projects" {
-  return status.reconnect_required || status.installation_onboarding_required
-    ? "/install"
-    : "/projects";
+  return status.onboarding_completed === true ? "/projects" : "/install";
+}
+
+export function mergeOnboardingCompletion(
+  status: AuthStatus,
+  result: OnboardingCompletion
+): AuthStatus {
+  if (
+    result.onboarding_completed !== true ||
+    !result.onboarding_completed_at ||
+    result.next !== "/projects"
+  ) {
+    throw new Error("Onboarding has not been confirmed. Please try again.");
+  }
+  return {
+    ...status,
+    onboarding_completed: true,
+    onboarding_completed_at: result.onboarding_completed_at,
+    next: "/projects",
+    user: {
+      ...status.user,
+      onboarding_completed_at: result.onboarding_completed_at,
+    },
+    installation_onboarding_required: false,
+  };
 }
 
 // Never navigate to an arbitrary URL supplied in the callback query string.
