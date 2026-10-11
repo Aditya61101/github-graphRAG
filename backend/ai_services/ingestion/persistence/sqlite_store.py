@@ -108,6 +108,8 @@ class SqliteApplicationStore:
         token_type: str = "Bearer",
         scope: str | None = None,
         expires_at: datetime | None = None,
+        refresh_token: str | None = None,
+        refresh_expires_at: datetime | None = None,
     ) -> tuple[UserModel, GitHubConnectionModel]:
         """Upsert application user and GitHub connection from GitHub OAuth callback.
 
@@ -119,6 +121,7 @@ class SqliteApplicationStore:
         if not str(github_user_id).isdigit():
             raise ValueError('GitHub identity must be numeric')
         encrypted_token = self.encrypt_token(access_token)
+        encrypted_refresh = self.encrypt_token(refresh_token) if refresh_token else None
 
         with self.session_factory() as session:
             stmt = select(GitHubConnectionModel).where(
@@ -168,10 +171,28 @@ class SqliteApplicationStore:
             conn.credential_kind = 'github_app'
             conn.access_status = 'ACTIVE'
             conn.access_token_expires_at = expires_at
+            conn.refresh_token = encrypted_refresh
+            conn.refresh_token_expires_at = refresh_expires_at
             session.commit()
             session.refresh(user)
             session.refresh(conn)
             return user, conn
+
+    def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at):
+        """Commit the entire encrypted rotation, only if authorization is unchanged."""
+        with self.session_factory() as session:
+            result = session.execute(update(GitHubConnectionModel).where(
+                GitHubConnectionModel.id == connection.id,
+                GitHubConnectionModel.access_status == 'ACTIVE',
+                GitHubConnectionModel.access_token == connection.access_token,
+                GitHubConnectionModel.refresh_token == connection.refresh_token,
+            ).values(access_token=self.encrypt_token(access_token),
+                     refresh_token=self.encrypt_token(refresh_token),
+                     access_token_expires_at=expires_at,
+                     refresh_token_expires_at=refresh_expires_at, updated_at=utc_now()))
+            if result.rowcount != 1:
+                raise RuntimeError('GitHub authorization changed during refresh')
+            session.commit()
 
     def get_user(self, user_id: str) -> UserModel | None:
         """Fetch an application user by primary key."""

@@ -60,6 +60,8 @@ class GitHubConnectionModel(Base):
     scope = Column(String(255), nullable=True)
     credential_kind = Column(String(32), default="legacy_oauth", nullable=False)
     access_token_expires_at = Column(DateTime, nullable=True)
+    refresh_token = Column(Text, nullable=True)
+    refresh_token_expires_at = Column(DateTime, nullable=True)
     access_status = Column(String(32), default="RECONNECT_REQUIRED", nullable=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)

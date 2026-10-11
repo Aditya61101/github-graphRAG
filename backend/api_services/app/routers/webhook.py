@@ -109,12 +109,18 @@ async def _handle_authorization(app_service, payload, event):
             GitHubConnectionModel.github_user_id == str(sender['id']))).first()
     if connection:
         try:
-            token = app_service.user_token(connection.user_id)
+            token = await app_service.user_token(connection.user_id)
+            connection = app_service.store.get_user_github_connection(connection.user_id)
             await app_service.request('GET', '/user', token)
         except GitHubAppError as exc:
-            if exc.status_code not in {401, 403}:
+            if exc.reconnect_required:
+                # The token resolver already invalidated the rejected credential.
+                pass
+            elif exc.status_code == 401:
+                # A reauthorization/rotation may complete during the probe.
+                app_service.revoke_user(str(sender['id']), connection.access_token)
+            else:
                 raise
-            app_service.revoke_user(str(sender['id']))
     return {'status': 'reconciled', 'event': event}
 
 

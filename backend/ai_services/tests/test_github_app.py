@@ -95,7 +95,8 @@ def env(monkeypatch):
     http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
     service = GitHubAppService(store, settings, http)
     oauth = GitHubOAuth(settings)
-    oauth.client.fetch_access_token = AsyncMock(return_value={'access_token': 'opaque-user-token', 'expires_in': 3600})
+    oauth.client.fetch_access_token = AsyncMock(return_value={'access_token': 'opaque-user-token', 'expires_in': 3600,
+        'refresh_token': 'login-refresh-token', 'refresh_token_expires_in': 15897600})
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
     app.include_router(auth_router, prefix='/auth')

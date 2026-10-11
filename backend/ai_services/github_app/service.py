@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import jwt
+from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 
 from ai_services.ingestion.persistence.models import (
@@ -20,13 +21,34 @@ from .settings import GitHubAppSettings
 
 
 class GitHubAppError(Exception):
-    def __init__(self, status_code: int, message: str):
+    def __init__(self, status_code: int, message: str, reconnect_required: bool = False):
         super().__init__(message)
         self.status_code = status_code
+        self.reconnect_required = reconnect_required
 
 
 def parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+
+
+def as_utc(value: datetime) -> datetime:
+    # SQLite returns naive UTC values even when aware timestamps were written.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, datetime, datetime]:
+    """Validate the full rotation before writing anything; never echo provider data."""
+    try:
+        access, refresh = result['access_token'], result['refresh_token']
+        access_seconds, refresh_seconds = int(result['expires_in']), int(result['refresh_token_expires_in'])
+        if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
+            raise ValueError()
+        if access_seconds <= 60 or refresh_seconds <= 0:
+            raise ValueError()
+        return (access, refresh, issued_at + timedelta(seconds=access_seconds),
+                issued_at + timedelta(seconds=refresh_seconds))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise GitHubAppError(502, 'Invalid GitHub OAuth credential response') from None
 
 
 class GitHubAppService:
@@ -36,6 +58,10 @@ class GitHubAppService:
         self.tokens: dict[tuple, tuple[str, datetime]] = {}
         self.generations: dict[str, int] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self.user_locks: dict[str, asyncio.Lock] = {}
+        # Keep a completed rotation until its transaction succeeds. A database
+        # outage must not make the next request spend the old refresh token again.
+        self.pending_rotations: dict[str, tuple] = {}
 
     def app_jwt(self) -> str:
         now = int(time.time())
@@ -50,8 +76,12 @@ class GitHubAppService:
         except httpx.HTTPError:
             raise GitHubAppError(502, 'Unable to reach GitHub') from None
         if response.status_code not in {200, 201}:
+            if (response.status_code == 429 or response.status_code >= 500 or
+                    (response.status_code == 403 and (response.headers.get('Retry-After') or
+                     response.headers.get('X-RateLimit-Remaining') == '0'))):
+                raise GitHubAppError(503, 'GitHub temporarily unavailable or rate limited; retry later')
             code = response.status_code if response.status_code in {401, 403, 404} else 502
-            raise GitHubAppError(code, 'GitHub access denied or unavailable; reconnect if authorization expired')
+            raise GitHubAppError(code, 'GitHub access denied or unavailable')
         try:
             result = response.json()
         except ValueError:
@@ -73,35 +103,110 @@ class GitHubAppService:
                 return output
             page += 1
 
-    def revoke_user(self, github_id: str) -> None:
+    def revoke_user(self, github_id: str, expected_token: str | None = None) -> None:
         with self.store.session_factory() as session:
             connection = session.scalars(select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_id))).first()
-            if connection:
+            if connection and (expected_token is None or connection.access_token == expected_token):
                 connection.access_status = 'RECONNECT_REQUIRED'
                 connection.access_token = ''
+                connection.refresh_token = None
                 session.commit()
 
-    def user_token(self, user_id: str) -> str:
+    def _reconnect(self, connection):
+        if connection:
+            self.revoke_user(connection.github_user_id, connection.access_token)
+        raise GitHubAppError(401, 'GitHub reconnect required', reconnect_required=True)
+
+    async def user_token(self, user_id: str, rejected_token: str | None = None) -> str:
+        # Supported runtime is one worker (OAuth state and jobs are process-local).
+        # Always re-read under the per-user lock before spending a rotating token.
+        async with self.user_locks.setdefault(user_id, asyncio.Lock()):
+            return await self._user_token_locked(user_id, rejected_token)
+
+    async def _user_token_locked(self, user_id: str, rejected_token: str | None) -> str:
         connection = self.store.get_user_github_connection(user_id)
+        pending = self.pending_rotations.get(user_id)
+        if pending:
+            previous, credentials = pending
+            if (connection and connection.access_status == 'ACTIVE' and
+                    connection.access_token == previous.access_token and
+                    connection.refresh_token == previous.refresh_token):
+                self._persist_rotation(user_id, previous, credentials)
+                connection = self.store.get_user_github_connection(user_id)
+            else:
+                # A new login or revocation supersedes any pending rotation.
+                del self.pending_rotations[user_id]
+        if not connection or connection.credential_kind != 'github_app' or connection.access_status != 'ACTIVE':
+            self._reconnect(connection)
         try:
-            credential = self.store.get_credential_for_user(user_id)
+            token = self.store.decrypt_token(connection.access_token)
+        except (InvalidToken, RuntimeError):
+            # Missing/misconfigured encryption keys are operational failures.
+            raise GitHubAppError(503, 'Stored GitHub credentials unavailable') from None
+        now = datetime.now(timezone.utc)
+        expiry = connection.access_token_expires_at
+        if expiry and as_utc(expiry) > now + timedelta(seconds=60) and token != rejected_token:
+            return token
+        if (not connection.refresh_token or not connection.refresh_token_expires_at or
+                as_utc(connection.refresh_token_expires_at) <= now):
+            self._reconnect(connection)
+        try:
+            refresh = self.store.decrypt_token(connection.refresh_token)
+        except (InvalidToken, RuntimeError):
+            raise GitHubAppError(503, 'Stored GitHub credentials unavailable') from None
+        try:
+            response = await self.client.post('https://github.com/login/oauth/access_token',
+                headers={'Accept': 'application/json'}, data={
+                    'client_id': self.settings.client_id, 'client_secret': self.settings.client_secret,
+                    'grant_type': 'refresh_token', 'refresh_token': refresh})
+        except httpx.HTTPError:
+            raise GitHubAppError(503, 'GitHub token refresh unavailable; retry later') from None
+        if (response.status_code == 429 or response.status_code >= 500 or
+                (response.status_code == 403 and (response.headers.get('Retry-After') or
+                 response.headers.get('X-RateLimit-Remaining') == '0'))):
+            raise GitHubAppError(503, 'GitHub token refresh unavailable; retry later')
+        try:
+            result = response.json()
+        except ValueError:
+            raise GitHubAppError(502, 'Invalid GitHub OAuth response') from None
+        if not isinstance(result, dict):
+            raise GitHubAppError(502, 'Invalid GitHub OAuth response')
+        error = result.get('error')
+        if isinstance(error, str) and error in {'bad_refresh_token', 'invalid_grant', 'access_denied'}:
+            self._reconnect(connection)
+        if response.status_code != 200 or error:
+            # Client configuration errors and unknown responses do not revoke users.
+            raise GitHubAppError(503, 'GitHub token refresh failed; retry later')
+        credentials = oauth_credentials(result, now)
+        self.pending_rotations[user_id] = (connection, credentials)
+        self._persist_rotation(user_id, connection, credentials)
+        return credentials[0]
+
+    def _persist_rotation(self, user_id, connection, credentials):
+        try:
+            self.store.rotate_github_tokens(connection, *credentials)
         except Exception:
-            credential = None
-        if not credential:
-            if connection:
-                self.revoke_user(connection.github_user_id)
-            raise GitHubAppError(401, 'GitHub reconnect required')
-        return credential.token
+            raise GitHubAppError(503, 'Unable to persist GitHub token refresh; retry later') from None
+        del self.pending_rotations[user_id]
 
     async def user_request_pages(self, user_id: str, path: str, field: str) -> list[dict]:
+        token = await self.user_token(user_id)
         try:
-            return await self.pages(path, self.user_token(user_id), field)
+            return await self.pages(path, token, field)
+        except GitHubAppError as exc:
+            if exc.status_code != 401:
+                raise
+        # Retry a rejected user token once; a concurrent rotation may already
+        # have replaced it. Never force another rotation of that new credential.
+        token = await self.user_token(user_id, rejected_token=token)
+        try:
+            return await self.pages(path, token, field)
         except GitHubAppError as exc:
             if exc.status_code == 401:
                 connection = self.store.get_user_github_connection(user_id)
-                if connection:
-                    self.revoke_user(connection.github_user_id)
+                if connection and self.store.decrypt_token(connection.access_token) == token:
+                    self._reconnect(connection)
             raise
 
     def invalidate(self, installation_id: str) -> None:
@@ -203,17 +308,29 @@ class GitHubAppService:
             if str(hint.get('app_id')) != self.settings.app_id:
                 continue
             iid = str(hint['id'])
-            current, inventory = await self.reconcile(iid)
+            try:
+                current, inventory = await self.reconcile(iid)
+            except GitHubAppError as exc:
+                if exc.status_code == 401:
+                    raise GitHubAppError(502, 'GitHub installation authentication unavailable') from None
+                raise
             if not current.get('account') or current.get('suspended_at'):
                 continue
             accessible = await self.user_request_pages(user_id, f'/user/installations/{iid}/repositories', 'repositories')
             granted = {str(item['id']) for item in inventory if not item.get('private', True)}
-            public = [dict(item, installation_id=iid) for item in accessible
-                      if not item.get('private', True) and str(item['id']) in granted]
-            summaries.append({'id': iid, 'account_login': current['account']['login'],
-                              'account_type': current['account']['type'], 'status': 'ACTIVE',
-                              'repository_selection': current['repository_selection'],
-                              'public_repository_count': len(public)})
+            public = [
+                dict(item, installation_id=iid) for item in accessible if not item.get('private', True) and str(item['id']) in granted
+            ]
+            summaries.append(
+                {   
+                    'id': iid, 
+                    'account_login': current['account']['login'],
+                    'account_type': current['account']['type'], 
+                    'status': 'ACTIVE',
+                    'repository_selection': current['repository_selection'],
+                    'public_repository_count': len(public)
+                }
+            )
             repositories.extend(public)
         return summaries, repositories
 

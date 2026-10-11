@@ -533,7 +533,7 @@ def test_additive_pr_schema_initialization_preserves_repository_data(tmp_path, m
     engine = create_engine(f'sqlite:///{tmp_path / "old-app.db"}')
     with engine.begin() as connection:
         connection.execute(text('CREATE TABLE app_schema_version (version INTEGER NOT NULL)'))
-        connection.execute(text('INSERT INTO app_schema_version VALUES (1)'))
+        connection.execute(text('INSERT INTO app_schema_version VALUES (2)'))
         connection.execute(text('CREATE TABLE repositories (id TEXT PRIMARY KEY)'))
         connection.execute(text("INSERT INTO repositories VALUES ('repo_101')"))
     monkeypatch.setattr(database, 'get_engine', lambda: engine)

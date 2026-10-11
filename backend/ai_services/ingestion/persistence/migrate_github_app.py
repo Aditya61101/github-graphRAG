@@ -16,7 +16,7 @@ def upgrade(engine, encryption_key: str) -> None:
         tables = inspect(conn).get_table_names()
         if 'app_schema_version' in tables:
             current = conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar()
-            if current == VERSION:
+            if current in {VERSION, 2}:
                 return
             raise RuntimeError('Unsupported application database schema version')
         additions = {

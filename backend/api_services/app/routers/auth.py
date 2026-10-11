@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import asyncio
 import secrets
 import time
 from urllib.parse import urlencode
@@ -9,9 +10,10 @@ from urllib.parse import urlencode
 from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 
-from ai_services.github_app.service import GitHubAppError
-from ai_services.ingestion.persistence.models import UserModel
+from ai_services.github_app.service import GitHubAppError, oauth_credentials
+from ai_services.ingestion.persistence.models import UserModel, GitHubConnectionModel
 from api_services.app.utils.github_app_access import get_github_app
 from api_services.app.utils.jwt_utils import create_access_token, get_current_user
 
@@ -106,6 +108,7 @@ async def github_callback(request: Request):
         raise HTTPException(400, 'Missing GitHub authorization code')
     app_service = get_github_app(request)
     try:
+        issued_at = datetime.now(timezone.utc)
         token = await flow.client.authorize_access_token(request)
         if not token.get('access_token') or not token.get('expires_in'):
             raise HTTPException(400, 'Expiring GitHub App user tokens are required')
@@ -116,12 +119,24 @@ async def github_callback(request: Request):
             existing = app_service.store.get_user_github_connection(txn.user_id)
             if not existing or existing.github_user_id != str(identity['id']):
                 raise HTTPException(403, 'Installation authorization must use the initiating GitHub account')
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=int(token['expires_in']))
-        if expiry <= datetime.now(timezone.utc):
-            raise HTTPException(400, 'GitHub user token already expired')
-        user, _ = app_service.store.upsert_github_login(
-            github_user_id=str(identity['id']), username=identity['login'], email=identity.get('email'),
-            avatar_url=identity.get('avatar_url'), access_token=token['access_token'], expires_at=expiry)
+        access, refresh, expiry, refresh_expiry = oauth_credentials(token, issued_at)
+        # Reauthorization and refresh for an existing account must not overwrite
+        # each other's rotated credentials in the single-worker runtime.
+        existing = app_service.store.get_user_github_connection(txn.user_id) if txn.user_id else None
+        if not existing:
+            with app_service.store.session_factory() as session:
+                existing = session.scalars(select(GitHubConnectionModel).where(
+                    GitHubConnectionModel.github_user_id == str(identity['id']))).first()
+        def save_login():
+            return app_service.store.upsert_github_login(
+                github_user_id=str(identity['id']), username=identity['login'], email=identity.get('email'),
+                avatar_url=identity.get('avatar_url'), access_token=access, expires_at=expiry,
+                refresh_token=refresh, refresh_expires_at=refresh_expiry)
+        if existing:
+            async with app_service.user_locks.setdefault(existing.user_id, asyncio.Lock()):
+                user, _ = save_login()
+        else:
+            user, _ = save_login()
         summaries, _ = await app_service.discovery(user.id)
         hint = request.query_params.get('installation_id')
         if txn.kind == 'installation' and hint and not any(item['id'] == hint for item in summaries):
@@ -146,9 +161,13 @@ async def me(request: Request, current_user: UserModel = Depends(get_current_use
         installations, _ = await service.discovery(current_user.id)
         reconnect = False
     except GitHubAppError as exc:
-        if exc.status_code != 401:
-            raise HTTPException(exc.status_code, str(exc)) from None
+        if not exc.reconnect_required:
+            raise HTTPException(502 if exc.status_code == 401 else exc.status_code, str(exc)) from None
         installations, reconnect = [], True
-    return {'user': current_user.to_dict(), 'installations': installations,
-            'installation_onboarding_required': reconnect or not any(i['public_repository_count'] for i in installations),
-            'reconnect_required': reconnect}
+    return {
+        'user': current_user.to_dict(), 
+        'installations': installations,
+        'installation_onboarding_required': reconnect or not any(i['public_repository_count'] for i in installations),
+        'reconnect_required': reconnect,
+        'installation_discovery_status': 'reauthorization_required' if reconnect else 'complete'
+    }

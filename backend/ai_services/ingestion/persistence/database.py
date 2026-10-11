@@ -47,11 +47,11 @@ def init_db() -> None:
         if tables and 'app_schema_version' not in tables:
             raise RuntimeError('SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_app')
         if 'app_schema_version' in tables:
-            if conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar() != 1:
-                raise RuntimeError('Unsupported application database schema version')
+            if conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar() != 2:
+                raise RuntimeError('SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_refresh')
             # Additive PR metadata table only; no existing columns are altered.
             PullRequestRevisionModel.__table__.create(conn, checkfirst=True)
         else:
             Base.metadata.create_all(conn)
             conn.exec_driver_sql('CREATE TABLE app_schema_version (version INTEGER NOT NULL)')
-            conn.exec_driver_sql('INSERT INTO app_schema_version VALUES (1)')
+            conn.exec_driver_sql('INSERT INTO app_schema_version VALUES (2)')
