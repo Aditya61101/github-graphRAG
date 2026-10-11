@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Literal
 from pydantic import BaseModel, Field
 from ai_services.ingestion.run_audit import IngestionStageCounts
 
@@ -62,8 +63,16 @@ class RepositoryResponse(BaseModel):
     updated_at: str | None = None
 
 
+class RepositoryMonitoringCapabilities(BaseModel):
+    github_admin: bool | None = Field(default=None, description="Admin right verified using authenticated GitHub user permissions; null means unknown.")
+    can_enable_monitoring: bool | None = None
+    can_retry_indexing: bool | None = None
+    reason: Literal['allowed', 'permission_unknown', 'github_admin_required', 'owned_by_another_user', 'installation_binding_mismatch']
+
+
 class AvailableRepositoryResponse(BaseModel):
     installation_id: str
+    monitoring: RepositoryMonitoringCapabilities
     id: str | None = Field(
         default=None,
         description="Internal tracked repository ID (e.g. repo_12345) if already indexed in DecisionGuard, otherwise null.",

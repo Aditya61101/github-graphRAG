@@ -9,7 +9,7 @@ def get_github_app(request: Request):
     return service
 
 
-async def authorize_repository(request: Request, user_id: str, identifier: str):
+async def authorize_repository(request: Request, user_id: str, identifier: str, require_admin: bool = False):
     store = getattr(request.app.state, 'sqlite_store', None)
     if store is None:
         raise HTTPException(503, 'Application store is not initialized')
@@ -19,7 +19,10 @@ async def authorize_repository(request: Request, user_id: str, identifier: str):
     if repo.user_id != user_id:
         raise HTTPException(403, 'Access denied: You do not have permission to access this repository')
     try:
-        return await get_github_app(request).authorize_tracked(user_id, repo.id)
+        service = get_github_app(request)
+        if require_admin:
+            return await service.authorize_tracked(user_id, repo.id, require_admin=True)
+        return await service.authorize_tracked(user_id, repo.id)
     except GitHubAppError as exc:
         raise HTTPException(exc.status_code, str(exc)) from None
 

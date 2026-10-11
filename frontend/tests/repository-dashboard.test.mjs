@@ -33,6 +33,12 @@ after(async () => {
   delete globalThis.localStorage;
   delete globalThis.window;
 });
+const allowed = {
+  github_admin: true,
+  can_enable_monitoring: true,
+  can_retry_indexing: true,
+  reason: "allowed",
+};
 const repository = {
   id: "101",
   githubRepositoryId: "101",
@@ -88,7 +94,7 @@ test("discoverable collaborator repositories never inherit administrative or sto
     const html = render({ repository: item });
     assert.doesNotMatch(
       html,
-      /Enable monitoring|Retry indexing|Reindex|Upload ADR|[/]projects[/]/
+      /Enable Monitoring|Retry Monitoring|Reindex|Upload ADR|[/]projects[/]/
     );
     assert.match(html, /View on GitHub/);
   }
@@ -96,6 +102,7 @@ test("discoverable collaborator repositories never inherit administrative or sto
     flow.getRepositoryAction({
       ...repository,
       trackedRepositoryId: "repo_101",
+      monitoring: allowed,
     }),
     "enable"
   );
@@ -104,6 +111,7 @@ test("discoverable collaborator repositories never inherit administrative or sto
       ...repository,
       trackedRepositoryId: "repo_101",
       status: "FAILED",
+      monitoring: allowed,
     }),
     "retry"
   );
@@ -149,10 +157,10 @@ test("cards expose real branch and state without fabricated statistics or worksp
       status: "COMPLETED",
     },
   });
-  assert.match(html, /Ready|develop|Public|example-org/);
+  assert.match(html, /Monitored|develop|Public|example-org/);
   assert.doesNotMatch(
     html,
-    /Enable monitoring|ADR records|Entities|[/]projects[/]repo_101/
+    /Enable Monitoring|ADR records|Entities|[/]projects[/]repo_101/
   );
   assert.match(html, /rel="noopener noreferrer"/);
   assert.match(render({ error: "Access denied" }), /role="alert"/);
@@ -173,12 +181,13 @@ test("sync uses the existing authorized asynchronous endpoint and does not index
   };
   await assert.rejects(
     service.syncRepository(repository),
-    /tracked repository/
+    /permission|tracked repository/
   );
   assert.equal(calls.length, 0);
   await service.syncRepository({
     ...repository,
     trackedRepositoryId: "repo_101",
+    monitoring: allowed,
   });
   assert.equal(calls[0].url, "/repositories/example-org/service/sync");
   assert.equal(calls[0].method, "post");
@@ -195,7 +204,11 @@ test("sync uses the existing authorized asynchronous endpoint and does not index
     config,
   });
   await assert.rejects(
-    service.syncRepository({ ...repository, trackedRepositoryId: "repo_101" }),
+    service.syncRepository({
+      ...repository,
+      trackedRepositoryId: "repo_101",
+      monitoring: allowed,
+    }),
     /did not accept/
   );
 });
@@ -225,4 +238,194 @@ test("GitHub-specific repository 401 preserves the app session; invalid app JWT 
       preserved
     );
   }
+});
+
+test("verified administrator can enable an untracked repo without any username inference", async () => {
+  const item = {
+    ...repository,
+    fullName: "Aditya61101/Aditya61101",
+    name: "Aditya61101",
+    monitoring: allowed,
+  };
+  assert.equal(flow.getRepositoryAction(item), "enable");
+  assert.equal(flow.getRepositoryState(item), "available");
+  assert.match(render({ repository: item }), /Enable Monitoring/);
+  assert.doesNotMatch(
+    render({ repository: item }),
+    /Monitoring permissions are not provided/
+  );
+  const calls = [];
+  client.defaults.adapter = async (config) => {
+    calls.push(config);
+    return {
+      data: { status: "accepted" },
+      status: 202,
+      statusText: "Accepted",
+      headers: {},
+      config,
+    };
+  };
+  await service.enableMonitoring(item);
+  assert.equal(calls[0].url, "/repositories/ingest");
+  assert.deepEqual(JSON.parse(calls[0].data), {
+    repository: item.fullName,
+    installation_id: item.installationId,
+    branch: "main",
+    force_full: false,
+    sync: false,
+  });
+});
+
+test("unknown permission is distinct from explicit restriction, even when owner matches the user", async () => {
+  for (const monitoring of [
+    undefined,
+    {
+      github_admin: null,
+      can_enable_monitoring: null,
+      can_retry_indexing: false,
+      reason: "permission_unknown",
+    },
+  ]) {
+    const item = { ...repository, fullName: "alice/profile", monitoring };
+    assert.equal(flow.getRepositoryState(item), "available");
+    assert.equal(flow.getRepositoryAction(item), null);
+    assert.match(
+      render({ repository: item }),
+      /permissions could not be verified/
+    );
+    assert.doesNotMatch(render({ repository: item }), /Restricted/);
+    await assert.rejects(
+      service.enableMonitoring(item),
+      /permission has not been verified/
+    );
+  }
+  for (const reason of [
+    "github_admin_required",
+    "owned_by_another_user",
+    "installation_binding_mismatch",
+  ]) {
+    const item = {
+      ...repository,
+      monitoring: { ...allowed, can_enable_monitoring: false, reason },
+    };
+    assert.equal(flow.getRepositoryState(item), "restricted");
+    assert.equal(flow.getRepositoryAction(item), null);
+    assert.match(render({ repository: item }), /Restricted/);
+  }
+  // Even an inconsistent response cannot make non-admins eligible.
+  assert.equal(
+    flow.getRepositoryAction({
+      ...repository,
+      monitoring: { ...allowed, github_admin: false },
+    }),
+    null
+  );
+});
+
+test("monitoring errors preserve explicit admin denial and unverified permissions", () => {
+  for (const [status, detail] of [
+    [
+      403,
+      "GitHub repository administrator permission is required to enable or retry monitoring",
+    ],
+    [
+      503,
+      "GitHub repository administration permission could not be verified; retry discovery",
+    ],
+  ]) {
+    assert.equal(
+      flow.getMonitoringActionError({
+        isAxiosError: true,
+        response: { status, data: { detail } },
+      }),
+      detail
+    );
+  }
+  assert.equal(
+    flow.getMonitoringActionError(new Error("network")),
+    "Could not start indexing. Please try again."
+  );
+});
+
+test("lifecycle states remain separate from administration rights", () => {
+  for (const [status, expected] of [
+    ["COMPLETED", "ready"],
+    ["INDEXING", "indexing"],
+    ["FAILED", "failed"],
+  ]) {
+    for (const reason of [
+      "github_admin_required",
+      "permission_unknown",
+      "installation_binding_mismatch",
+    ]) {
+      const item = {
+        ...repository,
+        trackedRepositoryId: "repo_101",
+        status,
+        monitoring: { ...allowed, github_admin: false, reason },
+      };
+      assert.equal(flow.getRepositoryState(item), expected);
+      assert.equal(flow.getRepositoryAction(item), null);
+      const html = render({ repository: item, onCheckStatus() {} });
+      assert.doesNotMatch(
+        html,
+        /Enable Monitoring|Retry Monitoring|Repository indexing completed successfully/
+      );
+      assert.match(
+        html,
+        status === "INDEXING"
+          ? /Check Status/
+          : status === "FAILED"
+            ? /View Error/
+            : /View Access/
+      );
+    }
+  }
+});
+
+test("manual status uses the real discovery endpoint and matches GitHub identity", async () => {
+  const calls = [];
+  const dto = {
+    id: "repo_101",
+    github_repository_id: "101",
+    installation_id: "10",
+    full_name: repository.fullName,
+    name: repository.name,
+    repository_url: repository.repositoryUrl,
+    default_branch: "main",
+    tracked_branch: "main",
+    is_private: false,
+    description: null,
+    status: "COMPLETED",
+    tracked_repository_id: "repo_101",
+    indexed_commit_sha: "abc",
+    updated_at: null,
+    monitoring: allowed,
+  };
+  client.defaults.adapter = async (config) => {
+    calls.push(config);
+    return {
+      data: [dto, { ...dto, github_repository_id: "102", status: "FAILED" }],
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config,
+    };
+  };
+  const latest = await service.getRepositoryStatus(repository);
+  assert.equal(latest.status, "COMPLETED");
+  assert.equal(latest.githubRepositoryId, "101");
+  assert.equal(calls[0].method, "get");
+  assert.equal(calls[0].url, "/repositories");
+  client.defaults.adapter = async (config) => ({
+    data: [],
+    status: 200,
+    statusText: "OK",
+    headers: {},
+    config,
+  });
+  await assert.rejects(
+    service.getRepositoryStatus(repository),
+    /access is no longer available/
+  );
 });

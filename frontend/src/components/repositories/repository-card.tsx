@@ -4,6 +4,14 @@ import {
   Loader,
   RefreshCwIcon,
 } from "lucide-react";
+import {
+  Sheet,
+  SheetTrigger,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
 import { GithubIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,30 +24,35 @@ import {
 } from "@/components/ui/card";
 import {
   getRepositoryAction,
+  getMonitoringMessage,
   getRepositoryState,
 } from "@/lib/repository-dashboard";
 import type { Repository } from "@/types/repositories";
 
 const labels = {
   available: "Available",
-  ready: "Ready",
+  ready: "Monitored",
   indexing: "Indexing",
   failed: "Failed",
   unknown: "Status unavailable",
+  restricted: "Restricted",
 };
 const descriptions = {
-  available:
-    "GitHub access is available. Monitoring has not started for your account.",
-  ready: "Repository indexing completed successfully.",
-  indexing: "Repository indexing is in progress. Status updates automatically.",
+  available: "Monitoring has not been activated.",
+  ready: null,
+  indexing: "Indexing is in progress. Check Status for the latest result.",
   failed: "The latest indexing attempt failed.",
   unknown: "DecisionGuard has not reported a recognized indexing state.",
+  restricted: null,
 };
 
 type Props = {
   repository: Repository;
   pending: boolean;
   busy?: boolean;
+  statusPending?: boolean;
+  accepted?: boolean;
+  onCheckStatus?: (repository: Repository) => void;
   message?: string;
   error?: string;
   onIndex: (repository: Repository) => void;
@@ -49,16 +62,29 @@ export function RepositoryCard({
   repository,
   pending,
   busy,
+  statusPending = false,
+  accepted = false,
+  onCheckStatus,
   message,
   error,
   onIndex,
 }: Props) {
   const state = getRepositoryState(repository);
   const action = getRepositoryAction(repository);
+  const monitoringMessage = getMonitoringMessage(repository);
+  const accessDetails =
+    monitoringMessage ||
+    "GitHub administration and DecisionGuard stored-knowledge access are checked separately. Matching a repository owner name does not grant monitoring rights.";
+  const detailsLabel =
+    state === "failed"
+      ? "View Error"
+      : state === "ready" && repository.monitoring?.reason === "allowed"
+        ? "View Status"
+        : "View Access";
   const owner = repository.fullName.split("/")[0];
   return (
     <Card
-      className="h-full transition-shadow hover:shadow-sm"
+      className="h-full min-w-0 flex-col transition-shadow hover:shadow-sm"
       data-repository-id={repository.githubRepositoryId}
     >
       <CardHeader className="gap-3">
@@ -86,7 +112,7 @@ export function RepositoryCard({
         <div>
           <CardDescription className="break-all">{owner}</CardDescription>
           <CardTitle>
-            <h2 className="text-lg font-semibold break-all">
+            <h2 className="line-clamp-2 text-lg font-semibold break-all">
               {repository.name}
             </h2>
           </CardTitle>
@@ -109,11 +135,14 @@ export function RepositoryCard({
             </span>
           )}
         </div>
-        <p className="text-sm text-muted-foreground">{descriptions[state]}</p>
-        {state === "available" && !repository.trackedRepositoryId && (
-          <p className="text-xs text-muted-foreground">
-            Monitoring permissions are not provided for this repository.
-          </p>
+        {descriptions[state] &&
+          !(state === "available" && monitoringMessage) && (
+            <p className="text-sm text-muted-foreground">
+              {descriptions[state]}
+            </p>
+          )}
+        {monitoringMessage && state !== "ready" && state !== "indexing" && (
+          <p className="text-xs text-muted-foreground">{monitoringMessage}</p>
         )}
         {message && (
           <p role="status" className="text-sm text-muted-foreground">
@@ -126,7 +155,7 @@ export function RepositoryCard({
           </p>
         )}
       </CardContent>
-      <CardFooter className="flex-wrap justify-between gap-3">
+      <CardFooter className="mt-auto flex-wrap justify-between gap-3">
         <Button
           nativeButton={false}
           variant="ghost"
@@ -142,7 +171,21 @@ export function RepositoryCard({
         >
           View on GitHub <ExternalLinkIcon aria-hidden="true" />
         </Button>
-        {action && (
+        {state === "indexing" || accepted ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || statusPending || !onCheckStatus}
+            onClick={() => onCheckStatus?.(repository)}
+          >
+            {statusPending ? (
+              <Loader aria-hidden="true" className="animate-spin" />
+            ) : (
+              <RefreshCwIcon aria-hidden="true" />
+            )}
+            {statusPending ? "Checking status..." : "Check Status"}
+          </Button>
+        ) : action ? (
           <Button
             size="sm"
             variant={action === "retry" ? "outline" : "default"}
@@ -157,9 +200,55 @@ export function RepositoryCard({
             {pending
               ? "Requesting indexing..."
               : action === "retry"
-                ? "Retry indexing"
-                : "Enable monitoring"}
+                ? "Retry Monitoring"
+                : "Enable Monitoring"}
           </Button>
+        ) : (
+          <Sheet>
+            <SheetTrigger render={<Button size="sm" variant="outline" />}>
+              {detailsLabel}
+            </SheetTrigger>
+            <SheetContent>
+              <SheetHeader>
+                <SheetTitle>{repository.fullName}</SheetTitle>
+                <SheetDescription>
+                  {state === "failed"
+                    ? "Repository indexing details"
+                    : "Repository access and status"}
+                </SheetDescription>
+              </SheetHeader>
+              <div className="space-y-4 overflow-y-auto px-4 pb-4">
+                <p className="text-sm">Current status: {labels[state]}</p>
+                {state === "failed" && (
+                  <p className="text-sm text-muted-foreground">
+                    The backend reports that indexing failed. Detailed ingestion
+                    errors are not exposed by the current repository API.
+                  </p>
+                )}
+                {state === "ready" && (
+                  <p className="text-sm text-muted-foreground">
+                    The repository is monitored. Open Repository will be
+                    available when an authorized repository workspace is
+                    connected.
+                  </p>
+                )}
+                <p className="text-sm text-muted-foreground">{accessDetails}</p>
+                <p className="text-sm text-muted-foreground">
+                  Access to another DecisionGuard user's stored repository
+                  knowledge is not granted by GitHub repository access.
+                </p>
+                {onCheckStatus && (
+                  <Button
+                    variant="outline"
+                    disabled={busy || statusPending}
+                    onClick={() => onCheckStatus(repository)}
+                  >
+                    {statusPending ? "Checking status..." : "Refresh Status"}
+                  </Button>
+                )}
+              </div>
+            </SheetContent>
+          </Sheet>
         )}
       </CardFooter>
     </Card>

@@ -44,6 +44,19 @@ function repository(
     status,
     indexed_commit_sha: status === "COMPLETED" ? "abc123" : null,
     updated_at: null,
+    monitoring: tracked
+      ? {
+          github_admin: true,
+          can_enable_monitoring: status === "IDLE",
+          can_retry_indexing: status === "FAILED",
+          reason: "allowed",
+        }
+      : {
+          github_admin: null,
+          can_enable_monitoring: null,
+          can_retry_indexing: false,
+          reason: "permission_unknown",
+        },
   };
 }
 function setup() {
@@ -121,6 +134,43 @@ before(async () => {
                   );
                 return json(rows);
               }
+              if (request.url === "/repositories/ingest") {
+                let body = "";
+                for await (const chunk of request) body += chunk;
+                const payload = JSON.parse(body);
+                current.calls.at(-1).body = payload;
+                const row = current.repositories.find(
+                  (r) =>
+                    r.full_name === payload.repository &&
+                    r.installation_id === payload.installation_id
+                );
+                if (
+                  !row ||
+                  row.monitoring?.can_enable_monitoring !== true ||
+                  row.monitoring?.github_admin !== true
+                )
+                  return json(
+                    {
+                      detail:
+                        "GitHub repository administrator permission is required",
+                    },
+                    403
+                  );
+                row.id = row.tracked_repository_id =
+                  "repo_" + row.github_repository_id;
+                if (!current.syncAcceptedOnly) {
+                  row.status = "INDEXING";
+                  row.monitoring.can_enable_monitoring = false;
+                }
+                return json(
+                  {
+                    status: "accepted",
+                    repository_id: row.id,
+                    repository: row.full_name,
+                  },
+                  202
+                );
+              }
               if (request.url?.endsWith("/sync")) {
                 if (current.syncFailure)
                   return json({ detail: "Repository permission denied" }, 403);
@@ -131,6 +181,10 @@ before(async () => {
                   (r) =>
                     request.url === "/repositories/" + r.full_name + "/sync"
                 );
+                if (current.syncDelay)
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, current.syncDelay)
+                  );
                 if (row && !current.syncAcceptedOnly) row.status = "INDEXING";
                 return json(
                   {
@@ -225,7 +279,7 @@ test("multiple installations render unique real repositories and no mock project
   );
   assert.equal(await browser.evaluate(bodyContains("example-org")), true);
   assert.equal(
-    await browser.evaluate(card("101") + ".innerText.includes('Ready')"),
+    await browser.evaluate(card("101") + ".innerText.includes('Monitored')"),
     true
   );
   assert.equal(
@@ -238,7 +292,7 @@ test("multiple installations render unique real repositories and no mock project
   );
   assert.equal(
     await browser.evaluate(
-      card("102") + ".innerText.includes('Enable monitoring')"
+      card("102") + ".innerText.includes('Enable Monitoring')"
     ),
     false
   );
@@ -269,13 +323,13 @@ test("a single collaborator-accessible repository has no administrative actions"
     "document.querySelectorAll('[data-repository-id]').length === 1"
   );
   assert.equal(
-    await browser.evaluate(bodyContains("Enable monitoring")),
+    await browser.evaluate(bodyContains("Enable Monitoring")),
     false
   );
-  assert.equal(await browser.evaluate(bodyContains("Retry indexing")), false);
+  assert.equal(await browser.evaluate(bodyContains("Retry Monitoring")), false);
   assert.equal(
     await browser.evaluate(
-      bodyContains("Monitoring permissions are not provided")
+      bodyContains("Monitoring permissions could not be verified")
     ),
     true
   );
@@ -371,25 +425,25 @@ test("GitHub reconnect responses preserve the app session and completed onboardi
 test("monitoring and retry actions send explicit authorized sync requests and refresh status", async () => {
   await visit();
   await browser.waitFor(card("105") + " !== null");
-  await browser.click("Enable monitoring");
+  await browser.click("Enable Monitoring");
   await browser.waitFor(card("105") + ".innerText.includes('Indexing')");
   const enabled = fixture.calls.find(
     (c) => c.url === "/repositories/alice/registered/sync"
   );
   assert.deepEqual(enabled.body, { force_full: false, sync: false });
-  await browser.click("Retry indexing");
+  await browser.click("Retry Monitoring");
   await browser.waitFor(card("104") + ".innerText.includes('Indexing')");
   fixture.repositories.find((r) => r.github_repository_id === "105").status =
     "COMPLETED";
   await browser.click("Refresh repositories");
-  await browser.waitFor(card("105") + ".innerText.includes('Ready')");
+  await browser.waitFor(card("105") + ".innerText.includes('Monitored')");
 });
 
 test("accepted requests do not fabricate indexing progress and denied actions remain errors", async () => {
   fixture.syncAcceptedOnly = true;
   await visit();
   await browser.waitFor(card("105") + " !== null");
-  await browser.click("Enable monitoring");
+  await browser.click("Enable Monitoring");
   await browser.waitFor(bodyContains("Indexing request accepted"));
   assert.equal(
     await browser.evaluate(card("105") + ".innerText.includes('Available')"),
@@ -404,9 +458,9 @@ test("accepted requests do not fabricate indexing progress and denied actions re
   fixture.syncFailure = true;
   await browser.click("Refresh repositories");
   await browser.waitFor(
-    "Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim() === 'Retry indexing' && !b.disabled)"
+    "Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim() === 'Retry Monitoring' && !b.disabled)"
   );
-  await browser.click("Retry indexing");
+  await browser.click("Retry Monitoring");
   await browser.waitFor(
     card("104") + ".querySelector('[role=alert]') !== null"
   );
@@ -555,22 +609,344 @@ test("repository cards and profile remain usable on mobile in dark mode", async 
   console.log("Dashboard visual checks: " + screenshots);
 });
 
-test("backend indexing status is polled until the repository becomes ready", async () => {
+test("manual status checks update only the selected repository without polling", async () => {
   fixture.repositories = [
     repository("103", "example-org/worker", "INDEXING", true, "20"),
+    repository("109", "example-org/second", "INDEXING", true, "20"),
+    repository("101", "alice/api", "COMPLETED", true),
   ];
   await visit();
-  await browser.waitFor(card("103") + ".innerText.includes('Indexing')");
+  await browser.waitFor(card("103") + ".innerText.includes('Check Status')");
   const requests = fixture.calls.filter(
     (c) => c.url === "/repositories"
   ).length;
   fixture.repositories[0].status = "COMPLETED";
-  await browser.waitFor(card("103") + ".innerText.includes('Ready')");
-  assert.ok(
-    fixture.calls.filter((c) => c.url === "/repositories").length > requests
+  fixture.repositories[1].status = "COMPLETED";
+  // Wait past the former 10-second polling interval; no background transition is allowed.
+  await new Promise((resolve) => setTimeout(resolve, 10_500));
+  assert.equal(
+    fixture.calls.filter((c) => c.url === "/repositories").length,
+    requests
+  );
+  assert.equal(
+    await browser.evaluate(card("103") + ".innerText.includes('Indexing')"),
+    true
+  );
+  await browser.evaluate(card("103") + ".querySelector('button').click()");
+  await browser.waitFor(card("103") + ".innerText.includes('Monitored')");
+  assert.equal(
+    await browser.evaluate(card("109") + ".innerText.includes('Indexing')"),
+    true
+  );
+  assert.equal(
+    fixture.calls.filter((c) => c.url === "/repositories").length,
+    requests + 1
+  );
+  assert.equal(
+    await browser.evaluate(
+      card("103") +
+        ".innerText.includes('Repository indexing completed successfully.')"
+    ),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('a[href^=\"/projects/\"]').length"
+    ),
+    0
   );
   assert.equal(
     fixture.calls.some((c) => c.method === "POST"),
     false
   );
+  await browser.navigate(base + "/projects");
+  await browser.waitFor(card("109") + ".innerText.includes('Monitored')");
+});
+
+test("verified GitHub admin enables a previously untracked repository and sees server progress", async () => {
+  const row = repository("301", "alice/profile");
+  row.monitoring = {
+    github_admin: true,
+    can_enable_monitoring: true,
+    can_retry_indexing: false,
+    reason: "allowed",
+  };
+  fixture.repositories = [row];
+  await visit();
+  await browser.waitFor(bodyContains("Enable Monitoring"));
+  assert.equal(
+    fixture.calls.some((c) => c.method === "POST"),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(bodyContains("permissions could not be verified")),
+    false
+  );
+  await browser.click("Enable Monitoring");
+  await browser.waitFor(card("301") + ".innerText.includes('Indexing')");
+  const request = fixture.calls.find((c) => c.url === "/repositories/ingest");
+  assert.deepEqual(request.body, {
+    repository: "alice/profile",
+    installation_id: "10",
+    branch: "main",
+    force_full: false,
+    sync: false,
+  });
+  row.status = "COMPLETED";
+  await browser.click("Refresh repositories");
+  await browser.waitFor(card("301") + ".innerText.includes('Monitored')");
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('a[href^=\"/projects/\"]').length"
+    ),
+    0
+  );
+});
+
+test("explicitly restricted administrators and non-admin collaborators have no monitoring action", async () => {
+  for (const [reason, admin] of [
+    ["github_admin_required", false],
+    ["owned_by_another_user", true],
+  ]) {
+    const row = repository("302", "alice/profile");
+    row.monitoring = {
+      github_admin: admin,
+      can_enable_monitoring: false,
+      can_retry_indexing: false,
+      reason,
+    };
+    fixture.repositories = [row];
+    await visit();
+    await browser.waitFor(card("302") + ".innerText.includes('Restricted')");
+    assert.equal(
+      await browser.evaluate(bodyContains("Enable Monitoring")),
+      false
+    );
+    assert.equal(
+      await browser.evaluate(bodyContains("Retry Monitoring")),
+      false
+    );
+    assert.equal(
+      fixture.calls.some((c) => c.method === "POST"),
+      false
+    );
+  }
+});
+
+test("status failures preserve indexing and can be retried to a reported failure", async () => {
+  fixture.repositories = [
+    repository("103", "example-org/worker", "INDEXING", true, "20"),
+  ];
+  await visit();
+  await browser.waitFor(bodyContains("Check Status"));
+  fixture.failure = { status: 503, detail: "GitHub temporarily unavailable" };
+  await browser.click("Check Status");
+  await browser.waitFor(
+    card("103") + ".querySelector('[role=alert]') !== null"
+  );
+  assert.equal(
+    await browser.evaluate(card("103") + ".innerText.includes('Indexing')"),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(bodyContains("GitHub temporarily unavailable")),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(bodyContains("Unable to refresh repositories")),
+    false
+  );
+  fixture.failure = null;
+  fixture.repositories[0].status = "FAILED";
+  fixture.repositories[0].monitoring = {
+    github_admin: false,
+    can_enable_monitoring: false,
+    can_retry_indexing: false,
+    reason: "github_admin_required",
+  };
+  await browser.click("Check Status");
+  await browser.waitFor(card("103") + ".innerText.includes('View Error')");
+  assert.equal(
+    await browser.evaluate(card("103") + ".innerText.includes('Failed')"),
+    true
+  );
+  assert.equal(await browser.evaluate(bodyContains("Retry Monitoring")), false);
+  await browser.click("View Error");
+  await browser.waitFor("document.querySelector('[role=dialog]') !== null");
+  assert.equal(
+    await browser.evaluate(
+      bodyContains("Detailed ingestion errors are not exposed")
+    ),
+    true
+  );
+});
+
+test("concurrent indexing cards have independent loading and remain indexing until confirmed", async () => {
+  fixture.repositories = [
+    repository("103", "example-org/worker", "INDEXING", true, "20"),
+    repository("109", "example-org/second", "INDEXING", true, "20"),
+  ];
+  await visit();
+  await browser.waitFor(card("109") + ".innerText.includes('Check Status')");
+  fixture.delay = 700;
+  const count = fixture.calls.filter((c) => c.url === "/repositories").length;
+  await browser.evaluate(card("103") + ".querySelector('button').click()");
+  await browser.waitFor(
+    card("103") + ".innerText.includes('Checking status...')"
+  );
+  assert.equal(
+    await browser.evaluate(card("109") + ".querySelector('button').disabled"),
+    false
+  );
+  await browser.evaluate(card("109") + ".querySelector('button').click()");
+  await browser.waitFor(
+    card("109") + ".innerText.includes('Checking status...')"
+  );
+  await browser.waitFor(
+    card("103") +
+      ".innerText.includes('Check Status') && !" +
+      card("103") +
+      ".querySelector('button').disabled"
+  );
+  await browser.waitFor(
+    card("109") +
+      ".innerText.includes('Check Status') && !" +
+      card("109") +
+      ".querySelector('button').disabled"
+  );
+  assert.equal(
+    fixture.calls.filter((c) => c.url === "/repositories").length,
+    count + 2
+  );
+  assert.equal(
+    await browser.evaluate(
+      card("103") +
+        ".innerText.includes('Indexing') && " +
+        card("109") +
+        ".innerText.includes('Indexing')"
+    ),
+    true
+  );
+});
+
+test("access sheets are keyboard accessible and cards align their footers", async () => {
+  fixture.repositories[0].description = null;
+  fixture.repositories[1].description = "A long repository description ".repeat(
+    20
+  );
+  await visit();
+  await browser.waitFor(card("105") + " !== null");
+  const dimensions = await browser.evaluate(
+    "Array.from(document.querySelectorAll('[data-repository-id]')).slice(0,3).map(c => ({height:c.getBoundingClientRect().height, footer:c.querySelector('[data-slot=card-footer]').getBoundingClientRect().bottom}))"
+  );
+  assert.ok(
+    dimensions.every((d) => Math.abs(d.height - dimensions[0].height) < 1)
+  );
+  assert.ok(
+    dimensions.every((d) => Math.abs(d.footer - dimensions[0].footer) < 1)
+  );
+  await browser.evaluate(card("102") + ".querySelector('button').focus()");
+  await browser.call("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    text: "\r",
+  });
+  await browser.call("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+  });
+  await browser.waitFor("document.querySelector('[role=dialog]') !== null");
+  assert.equal(
+    await browser.evaluate(
+      bodyContains("Monitoring permissions could not be verified")
+    ),
+    true
+  );
+  await browser.call("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+  });
+  await browser.call("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+  });
+  await browser.waitFor("document.querySelector('[role=dialog]') === null");
+  assert.equal(
+    await browser.evaluate(card("102") + ".contains(document.activeElement)"),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('a[target=\"_blank\"]').length"
+    ),
+    5
+  );
+});
+
+test("activation prevents duplicate requests without blocking other cards", async () => {
+  fixture.repositories = [
+    repository("105", "alice/registered", "IDLE", true),
+    repository("110", "alice/other", "IDLE", true),
+  ];
+  await visit();
+  await browser.waitFor(
+    card("110") + ".innerText.includes('Enable Monitoring')"
+  );
+  fixture.syncDelay = 700;
+  await browser.evaluate(
+    card("105") +
+      ".querySelector('button').click(); " +
+      card("105") +
+      ".querySelector('button').click()"
+  );
+  await browser.waitFor(
+    card("105") + ".innerText.includes('Requesting indexing...')"
+  );
+  assert.equal(
+    await browser.evaluate(card("105") + ".querySelector('button').disabled"),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(card("110") + ".querySelector('button').disabled"),
+    false
+  );
+  await browser.waitFor(card("105") + ".innerText.includes('Check Status')");
+  assert.equal(
+    fixture.calls.filter((c) => c.url === "/repositories/alice/registered/sync")
+      .length,
+    1
+  );
+});
+
+test("accepted activation with failed status refresh stays recoverable without a duplicate activation", async () => {
+  fixture.repositories = [repository("105", "alice/registered", "IDLE", true)];
+  await visit();
+  await browser.waitFor(bodyContains("Enable Monitoring"));
+  fixture.failure = { status: 503, detail: "GitHub discovery unavailable" };
+  await browser.click("Enable Monitoring");
+  await browser.waitFor(bodyContains("Check Status to retry verification"));
+  assert.equal(
+    await browser.evaluate(card("105") + ".innerText.includes('Available')"),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(bodyContains("GitHub discovery unavailable")),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(bodyContains("Enable Monitoring")),
+    false
+  );
+  fixture.failure = null;
+  await browser.click("Check Status");
+  await browser.waitFor(card("105") + ".innerText.includes('Indexing')");
+  assert.equal(fixture.calls.filter((c) => c.method === "POST").length, 1);
 });

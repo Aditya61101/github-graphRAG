@@ -72,6 +72,7 @@ async def ingest_repository(payload: IngestRepositoryRequest, request: Request,
     app_service = get_github_app(request)
     try:
         selected = await app_service.select_repository(current_user.id, payload.repository, payload.installation_id)
+        app_service.require_monitoring_admin(current_user.id, selected)
         repo = app_service.bind_repository(selected, current_user.id, payload.branch)
     except GitHubAppError as exc:
         raise HTTPException(exc.status_code, str(exc)) from None
@@ -101,9 +102,13 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
         _, accessible = await get_github_app(request).discovery(current_user.id)
     except GitHubAppError as exc:
         raise HTTPException(exc.status_code, str(exc)) from None
+    app_service = get_github_app(request)
     tracked = {record.github_repository_id: record for record in
                resource(request, 'sqlite_store').list_repositories(user_id=current_user.id)
                if record.user_id == current_user.id}
+    # Prefer the existing owned binding if multiple installations grant one repository.
+    accessible.sort(key=lambda item: 0 if tracked.get(str(item['id'])) and
+                    tracked[str(item['id'])].installation_id == item['installation_id'] else 1)
     output, seen = [], set()
     for item in accessible:
         rid = str(item['id'])
@@ -113,6 +118,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
         local = tracked.get(rid)
         output.append(AvailableRepositoryResponse(
             id=local.id if local else None, github_repository_id=rid,
+            monitoring=app_service.monitoring_capabilities(current_user.id, item),
             installation_id=item['installation_id'], owner=item['owner']['login'], name=item['name'],
             full_name=item['full_name'], repository_url=item['html_url'],
             default_branch=item.get('default_branch') or 'main',
@@ -164,7 +170,7 @@ async def get_repository(owner: str, name: str, request: Request,
 async def sync_repository(owner: str, name: str, request: Request, background_tasks: BackgroundTasks,
                           payload: SyncRepositoryRequest | None = None,
                           current_user: UserModel = Depends(get_current_user)):
-    repo = await authorize_repository(request, current_user.id, f'{owner}/{name}')
+    repo = await authorize_repository(request, current_user.id, f'{owner}/{name}', require_admin=True)
     payload = payload or SyncRepositoryRequest()
     return await _start_index(request, background_tasks, current_user, repo, repo.tracked_branch,
                               payload.force_full, payload.sync, 'manual_sync')

@@ -1,4 +1,17 @@
+export type RepositoryMonitoringCapabilities = {
+  github_admin: boolean | null;
+  can_enable_monitoring: boolean | null;
+  can_retry_indexing: boolean | null;
+  reason:
+    | "allowed"
+    | "permission_unknown"
+    | "github_admin_required"
+    | "owned_by_another_user"
+    | "installation_binding_mismatch";
+};
+
 export type RepositoryDto = {
+  monitoring?: RepositoryMonitoringCapabilities;
   id: string | null;
   installation_id: string;
   github_repository_id: string;
@@ -17,6 +30,7 @@ export type RepositoryDto = {
 };
 
 export type Repository = {
+  monitoring?: RepositoryMonitoringCapabilities;
   // Picker ID is a GitHub ID, not a backend repo_... identifier.
   id: string;
   githubRepositoryId: string;

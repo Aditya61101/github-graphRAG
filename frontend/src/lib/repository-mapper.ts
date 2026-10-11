@@ -2,6 +2,7 @@ import type { Repository, RepositoryDto } from "@/types/repositories";
 
 export function mapRepository(repo: RepositoryDto): Repository {
   return {
+    monitoring: repo.monitoring,
     id: repo.github_repository_id,
     githubRepositoryId: repo.github_repository_id,
     trackedRepositoryId: repo.tracked_repository_id ?? repo.id,

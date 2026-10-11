@@ -40,7 +40,7 @@ from api_services.app.utils.jwt_utils import create_access_token, decode_access_
 def repo(rid=101, private=False):
     return {'id': rid, 'name': f'repo{rid}', 'full_name': f'owner/repo{rid}',
             'owner': {'login': 'owner'}, 'private': private, 'html_url': f'https://github.com/owner/repo{rid}',
-            'default_branch': 'main'}
+            'default_branch': 'main', 'permissions': {'admin': True, 'push': True, 'pull': True}}
 
 
 def installation(iid=10, **overrides):

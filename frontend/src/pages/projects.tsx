@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
   GitForkIcon,
@@ -11,7 +11,7 @@ import {
 import { authService } from "@/api/auth-service";
 import { repositoryService } from "@/api/repository-service";
 import { RepositoryHeader } from "@/components/repositories/repository-header";
-import { RepositoryCard } from "@/components/repositories/repository-card";
+import { RepositoryCardActions } from "@/components/repositories/repository-card-actions";
 import { EmptyState } from "@/components/core/feedback/empty-state";
 import { ErrorState } from "@/components/core/feedback/error-state";
 import { Button } from "@/components/ui/button";
@@ -19,70 +19,29 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/contexts/auth-context";
-import { getApiErrorMessage } from "@/lib/api-error";
 import { getOnboardingError } from "@/lib/onboarding-flow";
 import {
   filterRepositories,
-  getRepositoryAction,
   getRepositoryState,
   needsGitHubReconnect,
   REPOSITORY_FILTERS,
   uniqueRepositories,
   type RepositoryFilter,
 } from "@/lib/repository-dashboard";
-import type { Repository } from "@/types/repositories";
 
 export default function ProjectsPage() {
   const { token, user, status } = useAuth();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RepositoryFilter>("all");
-  const [notice, setNotice] = useState<{
-    id: string;
-    message?: string;
-    error?: string;
-  } | null>(null);
+  const queryKey = ["repositories", user?.id, token];
   const discovery = useQuery({
-    queryKey: ["repositories", user?.id, token],
+    queryKey,
     queryFn: ({ signal }) => repositoryService.getRepositories(signal),
     enabled: Boolean(user && token),
     retry: false,
     staleTime: 0,
-    // Poll active indexing, without treating an accepted request as an indexing state.
-    refetchInterval: (query) =>
-      !query.state.error &&
-      query.state.data?.some(
-        (repository) => getRepositoryState(repository) === "indexing"
-      )
-        ? 10_000
-        : false,
-  });
-  const indexing = useMutation({
-    mutationFn: async (repository: Repository) => {
-      if (!getRepositoryAction(repository))
-        throw new Error("Monitoring is not authorized for this repository.");
-      return repositoryService.syncRepository(repository);
-    },
-    onMutate: () => setNotice(null),
-    onSuccess: (result, repository) => {
-      setNotice({
-        id: repository.githubRepositoryId,
-        message:
-          result.status === "accepted"
-            ? "Indexing request accepted. Refresh to check whether indexing has started."
-            : "Indexing completed. Refreshing status.",
-      });
-      void discovery.refetch();
-    },
-    onError: (error, repository) => {
-      setNotice({
-        id: repository.githubRepositoryId,
-        error: getApiErrorMessage(
-          error,
-          "Could not start indexing. Please try again."
-        ),
-      });
-      void discovery.refetch();
-    },
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const repositories = uniqueRepositories(discovery.data ?? []);
   const visible = filterRepositories(repositories, search, filter);
@@ -92,7 +51,6 @@ export default function ProjectsPage() {
     failure?.outcome === "reauthorization_required" ||
     needsGitHubReconnect(discovery.error);
   const refresh = () => {
-    setNotice(null);
     void discovery.refetch();
   };
   const connectButton = (
@@ -255,30 +213,10 @@ export default function ProjectsPage() {
             {visible.length ? (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {visible.map((repository) => (
-                  <RepositoryCard
-                    key={repository.githubRepositoryId}
+                  <RepositoryCardActions
+                    key={user?.id + ":" + repository.githubRepositoryId}
                     repository={repository}
-                    busy={
-                      indexing.isPending ||
-                      (notice?.id === repository.githubRepositoryId &&
-                        Boolean(notice.message))
-                    }
-                    pending={
-                      indexing.isPending &&
-                      indexing.variables.githubRepositoryId ===
-                        repository.githubRepositoryId
-                    }
-                    message={
-                      notice?.id === repository.githubRepositoryId
-                        ? notice.message
-                        : undefined
-                    }
-                    error={
-                      notice?.id === repository.githubRepositoryId
-                        ? notice.error
-                        : undefined
-                    }
-                    onIndex={(repository) => indexing.mutate(repository)}
+                    queryKey={queryKey}
                   />
                 ))}
               </div>

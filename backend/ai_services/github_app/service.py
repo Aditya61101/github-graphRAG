@@ -347,6 +347,45 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository is not currently granted to this user and App')
         return matches[0]
 
+    def monitoring_capabilities(self, user_id: str, item: dict) -> dict:
+        """Use user-token permissions; never infer admin from installation inventory."""
+        permissions = item.get('permissions')
+        admin = permissions.get('admin') if isinstance(permissions, dict) else None
+        admin = admin if type(admin) is bool else None
+        tracked = self.store.get_repository(str(item['id']))
+        named = self.store.get_repository(item['full_name'])
+        records = [record for record in (tracked, named) if record]
+        if any(record.user_id and record.user_id != user_id for record in records):
+            reason, allowed = 'owned_by_another_user', False
+        elif admin is None:
+            reason, allowed = 'permission_unknown', None
+        elif not admin:
+            reason, allowed = 'github_admin_required', False
+        elif tracked and tracked.user_id == user_id and tracked.installation_id != item['installation_id']:
+            reason, allowed = 'installation_binding_mismatch', False
+        else:
+            reason, allowed = 'allowed', True
+        own = tracked if tracked and tracked.user_id == user_id else None
+        status = own.status if own else 'NOT_INDEXED'
+        return {
+            'github_admin': admin,
+            'can_enable_monitoring': allowed if status in {'IDLE', 'NOT_INDEXED'} else False,
+            'can_retry_indexing': allowed if status == 'FAILED' else False,
+            'reason': reason,
+        }
+
+    def require_monitoring_admin(self, user_id: str, item: dict) -> None:
+        """Revalidate administrative policy immediately before a manual mutation."""
+        capabilities = self.monitoring_capabilities(user_id, item)
+        if capabilities['reason'] == 'owned_by_another_user':
+            raise GitHubAppError(409, 'Repository is owned by another DecisionGuard user')
+        if capabilities['github_admin'] is None:
+            raise GitHubAppError(503, 'GitHub repository administration permission could not be verified; retry discovery')
+        if capabilities['github_admin'] is not True:
+            raise GitHubAppError(403, 'GitHub repository administrator permission is required to enable or retry monitoring')
+        # Ingest can rebind an installation after verified selection; sync keeps
+        # the stricter authorize_tracked installation binding check.
+
     def bind_repository(self, item: dict, user_id: str, branch: str | None = None):
         connection = self.store.get_user_github_connection(user_id)
         repo = self.store.save_repository(RepositoryMetadata(
@@ -360,7 +399,7 @@ class GitHubAppService:
             session.commit()
         return self.store.get_repository(repo.id)
 
-    async def authorize_tracked(self, user_id: str, identifier: str):
+    async def authorize_tracked(self, user_id: str, identifier: str, require_admin: bool = False):
         repo = self.store.get_repository(identifier)
         if not repo:
             raise GitHubAppError(404, 'Repository not found')
@@ -371,6 +410,8 @@ class GitHubAppService:
         selected = await self.select_repository(user_id, repo.full_name, repo.installation_id)
         if str(selected['id']) != repo.github_repository_id:
             raise GitHubAppError(403, 'Repository identity changed')
+        if require_admin:
+            self.require_monitoring_admin(user_id, selected)
         return self.store.get_repository(repo.id)
 
     async def indexing_credential(self, repository_id: str, installation_id: str):
