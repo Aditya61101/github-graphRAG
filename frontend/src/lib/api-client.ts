@@ -20,7 +20,13 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
+    // GitHub authorization expiry is distinct from an expired application JWT.
+    const githubReconnect =
+      (error.config?.url === "/repositories" ||
+        error.config?.url?.startsWith("/repositories/")) &&
+      error.response?.data?.detail === "GitHub reconnect required";
     if (
+      !githubReconnect &&
       error.response?.status === 401 &&
       error.config?.headers?.Authorization ===
         `Bearer ${localStorage.getItem("token")}`

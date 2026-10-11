@@ -19,6 +19,7 @@ export const appRouter = createBrowserRouter([
   {
     element: <ProtectedRouter />,
     children: [
+      { path: "/projects", element: <ProjectsPage /> },
       {
         path: "/",
         element: <Navigate to="/projects" replace />,
@@ -27,11 +28,6 @@ export const appRouter = createBrowserRouter([
         element: <DashboardLayout />,
         handle: { breadcrumb: "Projects" },
         children: [
-          {
-            path: "/projects",
-            element: <ProjectsPage />,
-            handle: { breadcrumb: "Browse Projects" },
-          },
           {
             path: "/projects/:projectId",
             element: <ProjectDetailsPage />,

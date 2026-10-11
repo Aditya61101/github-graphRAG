@@ -144,7 +144,7 @@ before(async () => {
                     base + "/__github_install?state=backend-bound-state",
                 });
               }
-              // Let the unmodified dashboard render after navigation, without external APIs.
+              // Let the repository dashboard render after navigation, without external APIs.
               if (request.url === "/repositories") return json([]);
               return json({ detail: "Unexpected test request" }, 404);
             }
@@ -279,7 +279,7 @@ test("continue updates auth cache before entering the unmodified projects route 
   await browser.waitFor(bodyContains("Continue with available repositories"));
   await browser.click("Continue with available repositories");
   await browser.waitFor(pathIs("/projects"));
-  await browser.waitFor(bodyContains("Your projects"));
+  await browser.waitFor(bodyContains("Your repositories"));
   assert.equal(
     fixture.calls.filter((c) => c[1] === "/auth/onboarding/complete").length,
     1
@@ -314,7 +314,7 @@ test("returning users and successful installation returns go directly to project
     fixture.eligible = false;
     await login(outcome);
     await browser.waitFor(pathIs("/projects"));
-    await browser.waitFor(bodyContains("Your projects"));
+    await browser.waitFor(bodyContains("Your repositories"));
     assert.equal(
       fixture.calls.some((c) => c[1] === "/auth/onboarding"),
       false
@@ -442,16 +442,12 @@ test("B2 remains usable on a narrow viewport in dark mode", async () => {
   console.log(`Onboarding visual checks: ${screenshots}`);
 });
 
-test("completed users can manage access through the unchanged create-project drawer", async () => {
+test("completed users can connect repositories from the repository dashboard", async () => {
   fixture.completion = completed;
   await login();
-  await browser.waitFor(bodyContains("Your projects"));
-  await browser.click("Create project");
-  await browser.waitFor(
-    "Array.from(document.querySelectorAll('a')).some(a => a.innerText.trim() === 'Manage GitHub repository access')"
-  );
+  await browser.waitFor(bodyContains("Your repositories"));
   await browser.evaluate(
-    "Array.from(document.querySelectorAll('a')).find(a => a.innerText.trim() === 'Manage GitHub repository access').click()"
+    "Array.from(document.querySelectorAll('a')).find(a => a.innerText.trim() === 'Connect repositories').click()"
   );
   await browser.waitFor(pathIs("/install"));
   await browser.waitFor(bodyContains("Manage access on GitHub"));
@@ -488,7 +484,7 @@ test("completed users retain completion while recovering from a cancelled access
   );
   await browser.click("Back to projects");
   await browser.waitFor(pathIs("/projects"));
-  await browser.waitFor(bodyContains("Your projects"));
+  await browser.waitFor(bodyContains("Your repositories"));
 });
 
 test("completed users can recover from missing access and failed discovery without restarting onboarding", async () => {
@@ -538,7 +534,7 @@ test("B1 install and B2 connect-more enter projects after a confirmed successful
     ).length;
     await login("success");
     await browser.waitFor(pathIs("/projects"));
-    await browser.waitFor(bodyContains("Your projects"));
+    await browser.waitFor(bodyContains("Your repositories"));
     assert.equal(
       fixture.calls.filter((c) => c[1] === "/auth/onboarding").length,
       discoveriesBeforeReturn

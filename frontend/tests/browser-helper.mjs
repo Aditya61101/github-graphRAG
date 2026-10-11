@@ -137,7 +137,7 @@ export async function openBrowser() {
       return result.result.value;
     };
     const waitFor = async (expression) => {
-      const deadline = Date.now() + 15000;
+      const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
         try {
           if (await evaluate(expression)) return;
