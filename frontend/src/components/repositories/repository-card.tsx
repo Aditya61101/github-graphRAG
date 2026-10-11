@@ -28,6 +28,7 @@ import {
   getRepositoryState,
 } from "@/lib/repository-dashboard";
 import type { Repository } from "@/types/repositories";
+import { Link } from "react-router";
 
 const labels = {
   available: "Available",
@@ -75,12 +76,13 @@ export function RepositoryCard({
   const accessDetails =
     monitoringMessage ||
     "GitHub administration and DecisionGuard stored-knowledge access are checked separately. Matching a repository owner name does not grant monitoring rights.";
-  const detailsLabel =
-    state === "failed"
-      ? "View Error"
-      : state === "ready" && repository.monitoring?.reason === "allowed"
-        ? "View Status"
-        : "View Access";
+  // Monitoring permission controls this navigation affordance only. The
+  // Overview API independently authorizes access to stored knowledge.
+  const showOpenRepository =
+    state === "ready" &&
+    repository.monitoring?.reason === "allowed" &&
+    repository.id === repository.trackedRepositoryId;
+  const detailsLabel = state === "failed" ? "View Error" : "View Access";
   const owner = repository.fullName.split("/")[0];
   return (
     <Card
@@ -203,6 +205,19 @@ export function RepositoryCard({
                 ? "Retry Monitoring"
                 : "Enable Monitoring"}
           </Button>
+        ) : showOpenRepository ? (
+          <Button
+            nativeButton={false}
+            size="sm"
+            variant="outline"
+            render={
+              <Link
+                to={`/projects/${encodeURIComponent(repository.id)}/overview`}
+              />
+            }
+          >
+            Open Repository
+          </Button>
         ) : (
           <Sheet>
             <SheetTrigger render={<Button size="sm" variant="outline" />}>
@@ -227,9 +242,8 @@ export function RepositoryCard({
                 )}
                 {state === "ready" && (
                   <p className="text-sm text-muted-foreground">
-                    The repository is monitored. Open Repository will be
-                    available when an authorized repository workspace is
-                    connected.
+                    The repository is monitored. Open Repository verifies your
+                    current access before displaying stored knowledge.
                   </p>
                 )}
                 <p className="text-sm text-muted-foreground">{accessDetails}</p>

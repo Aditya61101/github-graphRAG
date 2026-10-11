@@ -2,8 +2,19 @@ import { apiClient } from "@/lib/api-client";
 import type { Repository, RepositoryDto } from "@/types/repositories";
 import { getRepositoryAction } from "@/lib/repository-dashboard";
 import { mapRepository } from "@/lib/repository-mapper";
+import type { RepositoryOverview } from "@/types/overview";
 
 export const repositoryService = {
+  getOverview: async (
+    repositoryId: string,
+    signal?: AbortSignal
+  ): Promise<RepositoryOverview> => {
+    const response = await apiClient.get<RepositoryOverview>(
+      `/repositories/${encodeURIComponent(repositoryId)}/overview`,
+      { signal }
+    );
+    return response.data;
+  },
   enableMonitoring: async (
     repository: Repository
   ): Promise<{ status: string }> => {

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentProps } from "react";
+import { type ComponentProps } from "react";
 
 import {
   Sidebar,
@@ -11,24 +11,24 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { NavMain } from "@/components/core/sidebar/nav-main";
-import { NavProjects } from "@/components/core/sidebar/nav-projects";
+// import { NavProjects } from "@/components/core/sidebar/nav-projects";
 import { NavUser } from "@/components/core/sidebar/nav-user";
 import { NAV_DATA } from "@/constants/navbar";
-import { projectService } from "@/api/project-service";
-import type { Project } from "@/types/project";
+// import { projectService } from "@/api/project-service";
+// import type { Project } from "@/types/project";
 
 export function AppSidebar({ ...props }: ComponentProps<typeof Sidebar>) {
-  const [recentProjects, setRecentProjects] = useState<Project[]>([]);
+  // const [recentProjects, setRecentProjects] = useState<Project[]>([]);
 
-  useEffect(() => {
-    const loadProjects = async () => {
-      const projects = await projectService.getProjects();
-      const recentProjects = projects.slice(0, 3);
-      setRecentProjects(recentProjects);
-    };
+  // useEffect(() => {
+  //   const loadProjects = async () => {
+  //     const projects = await projectService.getProjects();
+  //     const recentProjects = projects.slice(0, 3);
+  //     setRecentProjects(recentProjects);
+  //   };
 
-    void loadProjects();
-  }, []);
+  //   void loadProjects();
+  // }, []);
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -53,7 +53,7 @@ export function AppSidebar({ ...props }: ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={NAV_DATA.navMain} />
-        <NavProjects projects={recentProjects} />
+        {/* <NavProjects projects={recentProjects} /> */}
       </SidebarContent>
       <SidebarFooter>
         <NavUser />

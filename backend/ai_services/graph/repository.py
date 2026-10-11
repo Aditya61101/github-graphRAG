@@ -75,6 +75,29 @@ class Neo4jGraphRepository:
             logger.exception(f"Failed to query entities from Neo4j for repositories {repo_ids}: {exc}")
             raise GraphRepositoryError(f"Failed to query entities from Neo4j: {exc}") from exc
 
+    def count_architectural_decisions(self, repo_ids: list[str]) -> int:
+        """Count persisted decision nodes within a server-authorized scope."""
+        if not self.driver or not repo_ids:
+            raise GraphRepositoryError("An initialized driver and repository scope are required.")
+        query = """
+        MATCH (d:ArchitecturalDecision)
+        WHERE d.repository IN $repo_ids
+        RETURN count(DISTINCT d) AS decision_count
+        """
+        try:
+            records = self._extract_records(self.driver.execute_query(
+                query, database_=self.database, repo_ids=repo_ids,
+            ))
+            if len(records) != 1:
+                raise ValueError("Decision aggregate did not return one record")
+            count = records[0].get('decision_count')
+            if type(count) is not int or count < 0:
+                raise ValueError("Decision aggregate returned an invalid count")
+            return count
+        except Exception as exc:
+            logger.exception("Failed to count repository architectural decisions")
+            raise GraphRepositoryError("Decision count query failed") from exc
+
     def fetch_direct_relationships(self, repo_ids: list[str]) -> list[dict[str, Any]]:
         """Fetch direct Entity-to-Entity architectural relationships strictly within the specified repositories."""
         if not self.driver:

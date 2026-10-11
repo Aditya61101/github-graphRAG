@@ -300,7 +300,7 @@ test("multiple installations render unique real repositories and no mock project
     await browser.evaluate(
       "document.querySelectorAll('a[href^=\"/projects/\"]').length"
     ),
-    0
+    1
   );
   assert.equal(
     fixture.calls.some((c) => c.method === "POST"),
@@ -313,6 +313,40 @@ test("multiple installations render unique real repositories and no mock project
   await writeFile(
     path.join(screenshots, "repositories-desktop-light.png"),
     Buffer.from(image.data, "base64")
+  );
+});
+
+test("ready allowed card replaces the status drawer action with canonical workspace navigation", async () => {
+  await visit();
+  await browser.waitFor(card("101") + " !== null");
+  const link =
+    card("101") + ".querySelector('a[href=\"/projects/repo_101/overview\"]')";
+  assert.equal(
+    await browser.evaluate(link + ".innerText.trim()"),
+    "Open Repository"
+  );
+  assert.equal(
+    await browser.evaluate(card("101") + ".innerText.includes('View Status')"),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(
+      card("101") + ".querySelectorAll('a[href^=\"/projects/\"]').length"
+    ),
+    1
+  );
+  await browser.evaluate(link + ".click()");
+  await browser.waitFor(pathIs("/projects/repo_101/overview"));
+  assert.equal(
+    await browser.evaluate("document.querySelector('[role=dialog]') !== null"),
+    false
+  );
+  // This fixture exposes no stored-knowledge endpoint: navigation must not
+  // grant access based solely on the card's allowed monitoring capability.
+  await browser.waitFor(bodyContains("Repository not found"));
+  assert.equal(
+    await browser.evaluate(bodyContains("Architecture Overview")),
+    false
   );
 });
 
@@ -653,7 +687,7 @@ test("manual status checks update only the selected repository without polling",
     await browser.evaluate(
       "document.querySelectorAll('a[href^=\"/projects/\"]').length"
     ),
-    0
+    2
   );
   assert.equal(
     fixture.calls.some((c) => c.method === "POST"),
@@ -699,7 +733,7 @@ test("verified GitHub admin enables a previously untracked repository and sees s
     await browser.evaluate(
       "document.querySelectorAll('a[href^=\"/projects/\"]').length"
     ),
-    0
+    1
   );
 });
 

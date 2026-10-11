@@ -119,7 +119,8 @@ test("repository mapping preserves installation and distinct GitHub/internal IDs
     updated_at: null,
   };
   const repo = mapper.mapRepository(dto);
-  assert.equal(repo.id, "101");
+  assert.equal(repo.id, "repo_101");
+  assert.equal(repo.githubRepositoryId, "101");
   assert.equal(repo.trackedRepositoryId, "repo_101");
   assert.equal(repo.installationId, "10");
   assert.equal(repo.fullName, "owner/repo");
@@ -133,7 +134,14 @@ test("repository mapping preserves installation and distinct GitHub/internal IDs
     status: "NOT_INDEXED",
   });
   assert.equal(unindexed.trackedRepositoryId, null);
+  assert.equal(unindexed.id, "101");
   assert.equal(unindexed.status, "NOT_INDEXED");
+  const legacyDto = mapper.mapRepository({
+    ...dto,
+    tracked_repository_id: null,
+  });
+  assert.equal(legacyDto.id, "repo_101");
+  assert.equal(legacyDto.trackedRepositoryId, "repo_101");
 });
 
 test("installation start uses bearer auth and temporary-cookie credentials; me supplies profile", async () => {

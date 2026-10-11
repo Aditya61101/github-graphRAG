@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -55,6 +56,11 @@ class RepositoryGraphService:
             )
 
         return repo
+
+    async def count_architectural_decisions(self, repository_identifier: str, user_id: str) -> int:
+        repo = self.validate_repository_access(repository_identifier, user_id)
+        repo_ids = list(dict.fromkeys(filter(None, [repo.id, repo.github_repository_id])))
+        return await asyncio.to_thread(self.graph_repo.count_architectural_decisions, repo_ids)
 
     async def get_repository_graph(
         self,

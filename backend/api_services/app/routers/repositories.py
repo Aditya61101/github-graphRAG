@@ -10,6 +10,11 @@ from ai_services.ingestion.persistence.models import UserModel
 from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictError, RepositorySourceError
 from api_services.app.models.adr import ADRResponse, ADRBatchUploadResponse, ADRUploadItemResponse
 from api_services.app.models.graph import RepositoryGraphResponse
+from ai_services.graph.repository import GraphRepositoryError
+from api_services.app.models.overview import (
+    Availability, OverviewKPIs, OverviewMetric, OverviewPermissions,
+    OverviewSection, RepositoryOverviewResponse, ReviewActivity,
+)
 from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
     AvailableRepositoryResponse, IngestRepositoryRequest, IngestionJobResponse,
@@ -128,6 +133,46 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
             indexed_commit_sha=local.indexed_commit_sha if local else None, updated_at=item.get('updated_at'),
         ))
     return output
+
+
+@router.get('/{repo_id}/overview', response_model=RepositoryOverviewResponse)
+async def get_repository_overview(repo_id: str, request: Request,
+                                 current_user: UserModel = Depends(get_current_user)):
+    repo = await authorize_repository(request, current_user.id, repo_id)
+    # This endpoint accepts only canonical tracked IDs, never client graph scopes.
+    if repo.id != repo_id:
+        raise HTTPException(400, 'A canonical tracked repository ID is required')
+    decision_metric = OverviewMetric(availability=Availability(status='error', reason='graph_query_failed'))
+    graph_service = getattr(request.app.state, 'graph_service', None)
+    if graph_service is not None:
+        try:
+            count = await graph_service.count_architectural_decisions(repo.id, current_user.id)
+            decision_metric = OverviewMetric(availability=Availability(status='available'), value=count)
+        except GraphRepositoryError:
+            logger.warning('Overview decision count unavailable repository=%s', repo.id)
+    # Settings remains a placeholder. Reuse the existing verified admin policy;
+    # unknown permissions must not make read-only Overview unavailable.
+    can_view_settings = False
+    try:
+        await get_github_app(request).authorize_tracked(current_user.id, repo.id, require_admin=True)
+        can_view_settings = True
+    except GitHubAppError as exc:
+        if exc.status_code not in (403, 503):
+            raise HTTPException(exc.status_code, str(exc)) from None
+    unavailable = Availability(status='unavailable', reason='engine_not_implemented')
+    return RepositoryOverviewResponse(
+        repository=RepositoryResponse(**repo.to_dict()),
+        permissions=OverviewPermissions(can_view_settings=can_view_settings),
+        kpis=OverviewKPIs(
+            architecture_decisions=decision_metric,
+            decisions_at_risk=OverviewMetric(availability=unavailable),
+            prs_analyzed=OverviewMetric(availability=unavailable),
+            architectural_warnings=OverviewMetric(availability=unavailable),
+        ),
+        review_activity=ReviewActivity(availability=unavailable),
+        decisions_needing_attention=OverviewSection(availability=unavailable),
+        recent_pr_reviews=OverviewSection(availability=unavailable),
+    )
 
 
 @router.get('/{repo_id}/adrs', response_model=list[ADRResponse])

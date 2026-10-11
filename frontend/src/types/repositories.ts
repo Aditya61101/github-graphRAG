@@ -31,7 +31,7 @@ export type RepositoryDto = {
 
 export type Repository = {
   monitoring?: RepositoryMonitoringCapabilities;
-  // Picker ID is a GitHub ID, not a backend repo_... identifier.
+  // Canonical internal ID for tracked repositories; GitHub picker ID otherwise.
   id: string;
   githubRepositoryId: string;
   trackedRepositoryId: string | null;

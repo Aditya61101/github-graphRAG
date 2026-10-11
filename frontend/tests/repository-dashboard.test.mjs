@@ -3,6 +3,7 @@ import { after, before, test } from "node:test";
 import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router";
 
 let server, flow, service, client, Card;
 const storage = new Map();
@@ -58,7 +59,16 @@ const repository = {
 
 function render(props = {}) {
   return renderToStaticMarkup(
-    createElement(Card, { repository, pending: false, onIndex() {}, ...props })
+    createElement(
+      MemoryRouter,
+      null,
+      createElement(Card, {
+        repository,
+        pending: false,
+        onIndex() {},
+        ...props,
+      })
+    )
   );
 }
 
@@ -148,22 +158,58 @@ test("search matches repository name or owner and status filters use server clas
   );
 });
 
-test("cards expose real branch and state without fabricated statistics or workspace links", () => {
+test("cards expose real branch and state with canonical workspace links and no fabricated statistics", () => {
   const html = render({
     repository: {
       ...repository,
+      id: "repo_101",
+      monitoring: allowed,
       trackedRepositoryId: "repo_101",
       trackedBranch: "develop",
       status: "COMPLETED",
     },
   });
   assert.match(html, /Monitored|develop|Public|example-org/);
-  assert.doesNotMatch(
-    html,
-    /Enable Monitoring|ADR records|Entities|[/]projects[/]repo_101/
-  );
+  assert.doesNotMatch(html, /Enable Monitoring|ADR records|Entities/);
+  assert.match(html, /href="[/]projects[/]repo_101[/]overview"/);
+  assert.match(html, /Open Repository/);
+  assert.doesNotMatch(html, /View Status|View Access/);
   assert.match(html, /rel="noopener noreferrer"/);
   assert.match(render({ error: "Access denied" }), /role="alert"/);
+});
+
+test("ready card navigation requires allowed monitoring and the canonical internal ID", () => {
+  for (const reason of [
+    "permission_unknown",
+    "github_admin_required",
+    "owned_by_another_user",
+    "installation_binding_mismatch",
+  ]) {
+    const html = render({
+      repository: {
+        ...repository,
+        id: "repo_101",
+        trackedRepositoryId: "repo_101",
+        status: "COMPLETED",
+        monitoring: { ...allowed, reason },
+      },
+    });
+    assert.match(html, /View Access/);
+    assert.doesNotMatch(
+      html,
+      /Open Repository|View Status|href="[/]projects[/]/
+    );
+  }
+  const inconsistent = render({
+    repository: {
+      ...repository,
+      trackedRepositoryId: "repo_101",
+      status: "COMPLETED",
+      monitoring: allowed,
+    },
+  });
+  assert.match(inconsistent, /View Access/);
+  assert.doesNotMatch(inconsistent, /Open Repository/);
 });
 
 test("sync uses the existing authorized asynchronous endpoint and does not index untracked repositories", async () => {

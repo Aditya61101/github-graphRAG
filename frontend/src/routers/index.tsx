@@ -5,8 +5,9 @@ import ProtectedRouter from "@/components/core/protected-route";
 import DashboardLayout from "@/layouts/dashboard-layout";
 import { NotFound } from "@/pages/not-found";
 import ProjectsPage from "@/pages/projects";
-import ProjectDetailsPage from "@/pages/project-details";
-import ExplorePage from "@/pages/explore";
+import RepositoryLayout from "@/layouts/repository-layout";
+import RepositoryOverviewPage from "@/pages/repository-overview";
+import RepositoryComingLater from "@/pages/repository-coming-later";
 import SettingsPage from "@/pages/settings";
 import InstallPage from "@/pages/install";
 
@@ -25,19 +26,20 @@ export const appRouter = createBrowserRouter([
         element: <Navigate to="/projects" replace />,
       },
       {
+        path: "/projects/:projectId",
+        element: <RepositoryLayout />,
+        children: [
+          { index: true, element: <Navigate to="overview" replace /> },
+          { path: "overview", element: <RepositoryOverviewPage /> },
+          ...["explore", "decisions", "pull-requests", "settings"].map(
+            (path) => ({ path, element: <RepositoryComingLater /> })
+          ),
+        ],
+      },
+      {
         element: <DashboardLayout />,
         handle: { breadcrumb: "Projects" },
         children: [
-          {
-            path: "/projects/:projectId",
-            element: <ProjectDetailsPage />,
-            handle: { breadcrumb: "Project Details" },
-          },
-          {
-            path: "/projects/:projectId/explore",
-            element: <ExplorePage />,
-            handle: { breadcrumb: "Explore" },
-          },
           {
             path: "/settings",
             element: <SettingsPage />,
