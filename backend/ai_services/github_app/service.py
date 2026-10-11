@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -68,13 +69,17 @@ class GitHubAppService:
         return jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': self.settings.app_id},
                           self.settings.private_key, algorithm='RS256')
 
-    async def request(self, method: str, path: str, token: str, **kwargs) -> dict | list:
+    async def request(self, method: str, path: str, token: str, *, allow_no_content: bool = False, **kwargs) -> dict | list:
         try:
             response = await self.client.request(method, 'https://api.github.com' + path,
                 headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
                          'X-GitHub-Api-Version': '2022-11-28'}, **kwargs)
         except httpx.HTTPError:
             raise GitHubAppError(502, 'Unable to reach GitHub') from None
+        if allow_no_content and response.status_code == 204:
+            return {}
+        if allow_no_content and response.status_code in {200, 201}:
+            raise GitHubAppError(502, 'Invalid GitHub collaborator confirmation')
         if response.status_code not in {200, 201}:
             if (response.status_code == 429 or response.status_code >= 500 or
                     (response.status_code == 403 and (response.headers.get('Retry-After') or
@@ -424,6 +429,69 @@ class GitHubAppService:
         if not granted or current.get('suspended_at'):
             raise GitHubAppError(403, 'Installation repository access is inactive')
         return await self.installation_token(str(installation_id), (repo.github_repository_id,))
+
+    async def _read_user_request(self, user_id: str, path: str):
+        """Fresh user-authenticated read, using the existing rotation/revocation policy."""
+        token = await self.user_token(user_id)
+        try:
+            return await self.request('GET', path, token)
+        except GitHubAppError as exc:
+            if exc.status_code != 401:
+                raise
+        token = await self.user_token(user_id, rejected_token=token)
+        try:
+            return await self.request('GET', path, token)
+        except GitHubAppError as exc:
+            if exc.status_code == 401:
+                connection = self.store.get_user_github_connection(user_id)
+                if connection and self.store.decrypt_token(connection.access_token) == token:
+                    self._reconnect(connection)
+            raise
+
+    async def authorize_repository_read(self, user_id: str, identifier: str):
+        """Shared knowledge reads only; never select, bind, or transfer ownership."""
+        repo = self.store.get_repository(identifier)
+        if not repo:
+            raise GitHubAppError(404, 'Repository not found')
+        if repo.user_id == user_id:
+            return await self.authorize_tracked(user_id, repo.id)
+        if not repo.installation_id:
+            raise GitHubAppError(403, 'Repository installation is unavailable')
+        identity = await self._read_user_request(user_id, '/user')
+        connection = self.store.get_user_github_connection(user_id)
+        if (not isinstance(identity, dict) or not connection or
+                str(identity.get('id')) != connection.github_user_id or not identity.get('login')):
+            raise GitHubAppError(403, 'GitHub user identity could not be verified')
+        path = f'/repos/{quote(repo.owner, safe="")}/{quote(repo.name, safe="")}'
+        current = await self._read_user_request(user_id, path)
+        permissions = current.get('permissions') if isinstance(current, dict) else None
+        if (not isinstance(current, dict) or str(current.get('id')) != repo.github_repository_id or
+                str(current.get('full_name', '')).lower() != repo.full_name.lower() or
+                not isinstance(permissions, dict) or permissions.get('pull') is not True):
+            raise GitHubAppError(403, 'Current repository read permission could not be verified')
+        installation, inventory = await self.reconcile(repo.installation_id)
+        granted = any(str(item['id']) == repo.github_repository_id and
+                      str(item.get('full_name', '')).lower() == repo.full_name.lower() and
+                      not item.get('private', True) for item in inventory)
+        if not granted or not installation.get('account') or installation.get('suspended_at'):
+            raise GitHubAppError(403, 'Bound repository installation is inactive')
+        credential = await self.installation_token(repo.installation_id, (repo.github_repository_id,),
+                                                   permissions={'metadata': 'read'})
+        # Public pull permission is insufficient: membership is verified separately
+        # with the bound installation, including read-only/team collaborators.
+        try:
+            await self.request('GET', f'{path}/collaborators/{quote(identity["login"], safe="")}',
+                               credential.token, allow_no_content=True)
+        except GitHubAppError as exc:
+            if exc.status_code == 404:
+                raise GitHubAppError(403, 'Verified repository collaborator access is required') from None
+            raise
+        fresh = self.store.get_repository(repo.id)
+        if (not fresh or fresh.installation_id != repo.installation_id or
+                fresh.github_repository_id != repo.github_repository_id or fresh.user_id != repo.user_id or
+                fresh.access_state != 'ACTIVE'):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        return fresh
 
     def bind_conversation(self, user_id: str, repository_id: str, conversation_id: str):
         if len(conversation_id) > 255:

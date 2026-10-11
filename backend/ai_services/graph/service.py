@@ -30,9 +30,11 @@ class RepositoryGraphService:
         self,
         sqlite_store: SqliteApplicationStore,
         graph_repo: Neo4jGraphRepository,
+        read_authorizer=None,
     ) -> None:
         self.sqlite_store = sqlite_store
         self.graph_repo = graph_repo
+        self.read_authorizer = read_authorizer
 
     def validate_repository_access(self, repository_identifier: str, user_id: str) -> RepositoryModel:
         """Verify repository exists and belongs to the authenticated user.
@@ -57,8 +59,13 @@ class RepositoryGraphService:
 
         return repo
 
+    async def validate_repository_read_access(self, repository_identifier: str, user_id: str) -> RepositoryModel:
+        if self.read_authorizer is not None:
+            return await self.read_authorizer(user_id, repository_identifier)
+        return self.validate_repository_access(repository_identifier, user_id)
+
     async def count_architectural_decisions(self, repository_identifier: str, user_id: str) -> int:
-        repo = self.validate_repository_access(repository_identifier, user_id)
+        repo = await self.validate_repository_read_access(repository_identifier, user_id)
         repo_ids = list(dict.fromkeys(filter(None, [repo.id, repo.github_repository_id])))
         return await asyncio.to_thread(self.graph_repo.count_architectural_decisions, repo_ids)
 
@@ -69,7 +76,7 @@ class RepositoryGraphService:
     ) -> RepositoryGraphResponse:
         """Retrieve the canonical entity-relationship architectural graph for the specified repository."""
         # 1. Authorize repository access
-        repo = self.validate_repository_access(repository_identifier, user_id)
+        repo = await self.validate_repository_read_access(repository_identifier, user_id)
         canonical_repo_id = repo.id
         repo_ids = list(dict.fromkeys(filter(None, [repo.id, repo.github_repository_id])))
 

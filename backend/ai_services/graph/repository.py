@@ -98,6 +98,80 @@ class Neo4jGraphRepository:
             logger.exception("Failed to count repository architectural decisions")
             raise GraphRepositoryError("Decision count query failed") from exc
 
+    def _knowledge_query(self, query: str, repo_ids: list[str], **params):
+        if not self.driver or not repo_ids:
+            raise GraphRepositoryError('An initialized driver and authorized scope are required')
+        try:
+            return self._extract_records(self.driver.execute_query(
+                query, database_=self.database, repo_ids=repo_ids, **params,
+            ))
+        except Exception as exc:
+            logger.exception('Architectural knowledge query failed')
+            raise GraphRepositoryError('Architectural knowledge could not be retrieved') from exc
+
+    def list_architectural_knowledge(self, repo_ids: list[str], search: str, kind: str, offset: int, limit: int):
+        scope = """
+        MATCH (d)
+        WHERE (d:ArchitecturalDecision OR d:ArchitecturalConstraint)
+          AND d.repository IN $repo_ids AND d.id IS NOT NULL
+          AND ($kind = 'all' OR ($kind = 'decision' AND d:ArchitecturalDecision)
+               OR ($kind = 'constraint' AND d:ArchitecturalConstraint))
+          AND (toLower(coalesce(d.title, '')) CONTAINS $search
+               OR toLower(coalesce(d.description, '')) CONTAINS $search)
+          AND EXISTS { MATCH (a:ADR)-[:DEFINES]->(d) WHERE a.repository IN $repo_ids }
+        """
+        params = dict(search=search.strip().lower(), kind=kind)
+        totals = self._knowledge_query(scope + ' RETURN count(DISTINCT d) AS total', repo_ids, **params)
+        if len(totals) != 1 or type(totals[0].get('total')) is not int:
+            raise GraphRepositoryError('Invalid architectural knowledge aggregate')
+        query = scope + """
+        WITH d ORDER BY d.id SKIP $offset LIMIT $limit
+        OPTIONAL MATCH (a:ADR)-[:DEFINES]->(d) WHERE a.repository IN $repo_ids
+        RETURN d.id AS id, CASE WHEN d:ArchitecturalDecision THEN 'decision' ELSE 'constraint' END AS kind,
+               d.title AS title, coalesce(d.description, '') AS description,
+               coalesce(d.decision_type, d.constraint_type) AS type,
+               collect(DISTINCT a { .id, .title, .source_name, .source_type, .source_version, .content_hash }) AS sources
+        ORDER BY id
+        """
+        items = self._knowledge_query(query, repo_ids, **params, offset=offset, limit=limit)
+        return dict(items=items, total=totals[0]['total'], offset=offset, limit=limit)
+
+    def get_architectural_knowledge(self, repo_ids: list[str], item_id: str):
+        query = """
+        MATCH (d) WHERE d.id = $item_id AND d.repository IN $repo_ids
+          AND (d:ArchitecturalDecision OR d:ArchitecturalConstraint)
+        MATCH (a:ADR)-[:DEFINES]->(d) WHERE a.repository IN $repo_ids
+        RETURN d.id AS id, CASE WHEN d:ArchitecturalDecision THEN 'decision' ELSE 'constraint' END AS kind,
+               d.title AS title, coalesce(d.description, '') AS description,
+               coalesce(d.decision_type, d.constraint_type) AS type,
+               collect(DISTINCT a { .id, .title, .source_name, .source_type, .source_version, .content_hash }) AS sources
+        """
+        records = self._knowledge_query(query, repo_ids, item_id=item_id)
+        if not records:
+            return None
+        detail = records[0]
+        entities = self._knowledge_query("""
+        MATCH (d)-[r:AFFECTS|CONSTRAINS]->(e:Entity)
+        WHERE d.id = $item_id AND d.repository IN $repo_ids AND e.repository IN $repo_ids
+          AND (d:ArchitecturalDecision OR d:ArchitecturalConstraint)
+        RETURN DISTINCT e.id AS id, e.name AS name, e.label AS label, type(r) AS relationship
+        ORDER BY id, relationship LIMIT 101
+        """, repo_ids, item_id=item_id)
+        evidence = self._knowledge_query("""
+        MATCH (a:ADR)-[:DEFINES]->(d)<-[:SUPPORTS]-(c:Chunk:ADRChunk)
+        MATCH (a)-[:HAS_CHUNK]->(c)
+        WHERE d.id = $item_id AND d.repository IN $repo_ids AND a.repository IN $repo_ids
+          AND c.repository IN $repo_ids AND c.adr_id = a.id
+          AND (d:ArchitecturalDecision OR d:ArchitecturalConstraint)
+        RETURN DISTINCT c.id AS id, a.id AS adr_id, c.section AS section,
+               c.chunkIndex AS chunk_index, substring(coalesce(c.text, ''), 0, 1200) AS excerpt,
+               size(coalesce(c.text, '')) > 1200 AS truncated, c.contentHash AS content_hash
+        ORDER BY adr_id, chunk_index, id LIMIT 51
+        """, repo_ids, item_id=item_id)
+        detail.update(entities=entities[:100], entities_truncated=len(entities) > 100,
+                      evidence=evidence[:50], evidence_truncated=len(evidence) > 50)
+        return detail
+
     def fetch_direct_relationships(self, repo_ids: list[str]) -> list[dict[str, Any]]:
         """Fetch direct Entity-to-Entity architectural relationships strictly within the specified repositories."""
         if not self.driver:

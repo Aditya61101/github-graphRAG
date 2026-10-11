@@ -45,6 +45,7 @@ from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
 from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
+from ai_services.graph.knowledge import RepositoryKnowledgeService
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
 
@@ -171,12 +172,14 @@ async def lifespan(app: FastAPI):
     )
 
     graph_repo = Neo4jGraphRepository(driver=driver, database=database or "neo4j")
-    graph_service = RepositoryGraphService(sqlite_store=sqlite_store, graph_repo=graph_repo)
+    graph_service = RepositoryGraphService(sqlite_store=sqlite_store, graph_repo=graph_repo,
+                                           read_authorizer=github_app.authorize_repository_read)
 
     app.state.sqlite_store = sqlite_store
     app.state.ingestion_service = ingestion_service
     app.state.adr_service = adr_service
     app.state.graph_service = graph_service
+    app.state.knowledge_service = RepositoryKnowledgeService(graph_service)
 
     app.state.deps = AppDependencies(
         driver=driver,

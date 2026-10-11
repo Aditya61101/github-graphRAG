@@ -32,6 +32,7 @@ class ReviewActivity(OverviewSection):
 
 class OverviewPermissions(BaseModel):
     can_view_settings: bool
+    can_manage_source_documents: bool = False
 
 
 class RepositoryOverviewResponse(BaseModel):

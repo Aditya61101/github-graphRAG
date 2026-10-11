@@ -19,7 +19,7 @@ export type RepositoryOverview = {
     indexed_commit_sha: string | null;
     status: string;
   };
-  permissions: { can_view_settings: boolean };
+  permissions: { can_view_settings: boolean; can_manage_source_documents: boolean };
   decision_count_basis: "distinct_persisted_nodes";
   kpis: {
     architecture_decisions: OverviewMetric;

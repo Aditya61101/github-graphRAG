@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from typing import Any, Literal
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from ai_services.github_app.service import GitHubAppError
@@ -11,6 +11,7 @@ from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictE
 from api_services.app.models.adr import ADRResponse, ADRBatchUploadResponse, ADRUploadItemResponse
 from api_services.app.models.graph import RepositoryGraphResponse
 from ai_services.graph.repository import GraphRepositoryError
+from api_services.app.models.knowledge import KnowledgePage, KnowledgeDetail
 from api_services.app.models.overview import (
     Availability, OverviewKPIs, OverviewMetric, OverviewPermissions,
     OverviewSection, RepositoryOverviewResponse, ReviewActivity,
@@ -20,7 +21,7 @@ from api_services.app.models.repository import (
     AvailableRepositoryResponse, IngestRepositoryRequest, IngestionJobResponse,
     RepositoryResponse, SyncRepositoryRequest,
 )
-from api_services.app.utils.github_app_access import get_github_app, authorize_repository, query_authorized
+from api_services.app.utils.github_app_access import get_github_app, authorize_repository, authorize_repository_read, query_authorized
 from api_services.app.utils.jwt_utils import get_current_user
 from api_services.app.utils.query_response_mapper import build_api_response
 
@@ -138,7 +139,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
 @router.get('/{repo_id}/overview', response_model=RepositoryOverviewResponse)
 async def get_repository_overview(repo_id: str, request: Request,
                                  current_user: UserModel = Depends(get_current_user)):
-    repo = await authorize_repository(request, current_user.id, repo_id)
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
     # This endpoint accepts only canonical tracked IDs, never client graph scopes.
     if repo.id != repo_id:
         raise HTTPException(400, 'A canonical tracked repository ID is required')
@@ -150,19 +151,23 @@ async def get_repository_overview(repo_id: str, request: Request,
             decision_metric = OverviewMetric(availability=Availability(status='available'), value=count)
         except GraphRepositoryError:
             logger.warning('Overview decision count unavailable repository=%s', repo.id)
+        except GitHubAppError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
     # Settings remains a placeholder. Reuse the existing verified admin policy;
     # unknown permissions must not make read-only Overview unavailable.
     can_view_settings = False
-    try:
-        await get_github_app(request).authorize_tracked(current_user.id, repo.id, require_admin=True)
-        can_view_settings = True
-    except GitHubAppError as exc:
-        if exc.status_code not in (403, 503):
-            raise HTTPException(exc.status_code, str(exc)) from None
+    if repo.user_id == current_user.id:
+        try:
+            await get_github_app(request).authorize_tracked(current_user.id, repo.id, require_admin=True)
+            can_view_settings = True
+        except GitHubAppError as exc:
+            if exc.status_code not in (403, 503):
+                raise HTTPException(exc.status_code, str(exc)) from None
     unavailable = Availability(status='unavailable', reason='engine_not_implemented')
     return RepositoryOverviewResponse(
         repository=RepositoryResponse(**repo.to_dict()),
-        permissions=OverviewPermissions(can_view_settings=can_view_settings),
+        permissions=OverviewPermissions(can_view_settings=can_view_settings,
+                                        can_manage_source_documents=repo.user_id == current_user.id),
         kpis=OverviewKPIs(
             architecture_decisions=decision_metric,
             decisions_at_risk=OverviewMetric(availability=unavailable),
@@ -175,6 +180,40 @@ async def get_repository_overview(repo_id: str, request: Request,
     )
 
 
+@router.get('/{repo_id}/knowledge', response_model=KnowledgePage)
+async def list_repository_knowledge(repo_id: str, request: Request,
+                                    search: str = Query('', max_length=300),
+                                    kind: Literal['all', 'decision', 'constraint'] = 'all',
+                                    offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=50),
+                                    current_user: UserModel = Depends(get_current_user)):
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    if repo.id != repo_id:
+        raise HTTPException(400, 'A canonical tracked repository ID is required')
+    try:
+        return await resource(request, 'knowledge_service').list(repo.id, current_user.id, search, kind, offset, limit)
+    except GitHubAppError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+    except GraphRepositoryError:
+        raise HTTPException(503, 'Architectural knowledge could not be retrieved; please retry') from None
+
+
+@router.get('/{repo_id}/knowledge/{item_id}', response_model=KnowledgeDetail)
+async def get_repository_knowledge(repo_id: str, item_id: str, request: Request,
+                                  current_user: UserModel = Depends(get_current_user)):
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    if repo.id != repo_id:
+        raise HTTPException(400, 'A canonical tracked repository ID is required')
+    try:
+        detail = await resource(request, 'knowledge_service').detail(repo.id, current_user.id, item_id)
+    except GitHubAppError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+    except GraphRepositoryError:
+        raise HTTPException(503, 'Architectural knowledge could not be retrieved; please retry') from None
+    if detail is None:
+        raise HTTPException(404, 'Architectural knowledge entry not found')
+    return detail
+
+
 @router.get('/{repo_id}/adrs', response_model=list[ADRResponse])
 async def list_repository_adrs(repo_id: str, request: Request,
                                current_user: UserModel = Depends(get_current_user)):
@@ -185,11 +224,13 @@ async def list_repository_adrs(repo_id: str, request: Request,
 @router.get('/{repo_id}/graph', response_model=RepositoryGraphResponse)
 async def get_repository_graph(repo_id: str, request: Request,
                                current_user: UserModel = Depends(get_current_user)):
-    repo = await authorize_repository(request, current_user.id, repo_id)
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
     try:
         return await resource(request, 'graph_service').get_repository_graph(repo.id, current_user.id)
     except HTTPException:
         raise
+    except GitHubAppError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
     except Exception:
         logger.exception('Graph fetch failed repository=%s', repo.id)
         raise HTTPException(500, 'An error occurred while fetching the repository graph') from None

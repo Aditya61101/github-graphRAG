@@ -296,7 +296,7 @@ test("sidebar collapse, keyboard tooltip, active route and nested placeholders p
   await browser.waitFor(
     at("/projects/repo_101/decisions") +
       " && " +
-      contains("Coming later") +
+      contains("Architectural Knowledge") +
       " && document.querySelector('main h1')?.textContent === 'Decisions'"
   );
   await clickLink("Overview");
@@ -467,7 +467,11 @@ test("mobile drawer, navigation and dark theme do not overflow", async () => {
   await clickLink("Decisions");
   await browser.waitFor(at("/projects/repo_101/decisions"));
   await browser.waitFor("document.querySelector('[role=dialog]') === null");
-  assert.equal(await browser.evaluate(contains("Coming later")), true);
+  await browser.waitFor(contains("Architectural Knowledge"));
+  assert.equal(
+    await browser.evaluate(contains("Architectural Knowledge")),
+    true
+  );
 });
 
 test("profile menu and logout preserve existing behavior and clear workspace content", async () => {

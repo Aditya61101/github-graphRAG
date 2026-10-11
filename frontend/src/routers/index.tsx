@@ -8,6 +8,7 @@ import ProjectsPage from "@/pages/projects";
 import RepositoryLayout from "@/layouts/repository-layout";
 import RepositoryOverviewPage from "@/pages/repository-overview";
 import RepositoryComingLater from "@/pages/repository-coming-later";
+import RepositoryDecisionsPage from "@/pages/repository-decisions";
 import SettingsPage from "@/pages/settings";
 import InstallPage from "@/pages/install";
 
@@ -31,7 +32,8 @@ export const appRouter = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
           { path: "overview", element: <RepositoryOverviewPage /> },
-          ...["explore", "decisions", "pull-requests", "settings"].map(
+          { path: "decisions", element: <RepositoryDecisionsPage /> },
+          ...["explore", "pull-requests", "settings"].map(
             (path) => ({ path, element: <RepositoryComingLater /> })
           ),
         ],
