@@ -271,7 +271,7 @@ test("sidebar collapse, keyboard tooltip, active route and nested placeholders p
   );
   await clickLink("Knowledge Explorer");
   await browser.waitFor(at("/projects/repo_101/explore"));
-  await browser.waitFor(contains("Coming later"));
+  await browser.waitFor(contains("Architecture Chat"));
   assert.equal(
     await browser.evaluate(
       "document.querySelector('[data-slot=sidebar]').dataset.state"

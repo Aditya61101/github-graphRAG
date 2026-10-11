@@ -1,22 +1,35 @@
-import type {
-  ExploreChatMessage,
-  SendExploreMessagePayload,
-} from "@/types/explore";
+import { apiClient } from "@/lib/api-client";
+import type { QueryResponse, RepositoryGraph } from "@/types/explore";
 
+const base = (repositoryId: string) =>
+  `/repositories/${encodeURIComponent(repositoryId)}`;
 export const exploreService = {
-  sendMessage: async ({
-    message,
-  }: SendExploreMessagePayload): Promise<ExploreChatMessage> => {
-    const response = await new Promise<ExploreChatMessage>((resolve) => {
-      setTimeout(() => {
-        resolve({
-          id: Date.now(),
-          role: "assistant",
-          content: `Mock response for: ${message}. Backend GraphRAG integration can now be connected here.`,
-        });
-      }, 2000);
-    });
-
+  graph: async (
+    repositoryId: string,
+    signal?: AbortSignal
+  ): Promise<RepositoryGraph> =>
+    (
+      await apiClient.get<RepositoryGraph>(`${base(repositoryId)}/graph`, {
+        signal,
+      })
+    ).data,
+  sendMessage: async (
+    repositoryId: string,
+    conversationId: string,
+    query: string,
+    signal?: AbortSignal
+  ): Promise<QueryResponse> => {
+    const response = (
+      await apiClient.post<QueryResponse>(
+        `${base(repositoryId)}/query`,
+        { query, conversation_id: conversationId },
+        { signal }
+      )
+    ).data;
+    if (response.conversation_id !== conversationId)
+      throw new Error(
+        "The response belongs to a different conversation. Please retry."
+      );
     return response;
   },
 };

@@ -1,97 +1,215 @@
-import { AlertTriangle, FileQuestion } from "lucide-react";
-
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useParams } from "react-router";
-
-import { projectService } from "@/api/project-service";
-import { AppHeader } from "@/components/core/app-header";
-import { EmptyState } from "@/components/core/feedback/empty-state";
-import { ErrorState } from "@/components/core/feedback/error-state";
 import { ChatPanel } from "@/components/explore/chat-panel";
-import { InsightsPlaceholder } from "@/components/explore/insights-placeholder";
-import { Skeleton } from "@/components/ui/skeleton";
+import { GraphPanel } from "@/components/explore/graph-panel";
+import { Button } from "@/components/ui/button";
+import { exploreService } from "@/api/explore-service";
+import { useAuth } from "@/contexts/auth-context";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { useRepositoryOverview } from "@/layouts/repository-layout";
+import { getApiErrorMessage } from "@/lib/api-error";
+import { clampSplit, restoreSplit, SPLIT_KEY } from "@/lib/explorer-model";
+import type { AnswerContext } from "@/types/explore";
 
 export default function ExplorePage() {
-  const { projectId } = useParams();
-
-  if (!projectId) {
-    return <ErrorState />;
-  }
-
-  const {
-    data: project,
-    isLoading,
-    isError,
-  } = useQuery({
-    queryKey: ["projects", projectId],
-    queryFn: () => projectService.getProjectById(projectId),
-  });
-
-  if (isLoading) {
-    return <ExplorePageSkeleton />;
-  }
-
-  if (isError) {
-    return (
-      <ErrorState
-        Icon={AlertTriangle}
-        text="Unable to load project"
-        subtext="Something went wrong while loading the project details."
-      />
-    );
-  }
-
-  if (!project) {
-    return (
-      <EmptyState
-        Icon={FileQuestion}
-        text="Project not found"
-        subtext="This project doesn't exist or is currently inaccessible."
-      />
-    );
-  }
-
-  const headerCrumbs = [
-    { label: "Projects", pathname: "/projects" },
-    { label: project.name, pathname: `/projects/${projectId}` },
-    { label: "Explore", pathname: `/projects/${projectId}/explore` },
-  ];
-
+  const { repository } = useRepositoryOverview();
+  const { user, token } = useAuth();
+  if (!user || !token) return null;
   return (
-    <>
-      <AppHeader crumbs={headerCrumbs} />
-      <div className="flex flex-1 flex-col overflow-hidden bg-background px-4 pt-0 pb-4">
-        <section className="grid min-h-0 flex-1 gap-5 overflow-hidden 2xl:grid-cols-[1fr_1fr]">
-          <ChatPanel />
-
-          <div className="hidden min-h-0 xl:block">
-            <InsightsPlaceholder />
-          </div>
-        </section>
-      </div>
-    </>
+    <ScopedExplorer
+      key={`${user.id}:${token}:${repository.id}`}
+      repositoryId={repository.id}
+      userId={user.id}
+      token={token}
+    />
   );
 }
-
-function ExplorePageSkeleton() {
+function ScopedExplorer({
+  repositoryId,
+  userId,
+  token,
+}: {
+  repositoryId: string;
+  userId: string;
+  token: string;
+}) {
+  const isMobile = useIsMobile();
+  const [split, setSplit] = useState(restoreSplit);
+  const [tab, setTab] = useState<"chat" | "graph">("chat");
+  const [context, setContext] = useState<AnswerContext | null>(null);
+  const container = useRef<HTMLDivElement>(null);
+  const graph = useQuery({
+    queryKey: ["repository-graph", userId, token, repositoryId],
+    queryFn: ({ signal }) => exploreService.graph(repositoryId, signal),
+    retry: false,
+    staleTime: 5 * 60_000,
+    gcTime: 15 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  const saveSplit = (value: number) => {
+    const next = clampSplit(value);
+    setSplit(next);
+    try {
+      localStorage.setItem(SPLIT_KEY, String(next));
+    } catch {
+      /* Layout works without storage. */
+    }
+  };
   return (
-    <>
-      <div className="mb-4 border-b px-4 py-4">
-        <div className="flex items-center gap-2">
-          <Skeleton className="h-4 w-24" />
-          <Skeleton className="h-4 w-4" />
-          <Skeleton className="h-4 w-32" />
-          <Skeleton className="h-4 w-4" />
-          <Skeleton className="h-4 w-20" />
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold tracking-tight">
+          Knowledge Explorer
+        </h1>
+        <Button size="sm" variant="outline" onClick={() => saveSplit(40)}>
+          Reset Layout
+        </Button>
+      </div>
+      <div
+        role="tablist"
+        aria-label="Explorer panels"
+        className="flex shrink-0 gap-2 md:hidden"
+      >
+        {(["chat", "graph"] as const).map((value) => (
+          <Button
+            key={value}
+            id={`explorer-${value}-tab`}
+            role="tab"
+            aria-selected={tab === value}
+            aria-controls={`explorer-${value}-panel`}
+            variant={tab === value ? "secondary" : "ghost"}
+            onClick={() => setTab(value)}
+          >
+            {value === "chat" ? "Chat" : "Graph"}
+          </Button>
+        ))}
+      </div>
+      <div
+        ref={container}
+        data-slot="explorer-split"
+        className="flex min-h-0 w-full flex-1 overflow-hidden"
+        style={
+          {
+            "--chat-width": `calc(${split}% - ${(12 * split) / 100}px)`,
+          } as React.CSSProperties
+        }
+      >
+        <div
+          id="explorer-chat-panel"
+          className={`${tab === "chat" ? "block" : "hidden"} min-h-0 w-full min-w-0 md:block md:w-[var(--chat-width)]`}
+        >
+          <ChatPanel
+            repositoryId={repositoryId}
+            userId={userId}
+            token={token}
+            onConversationChange={() => setContext(null)}
+            onContext={(answer) => {
+              setContext(answer);
+              setTab("graph");
+            }}
+          />
+        </div>
+        <div
+          role="separator"
+          aria-label="Resize chat and graph panels"
+          aria-orientation="vertical"
+          aria-valuemin={25}
+          aria-valuemax={75}
+          aria-valuenow={Math.round(split)}
+          aria-controls="explorer-chat-panel explorer-graph-panel"
+          tabIndex={0}
+          className="group hidden w-3 shrink-0 cursor-col-resize touch-none items-center justify-center outline-none focus-visible:bg-primary/15 md:flex"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.currentTarget.focus();
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (
+              !event.currentTarget.hasPointerCapture(event.pointerId) ||
+              !container.current
+            )
+              return;
+            const bounds = container.current.getBoundingClientRect();
+            saveSplit(
+              ((event.clientX - bounds.left) / (bounds.width - 12)) * 100
+            );
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId))
+              event.currentTarget.releasePointerCapture(event.pointerId);
+          }}
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
+              return;
+            event.preventDefault();
+            saveSplit(
+              event.key === "Home"
+                ? 25
+                : event.key === "End"
+                  ? 75
+                  : split + (event.key === "ArrowRight" ? 2 : -2)
+            );
+          }}
+        >
+          <span className="h-12 w-1 rounded-full bg-border group-hover:bg-primary group-focus-visible:bg-primary" />
+        </div>
+        <div
+          id="explorer-graph-panel"
+          className={`${tab === "graph" ? "block" : "hidden"} min-h-0 min-w-0 flex-1 md:block`}
+        >
+          {graph.isError ? (
+            <section
+              role="alert"
+              className="h-full space-y-3 rounded-xl border p-5"
+            >
+              <h2 className="font-semibold">Graph unavailable</h2>
+              <p className="text-sm">
+                {getApiErrorMessage(
+                  graph.error,
+                  "Repository graph could not be loaded."
+                )}
+              </p>
+              <Button variant="outline" onClick={() => void graph.refetch()}>
+                Retry graph
+              </Button>
+            </section>
+          ) : graph.isPending ? (
+            <section
+              role="status"
+              aria-busy="true"
+              className="h-full rounded-xl border p-5"
+            >
+              Loading repository graph...
+            </section>
+          ) : !graph.data.nodes.length ? (
+            <section className="h-full space-y-3 rounded-xl border p-5">
+              <h2 className="font-semibold">No graph entities yet</h2>
+              <p className="text-sm text-muted-foreground">
+                The repository has no persisted entity graph.
+              </p>
+              {context && (
+                <p role="status" className="text-sm">
+                  Answer Context has no available graph matches.
+                </p>
+              )}
+              {context && (
+                <Button variant="outline" onClick={() => setContext(null)}>
+                  Clear Highlight
+                </Button>
+              )}
+            </section>
+          ) : (
+            <GraphPanel
+              graph={graph.data}
+              context={context}
+              clearContext={() => setContext(null)}
+              visible={tab === "graph" || !isMobile}
+            />
+          )}
         </div>
       </div>
-
-      <div className="flex flex-1 flex-col overflow-hidden px-4 pt-0 pb-4">
-        <section className="grid min-h-0 flex-1 gap-5 overflow-hidden 2xl:grid-cols-[1fr_1fr]">
-          <Skeleton className="h-full w-full" />
-          <Skeleton className="h-full w-full" />
-        </section>
-      </div>
-    </>
+    </div>
   );
 }

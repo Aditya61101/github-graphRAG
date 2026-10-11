@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   Link,
   NavLink,
@@ -49,8 +50,17 @@ function RepositorySidebar({
   overview?: RepositoryOverview;
   repositoryId: string;
 }) {
-  const { setOpenMobile, isMobile } = useSidebar();
+  const { setOpen, setOpenMobile, isMobile } = useSidebar();
   const { pathname } = useLocation();
+  const previousPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (previousPath.current === pathname) return;
+    previousPath.current = pathname;
+    if (pathname.endsWith("/explore")) {
+      setOpen(false);
+      setOpenMobile(false);
+    }
+  }, [pathname, setOpen, setOpenMobile]);
   const items = [
     ["overview", "Overview", LayoutDashboard],
     ["explore", "Knowledge Explorer", Network],
@@ -129,6 +139,7 @@ export default function RepositoryLayout() {
   const { projectId = "" } = useParams();
   const { user, token } = useAuth();
   const location = useLocation();
+  const isExplorer = location.pathname.endsWith("/explore");
   const validId = /^repo_[A-Za-z0-9_-]+$/.test(projectId);
   const overview = useQuery({
     queryKey: ["repository-overview", user?.id, token, projectId],
@@ -156,17 +167,32 @@ export default function RepositoryLayout() {
     data &&
     !data.permissions.can_view_settings;
   return (
-    <div className="min-h-svh bg-background">
-      <div className="sticky top-0 z-20">
+    <div
+      className={
+        isExplorer
+          ? "flex h-dvh min-h-0 flex-col overflow-hidden bg-background"
+          : "min-h-svh bg-background"
+      }
+    >
+      <div className="sticky top-0 z-20 shrink-0">
         <RepositoryHeader />
       </div>
-      <SidebarProvider className="min-h-[calc(100svh-4rem)]">
+      <SidebarProvider
+        defaultOpen={!location.pathname.endsWith("/explore")}
+        className={
+          isExplorer
+            ? "min-h-0 flex-1 overflow-hidden"
+            : "min-h-[calc(100svh-4rem)]"
+        }
+      >
         <RepositorySidebar
           overview={overview.isError ? undefined : data}
           repositoryId={projectId}
         />
-        <SidebarInset className="min-w-0">
-          <div className="flex items-center gap-3 border-b px-4 py-3 sm:px-6">
+        <SidebarInset
+          className={isExplorer ? "min-h-0 min-w-0 overflow-hidden" : "min-w-0"}
+        >
+          <div className="flex shrink-0 items-center gap-3 border-b px-4 py-3 sm:px-6">
             <SidebarTrigger />
             <nav
               aria-label="Breadcrumb"
@@ -186,7 +212,13 @@ export default function RepositoryLayout() {
               </span>
             </nav>
           </div>
-          <main className="mx-auto w-full max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8">
+          <main
+            className={
+              isExplorer
+                ? "min-h-0 w-full flex-1 overflow-hidden px-4 py-4 sm:px-6"
+                : "mx-auto w-full max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8"
+            }
+          >
             {!validId || overview.isError ? (
               <section role="alert" className="space-y-3 rounded-xl border p-6">
                 <h1 className="text-xl font-semibold">{errorTitle}</h1>
@@ -216,40 +248,42 @@ export default function RepositoryLayout() {
               </p>
             ) : (
               <>
-                <section
-                  className="flex flex-wrap items-center justify-between gap-3"
-                  aria-label="Repository identity"
-                >
-                  <div className="space-y-2">
-                    <p className="font-medium break-all">
-                      {data.repository.owner} / {data.repository.name}
-                    </p>
-                    <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                      <span className="inline-flex items-center gap-1">
-                        <GitBranch className="size-3.5" aria-hidden="true" />
-                        {data.repository.tracked_branch}
-                      </span>
-                      <span className="rounded-full border bg-muted/50 px-2 py-1">
-                        Indexing: {data.repository.status}
-                      </span>
-                    </div>
-                  </div>
-                  <Button
-                    nativeButton={false}
-                    variant="ghost"
-                    size="sm"
-                    render={
-                      <a
-                        href={data.repository.repository_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      />
-                    }
+                {!isExplorer && (
+                  <section
+                    className="flex flex-wrap items-center justify-between gap-3"
+                    aria-label="Repository identity"
                   >
-                    View on GitHub <ExternalLink aria-hidden="true" />
-                  </Button>
-                </section>
-                {data.repository.status !== "COMPLETED" && (
+                    <div className="space-y-2">
+                      <p className="font-medium break-all">
+                        {data.repository.owner} / {data.repository.name}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1">
+                          <GitBranch className="size-3.5" aria-hidden="true" />
+                          {data.repository.tracked_branch}
+                        </span>
+                        <span className="rounded-full border bg-muted/50 px-2 py-1">
+                          Indexing: {data.repository.status}
+                        </span>
+                      </div>
+                    </div>
+                    <Button
+                      nativeButton={false}
+                      variant="ghost"
+                      size="sm"
+                      render={
+                        <a
+                          href={data.repository.repository_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        />
+                      }
+                    >
+                      View on GitHub <ExternalLink aria-hidden="true" />
+                    </Button>
+                  </section>
+                )}
+                {!isExplorer && data.repository.status !== "COMPLETED" && (
                   <p
                     role="status"
                     className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground"

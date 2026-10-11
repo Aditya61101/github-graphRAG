@@ -1,4 +1,5 @@
 import { createBrowserRouter, Navigate } from "react-router";
+import { lazy, Suspense } from "react";
 
 import { authRoutes } from "@/routers/auth-routes";
 import ProtectedRouter from "@/components/core/protected-route";
@@ -9,6 +10,7 @@ import RepositoryLayout from "@/layouts/repository-layout";
 import RepositoryOverviewPage from "@/pages/repository-overview";
 import RepositoryComingLater from "@/pages/repository-coming-later";
 import RepositoryDecisionsPage from "@/pages/repository-decisions";
+const ExplorePage = lazy(() => import("@/pages/explore"));
 import SettingsPage from "@/pages/settings";
 import InstallPage from "@/pages/install";
 
@@ -33,9 +35,20 @@ export const appRouter = createBrowserRouter([
           { index: true, element: <Navigate to="overview" replace /> },
           { path: "overview", element: <RepositoryOverviewPage /> },
           { path: "decisions", element: <RepositoryDecisionsPage /> },
-          ...["explore", "pull-requests", "settings"].map(
-            (path) => ({ path, element: <RepositoryComingLater /> })
-          ),
+          {
+            path: "explore",
+            element: (
+              <Suspense
+                fallback={<p role="status">Loading Knowledge Explorer...</p>}
+              >
+                <ExplorePage />
+              </Suspense>
+            ),
+          },
+          ...["pull-requests", "settings"].map((path) => ({
+            path,
+            element: <RepositoryComingLater />,
+          })),
         ],
       },
       {
