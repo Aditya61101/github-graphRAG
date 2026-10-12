@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
+from ai_services.ingestion.adr.applicability import applicability_properties
 from ai_services.ingestion.adr.models import (
     ADRChunk,
     ArchitecturalConstraintNode,
@@ -18,7 +20,9 @@ logger = logging.getLogger(__name__)
 class ADRNeo4jWriter:
     """Safely persists ADR documents, chunks, architectural decisions, and relationships into Neo4j."""
 
-    def __init__(self, driver: Any, database: str = "neo4j", embedding_dimensions: int = 3072) -> None:
+    def __init__(
+        self, driver: Any, database: str = "neo4j", embedding_dimensions: int = 3072
+    ) -> None:
         self.driver = driver
         self.database = database
         self.embedding_dimensions = embedding_dimensions
@@ -35,13 +39,17 @@ class ADRNeo4jWriter:
             "CREATE INDEX adr_repo_idx IF NOT EXISTS FOR (n:ADR) ON (n.repository)",
             "CREATE INDEX decision_repo_idx IF NOT EXISTS FOR (n:ArchitecturalDecision) ON (n.repository)",
             "CREATE INDEX constraint_repo_idx IF NOT EXISTS FOR (n:ArchitecturalConstraint) ON (n.repository)",
+            "CREATE INDEX decision_applicability_idx IF NOT EXISTS FOR (n:ArchitecturalDecision) ON (n.repository, n.applicability_repository_wide)",
+            "CREATE INDEX constraint_applicability_idx IF NOT EXISTS FOR (n:ArchitecturalConstraint) ON (n.repository, n.applicability_repository_wide)",
         ]
         for q in queries:
             try:
                 self.driver.execute_query(q, database_=self.database)
             except Exception as exc:
-                logger.exception("Failed to initialize required Neo4j schema: %s", exc)
-                raise RuntimeError("Failed to initialize required ADR Neo4j schema") from exc
+                logger.exception("Failed to initialize required Neo4j schema")
+                raise RuntimeError(
+                    "Failed to initialize required ADR Neo4j schema"
+                ) from exc
 
     def delete_stale_adr_knowledge(self, adr_id: str, repository_id: str) -> None:
         """Remove previously extracted chunks, decisions, constraints, and assertions for this ADR.
@@ -71,7 +79,7 @@ class ADRNeo4jWriter:
         try:
             self._run_query_or_tx(query, adr_id=adr_id, repo=repository_id)
         except Exception as exc:
-            logger.exception(f"Failed to delete stale ADR knowledge for '{adr_id}': {exc}")
+            logger.exception("Failed to delete stale ADR knowledge for '%s'", adr_id)
             raise RuntimeError(
                 f"Failed to delete stale ADR knowledge for '{adr_id}': {exc}"
             ) from exc
@@ -92,34 +100,37 @@ class ADRNeo4jWriter:
         decisions: Sequence[ArchitecturalDecisionNode],
         constraints: Sequence[ArchitecturalConstraintNode],
         adr_constraints: Sequence[str],  # constrained entity_ids
-        relationships: Sequence[dict[str, Any]],  # source_id, target_id, rel_type, rationale, evidence
+        relationships: Sequence[
+            dict[str, Any]
+        ],  # source_id, target_id, rel_type, rationale, evidence
     ) -> None:
         """Persist full ADR graph transactionally within the existing Neo4j knowledge graph."""
         if not self.driver:
             return
 
-        repo_id = doc.repository_id
-        adr_id = doc.adr_id
-
         # Phase 2 requires transactional persistence. Never silently fall back to
         # independent auto-commit queries because that can leave a partially ingested ADR.
         if not hasattr(self.driver, "session"):
-            raise RuntimeError("Neo4j driver must support explicit sessions/transactions for ADR ingestion")
+            raise RuntimeError(
+                "Neo4j driver must support explicit sessions/transactions for ADR ingestion"
+            )
 
-        with self.driver.session(database=self.database) as session:
-            with session.begin_transaction() as tx:
-                self._persist_adr_in_tx(
-                    tx=tx,
-                    doc=doc,
-                    chunks=chunks,
-                    canonical_entities=canonical_entities,
-                    chunk_mentions=chunk_mentions,
-                    decisions=decisions,
-                    constraints=constraints,
-                    adr_constraints=adr_constraints,
-                    relationships=relationships,
-                )
-                tx.commit()
+        with (
+            self.driver.session(database=self.database) as session,
+            session.begin_transaction() as tx,
+        ):
+            self._persist_adr_in_tx(
+                tx=tx,
+                doc=doc,
+                chunks=chunks,
+                canonical_entities=canonical_entities,
+                chunk_mentions=chunk_mentions,
+                decisions=decisions,
+                constraints=constraints,
+                adr_constraints=adr_constraints,
+                relationships=relationships,
+            )
+            tx.commit()
 
     def _persist_adr_in_tx(
         self,
@@ -194,6 +205,7 @@ class ADRNeo4jWriter:
                 {
                     "id": c.chunk_id,
                     "section": c.section,
+                    "section_level": c.metadata.get("section_level", 1),
                     "chunk_index": c.chunk_index,
                     "text": c.text,
                     "content_hash": c.content_hash,
@@ -208,6 +220,7 @@ class ADRNeo4jWriter:
             SET c.repository = $repo,
                 c.adr_id = $adr_id,
                 c.section = item.section,
+                c.sectionLevel = item.section_level,
                 c.chunkIndex = item.chunk_index,
                 c.text = item.text,
                 c.contentHash = item.content_hash,
@@ -227,8 +240,7 @@ class ADRNeo4jWriter:
 
         # 4. Upsert newly discovered ADR entities (preserving code graph entities)
         adr_originated_entities = [
-            e for e in canonical_entities
-            if e.properties.get("source") == "ADR"
+            e for e in canonical_entities if e.properties.get("source") == "ADR"
         ]
         if adr_originated_entities:
             entity_payload = [
@@ -288,6 +300,9 @@ class ADRNeo4jWriter:
                     "affects": d.affects_entity_ids,
                     "constrains": d.constrains_entity_ids,
                     "evidence": d.evidence_chunk_ids,
+                    "applicability": applicability_properties(
+                        d.applicability, d.applicability_model
+                    ),
                 }
                 for d in decisions
             ]
@@ -301,6 +316,8 @@ class ADRNeo4jWriter:
                 d.description = item.description,
                 d.decision_type = item.decision_type,
                 d.created_at = datetime().epochMillis
+            SET d += item.applicability,
+                d.applicability_enriched_at = datetime().epochMillis
             MERGE (adr)-[:DEFINES]->(d)
 
             WITH adr, d, item
@@ -340,6 +357,9 @@ class ADRNeo4jWriter:
                     "constraint_type": c.constraint_type or "general_constraint",
                     "constrains": c.constrains_entity_ids,
                     "evidence": c.evidence_chunk_ids,
+                    "applicability": applicability_properties(
+                        c.applicability, c.applicability_model
+                    ),
                 }
                 for c in constraints
             ]
@@ -352,6 +372,8 @@ class ADRNeo4jWriter:
                 c.description = item.description,
                 c.constraint_type = item.constraint_type,
                 c.created_at = datetime().epochMillis
+            SET c += item.applicability,
+                c.applicability_enriched_at = datetime().epochMillis
             MERGE (adr)-[:DEFINES]->(c)
 
             WITH adr, c, item
@@ -418,7 +440,9 @@ class ADRNeo4jWriter:
                 {
                     "source_id": r["source_id"],
                     "target_id": r["target_id"],
-                    "relationship_type": sanitize_relationship_type(r["relationship_type"]),
+                    "relationship_type": sanitize_relationship_type(
+                        r["relationship_type"]
+                    ),
                     # ADR-scoped assertion ID prevents clashing between multiple ADRs or code assertions
                     "assertion_id": (
                         f"adr:{adr_id}:{r['source_id']}|{sanitize_relationship_type(r['relationship_type'])}|{r['target_id']}"

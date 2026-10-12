@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
 
 from ai_services.ingestion.adr.models import ADRChunk
 from ai_services.models.adr_document import ADRDocument
@@ -46,6 +45,7 @@ class ADRChunker:
                                 "repository_id": doc.repository_id,
                                 "title": doc.title,
                                 "section": sec_heading,
+                                "section_level": section.level,
                                 "source_name": doc.source_name,
                             },
                         )
@@ -67,6 +67,7 @@ class ADRChunker:
                                     "repository_id": doc.repository_id,
                                     "title": doc.title,
                                     "section": sec_heading,
+                                    "section_level": section.level,
                                     "source_name": doc.source_name,
                                 },
                             )

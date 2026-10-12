@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from ai_services.embeddings.base import Embedder
 from ai_services.ingestion.rkg.canonicalization import (
     EntityCanonicalizer,
     normalized_entity_key,
 )
-from ai_services.ingestion.rkg.models import CanonicalEntity, ExtractedEntity
+from ai_services.ingestion.rkg.models import CanonicalEntity
 
 logger = logging.getLogger(__name__)
 
 
 import re
+
 
 def _strip_name(s: str) -> str:
     """Normalize name by removing whitespace, hyphens, and underscores for cross-casing/spacing matching."""
@@ -59,7 +61,9 @@ class ADREntityResolver:
         self.embedder = embedder
         self.embedding_dimensions = embedding_dimensions
 
-    def _load_existing_repo_entities(self, repository_id: str) -> dict[str, dict[str, Any]]:
+    def _load_existing_repo_entities(
+        self, repository_id: str
+    ) -> dict[str, dict[str, Any]]:
         """Load all existing Entity nodes for the given repository from Neo4j."""
         existing: dict[str, dict[str, Any]] = {}
         if not self.driver:
@@ -87,12 +91,44 @@ class ADREntityResolver:
                         "embedding": row.get("embedding"),
                     }
         except Exception as exc:
-            logger.exception(f"Failed to load existing repository entities from Neo4j: {exc}")
+            logger.exception("Failed to load existing repository entities from Neo4j")
             raise RuntimeError(
                 f"Failed to load existing repository entities from Neo4j: {exc}"
             ) from exc
 
         return existing
+
+    @staticmethod
+    def match_reference(
+        name: str, label: str | None, nodes: dict[str, dict[str, Any]]
+    ) -> str | None:
+        """Read-only variant of ADR matching; ambiguous or absent targets stay unresolved."""
+        clean_name = name.strip().casefold()
+        clean_label = (label or "Component").strip().casefold()
+        for aliases, stripped, exact_label in (
+            (False, False, True),
+            (True, False, True),
+            (True, False, False),
+            (True, True, False),
+        ):
+            matches = []
+            for cid, node in nodes.items():
+                node_label = node.get("label") or ""
+                if exact_label and node_label.strip().casefold() != clean_label:
+                    continue
+                if not exact_label and not are_labels_compatible(
+                    node_label, clean_label
+                ):
+                    continue
+                names = [node.get("name") or ""]
+                if aliases:
+                    names += list(node.get("aliases") or [])
+                normalize = _strip_name if stripped else lambda s: s.strip().casefold()
+                if clean_name and normalize(name) in {normalize(n) for n in names if n}:
+                    matches.append(cid)
+            if matches:
+                return matches[0] if len(matches) == 1 else None
+        return None
 
     async def resolve_entities(
         self,
@@ -163,7 +199,7 @@ class ADREntityResolver:
 
         for name, label, chunk_id in raw_entities:
             clean_name = name.strip()
-            clean_label = (label.strip() if label else "Component")
+            clean_label = label.strip() if label else "Component"
             if not clean_name:
                 continue
 
@@ -176,7 +212,9 @@ class ADREntityResolver:
 
             # Priority 2: AliasRegistry match
             if not matched_cid:
-                matched_cid = canonicalizer.alias_registry.resolve(clean_label, clean_name)
+                matched_cid = canonicalizer.alias_registry.resolve(
+                    clean_label, clean_name
+                )
 
             # Priority 3: Case-insensitive name match with label compatibility check
             if not matched_cid and len(name_to_ids.get(cf_name, set())) == 1:
@@ -186,7 +224,11 @@ class ADREntityResolver:
                     matched_cid = candidate_id
 
             # Priority 4: Alphanumeric stripped match with label compatibility check
-            if not matched_cid and s_name and len(stripped_to_ids.get(s_name, set())) == 1:
+            if (
+                not matched_cid
+                and s_name
+                and len(stripped_to_ids.get(s_name, set())) == 1
+            ):
                 candidate_id = next(iter(stripped_to_ids[s_name]))
                 candidate_node = existing_nodes.get(candidate_id, {})
                 if are_labels_compatible(candidate_node.get("label"), clean_label):
@@ -272,5 +314,5 @@ class ADREntityResolver:
                         f"Entity vector length {len(vector) if vector else 0} does not match expected dimensions {self.embedding_dimensions}."
                     )
         except Exception as exc:
-            logger.exception(f"Failed to generate embeddings for ADR entities: {exc}")
+            logger.exception("Failed to generate embeddings for ADR entities")
             raise RuntimeError(f"Entity embedding generation failed: {exc}") from exc

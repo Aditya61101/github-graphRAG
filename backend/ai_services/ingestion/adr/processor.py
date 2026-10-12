@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from hashlib import sha256
 import logging
-from typing import Any, Sequence
+from hashlib import sha256
+from typing import Any
 
 from ai_services.embeddings.base import Embedder
+from ai_services.ingestion.adr.applicability import ApplicabilityMetadata
 from ai_services.ingestion.adr.chunker import ADRChunker
 from ai_services.ingestion.adr.extractor import ADRArchitecturalExtractor
 from ai_services.ingestion.adr.models import (
@@ -14,6 +15,7 @@ from ai_services.ingestion.adr.models import (
 )
 from ai_services.ingestion.adr.neo4j_writer import ADRNeo4jWriter
 from ai_services.ingestion.adr.resolver import ADREntityResolver
+from ai_services.ingestion.adr.scope_resolver import ADRScopeResolver
 from ai_services.models.adr_document import ADRDocument
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 class ADRProcessingError(Exception):
     """Raised when an error occurs during the ADR Phase 2 pipeline."""
-    pass
 
 
 class ADRProcessingService:
@@ -75,14 +76,16 @@ class ADRProcessingService:
                     chunk.embedding = [float(v) for v in vector]
 
             # 3. LLM Architectural Extraction
-            extraction_results = await self.extractor.extract_all(chunks)
+            extraction_results = await self.extractor.extract_all(chunks, doc=doc)
             logger.info(
                 f"LLM architectural extraction completed for {len(chunks)} chunks of ADR '{adr_id}'."
             )
 
             # 4. Aggregate extracted decisions, constraints, entities, and relationships
             raw_entities: list[tuple[str, str, str]] = []  # (name, label, chunk_id)
-            chunk_mentions_pre: list[tuple[str, str, str]] = []  # (chunk_id, entity_name, entity_label)
+            chunk_mentions_pre: list[
+                tuple[str, str, str]
+            ] = []  # (chunk_id, entity_name, entity_label)
             unmapped_decisions: list[tuple[int, str, Any, ADRChunk]] = []
             unmapped_constraints: list[tuple[Any, ADRChunk]] = []
             unmapped_relationships: list[tuple[Any, ADRChunk]] = []
@@ -91,7 +94,9 @@ class ADRProcessingService:
                 # Entities explicitly identified
                 for entity in result.entities:
                     raw_entities.append((entity.name, entity.label, chunk.chunk_id))
-                    chunk_mentions_pre.append((chunk.chunk_id, entity.name, entity.label))
+                    chunk_mentions_pre.append(
+                        (chunk.chunk_id, entity.name, entity.label)
+                    )
 
                 # Decisions
                 for idx, decision in enumerate(result.decisions):
@@ -113,10 +118,18 @@ class ADRProcessingService:
                 # Relationships
                 for rel in result.relationships:
                     unmapped_relationships.append((rel, chunk))
-                    raw_entities.append((rel.source_name, rel.source_label, chunk.chunk_id))
-                    raw_entities.append((rel.target_name, rel.target_label, chunk.chunk_id))
-                    chunk_mentions_pre.append((chunk.chunk_id, rel.source_name, rel.source_label))
-                    chunk_mentions_pre.append((chunk.chunk_id, rel.target_name, rel.target_label))
+                    raw_entities.append(
+                        (rel.source_name, rel.source_label, chunk.chunk_id)
+                    )
+                    raw_entities.append(
+                        (rel.target_name, rel.target_label, chunk.chunk_id)
+                    )
+                    chunk_mentions_pre.append(
+                        (chunk.chunk_id, rel.source_name, rel.source_label)
+                    )
+                    chunk_mentions_pre.append(
+                        (chunk.chunk_id, rel.target_name, rel.target_label)
+                    )
 
             # 5. Entity Canonicalization & Resolution against existing code graph
             canonical_map, name_to_cid = await self.resolver.resolve_entities(
@@ -141,7 +154,9 @@ class ADRProcessingService:
             # 6. Map decisions to canonical entities
             decision_nodes: list[ArchitecturalDecisionNode] = []
             for idx, chunk_id, dec, chunk in unmapped_decisions:
-                dec_id = sha256(f"{adr_id}:decision:{idx}:{dec.title}".encode()).hexdigest()
+                dec_id = sha256(
+                    f"{adr_id}:decision:{idx}:{dec.title}".encode()
+                ).hexdigest()
                 aff_cids = [
                     lookup_entity(name, "Component")
                     for name in dec.affects
@@ -163,6 +178,16 @@ class ADRProcessingService:
                         affects_entity_ids=list(dict.fromkeys(aff_cids)),
                         constrains_entity_ids=list(dict.fromkeys(con_cids)),
                         evidence_chunk_ids=[chunk_id],
+                        applicability=ApplicabilityMetadata(
+                            applicability=dec.applicability,
+                            context_truncated="Document context was truncated."
+                            in dec.applicability.uncertainty,
+                        ),
+                        applicability_model=getattr(
+                            getattr(self.extractor, "llm", None),
+                            "deployment",
+                            "unknown",
+                        ),
                     )
                 )
 
@@ -170,7 +195,9 @@ class ADRProcessingService:
             constraint_nodes: list[ArchitecturalConstraintNode] = []
             adr_constraints: list[str] = []
             for idx, (constr, chunk) in enumerate(unmapped_constraints):
-                constr_id = sha256(f"{adr_id}:constraint:{idx}:{constr.description}".encode()).hexdigest()
+                constr_id = sha256(
+                    f"{adr_id}:constraint:{idx}:{constr.description}".encode()
+                ).hexdigest()
                 target_cids: list[str] = []
                 for target in constr.target_entities:
                     cid = lookup_entity(target, "Component")
@@ -187,6 +214,16 @@ class ADRProcessingService:
                         constraint_type=constr.constraint_type,
                         constrains_entity_ids=target_cids,
                         evidence_chunk_ids=[chunk.chunk_id],
+                        applicability=ApplicabilityMetadata(
+                            applicability=constr.applicability,
+                            context_truncated="Document context was truncated."
+                            in constr.applicability.uncertainty,
+                        ),
+                        applicability_model=getattr(
+                            getattr(self.extractor, "llm", None),
+                            "deployment",
+                            "unknown",
+                        ),
                     )
                 )
 
@@ -216,6 +253,11 @@ class ADRProcessingService:
                     chunk_mentions.append((chunk_id, cid))
 
             # 10. Persist full ADR graph atomically into Neo4j
+            ADRScopeResolver(self.writer.driver, self.writer.database).resolve_all(
+                repo_id,
+                [*decision_nodes, *constraint_nodes],
+                list(canonical_map.values()),
+            )
             self.writer.write_adr_knowledge(
                 doc=doc,
                 chunks=chunks,
@@ -231,5 +273,5 @@ class ADRProcessingService:
             )
 
         except Exception as exc:
-            logger.exception(f"Phase 2 ADR processing failed for '{adr_id}': {exc}")
+            logger.exception("Phase 2 ADR processing failed for '%s'", adr_id)
             raise ADRProcessingError(f"ADR graph ingestion failed: {exc}") from exc

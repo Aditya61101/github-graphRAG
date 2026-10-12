@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from ai_services.ingestion.adr.applicability import Applicability, ApplicabilityMetadata
 
 
 @dataclass
@@ -57,8 +60,13 @@ class PropertyOutput(StrictModel):
 class ADRDecisionOutput(StrictModel):
     """Structured architectural decision extracted by LLM from ADR content."""
 
-    title: str = Field(description="Short title or summary of the architectural decision.")
-    description: str = Field(description="Detailed rationale and explanation of the decision.")
+    title: str = Field(
+        description="Short title or summary of the architectural decision."
+    )
+    applicability: Applicability = Field(default_factory=Applicability)
+    description: str = Field(
+        description="Detailed rationale and explanation of the decision."
+    )
     decision_type: str | None = Field(
         default=None,
         description="Category such as technology_selection, architectural_pattern, interface_contract, persistence_strategy, security_policy.",
@@ -76,7 +84,10 @@ class ADRDecisionOutput(StrictModel):
 class ADRConstraintOutput(StrictModel):
     """Structured architectural constraint extracted by LLM from ADR content."""
 
-    description: str = Field(description="Specific architectural constraint, rule, or boundary.")
+    description: str = Field(
+        description="Specific architectural constraint, rule, or boundary."
+    )
+    applicability: Applicability = Field(default_factory=Applicability)
     constraint_type: str | None = Field(
         default=None,
         description="Category such as communication_rule, data_access_rule, security_constraint.",
@@ -90,7 +101,9 @@ class ADRConstraintOutput(StrictModel):
 class ADREntityOutput(StrictModel):
     """Architectural component or service identified in the ADR."""
 
-    name: str = Field(description="Name of the architectural entity, service, database, or component.")
+    name: str = Field(
+        description="Name of the architectural entity, service, database, or component."
+    )
     label: str = Field(
         default="Component",
         description="Entity type/label: Service, Database, Queue, Interface, Component, Library.",
@@ -133,6 +146,8 @@ class ArchitecturalDecisionNode:
     affects_entity_ids: list[str] = field(default_factory=list)
     constrains_entity_ids: list[str] = field(default_factory=list)
     evidence_chunk_ids: list[str] = field(default_factory=list)
+    applicability: ApplicabilityMetadata = field(default_factory=ApplicabilityMetadata)
+    applicability_model: str = "unknown"
 
 
 @dataclass
@@ -146,4 +161,5 @@ class ArchitecturalConstraintNode:
     constraint_type: str | None
     constrains_entity_ids: list[str] = field(default_factory=list)
     evidence_chunk_ids: list[str] = field(default_factory=list)
-
+    applicability: ApplicabilityMetadata = field(default_factory=ApplicabilityMetadata)
+    applicability_model: str = "unknown"

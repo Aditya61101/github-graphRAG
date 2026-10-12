@@ -240,6 +240,7 @@ class MockNeo4jDriver:
                     "title": d.get("title"),
                     "description": d.get("description"),
                     "decision_type": d.get("decision_type"),
+                    **d.get("applicability", {}),
                 }
                 self._add_relationship(
                     {
@@ -308,6 +309,7 @@ class MockNeo4jDriver:
                     "repository": repo,
                     "description": c.get("description"),
                     "constraint_type": c.get("constraint_type"),
+                    **c.get("applicability", {}),
                 }
                 self._add_relationship(
                     {
@@ -456,7 +458,7 @@ class MockArchitecturalExtractor:
             raise RuntimeError("Simulated LLM architectural extraction error.")
         return self.result
 
-    async def extract_all(self, chunks: list[ADRChunk]) -> list[tuple[ADRChunk, ADRExtractionResult]]:
+    async def extract_all(self, chunks: list[ADRChunk], doc=None) -> list[tuple[ADRChunk, ADRExtractionResult]]:
         if self.should_fail:
             raise RuntimeError("Simulated LLM architectural extraction error.")
         return [(c, self.result) for c in chunks]

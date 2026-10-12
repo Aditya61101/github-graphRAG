@@ -151,7 +151,10 @@ async def lifespan(app: FastAPI):
 
     adr_processor = ADRProcessingService(
         chunker=ADRChunker(),
-        extractor=ADRArchitecturalExtractor(llm=llm),
+        extractor=ADRArchitecturalExtractor(
+            llm=llm,
+            document_context_max_chars=int(os.getenv("ADR_DOCUMENT_CONTEXT_MAX_CHARS", "6000")),
+        ),
         resolver=ADREntityResolver(
             driver=driver,
             database=database or "neo4j",
