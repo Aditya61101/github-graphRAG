@@ -206,6 +206,17 @@ class Graph:
         self.calls.append(("paths", paths))
         return self.page([r for r in self.chunks if r["path"] in paths], limit)
 
+    def entity_chunks(self, ids, limit):
+        self.calls.append(("entity_sources", ids))
+        return self.page(
+            [
+                {**r, "entities": [e for e in r["entities"] if e["id"] in ids]}
+                for r in self.chunks
+                if any(e["id"] in ids for e in r["entities"])
+            ],
+            limit,
+        )
+
     def relationships(self, ids, limit):
         self.calls.append(("edges", ids))
         return self.page(

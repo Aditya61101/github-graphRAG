@@ -1,0 +1,16 @@
+{
+  "schema_version": "dg-vector-compatibility-v1",
+  "configuration_id": "existing-azure-text-embedding-3-large-3072-v1",
+  "identity": {
+    "provider": "azure-openai",
+    "model": "text-embedding-3-large",
+    "dimensions": 3072,
+    "revision": "text-embedding-3-large:3072",
+    "provenance": "VERIFIED_PROVIDER"
+  },
+  "confirmation": "USER_CONFIRMED_LEGACY",
+  "confirmation_source": "Repository owner explicitly confirmed all existing RKG and ADR embeddings were generated using Azure OpenAI text-embedding-3-large; dimensions independently checked on stored vectors. Deployment alias is configuration, not embedding-space identity.",
+  "embedded_text": "ADRChunk.text",
+  "applies_to": ["RKG", "ADR"],
+  "neo4j_model_metadata_claimed": false
+}

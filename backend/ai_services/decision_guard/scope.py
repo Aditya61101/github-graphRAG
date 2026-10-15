@@ -93,7 +93,18 @@ def words(text: str) -> set[str]:
 
 
 def discovery(
-    scope, node, targets, seeds, supported_ids, *, adr_mention, tokens, languages, paths
+    scope,
+    node,
+    targets,
+    seeds,
+    supported_ids,
+    *,
+    adr_mention,
+    tokens,
+    languages,
+    paths,
+    nearby_seeds=(),
+    changed_literals=(),
 ):
     metadata = scope.metadata
     app = metadata.applicability
@@ -104,7 +115,14 @@ def discovery(
         score += 100
     if set(metadata.entity_ids) & set(seeds):
         reasons.append("SCOPE_ENTITY_TARGET")
-        score += 80
+        if "ENTITY_TARGET" not in reasons:
+            score += 80  # Do not count the same association twice.
+    if not any(t.get("id") in seeds for t in targets) and any(
+        t.get("id") in nearby_seeds for t in targets
+    ):
+        reasons.append("NEIGHBOR_TARGET")
+        if "SCOPE_ENTITY_TARGET" not in reasons:
+            score += 25
     if supported_ids:
         reasons.append("COMMUNITY_SCOPE")
         score += 70
@@ -142,6 +160,12 @@ def discovery(
     if overlap:
         reasons.append("LEXICAL_FALLBACK")
         score += min(len(overlap), 20)
+    literal_overlap = set(changed_literals) & words(
+        (node.get("title") or "") + " " + (node.get("description") or "")
+    )
+    if literal_overlap:
+        reasons.append("CHANGED_LITERAL")
+        score += min(5 * len(literal_overlap), 20)
     if not reasons:
         # Inferred/explicit mismatches are ranking hints, never exclusion proofs.
         if scope.status == "LEGACY":

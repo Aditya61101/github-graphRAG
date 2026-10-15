@@ -5,11 +5,14 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from functools import partial
 
 from ai_services.ingestion.pr.models import PullRequestChangeSet
 from ai_services.ingestion.rkg.token_estimation import rough_token_count
 
-from .delta import CachedSource, analyze_delta, clipped, code_evidence
+from .budget import model_context_json
+from .delta import CachedSource, analyze_delta, clipped, symbols
+from .discovery import PreliminaryDiscovery, QuerySettings, build_discovery
 from .models import (
     ADRIdentity,
     AffectedEntityCandidate,
@@ -26,7 +29,13 @@ from .models import (
     digest,
     stable_id,
 )
-from .ports import ArchitectureGraphReader, BaselineReadiness, RevisionSourceReader
+from .original_evidence import original_evidence_resolvers
+from .ports import (
+    ArchitectureGraphReader,
+    BaselineReadiness,
+    Page,
+    RevisionSourceReader,
+)
 from .scope import discovery, read_scope, scope_chunk_ids, supported_communities, words
 from .settings import ContextSettings
 
@@ -61,11 +70,17 @@ class ArchitectureContextBuilder:
         repository_lock: Callable[[str], asyncio.Lock],
         settings: ContextSettings | None = None,
         token_counter: Callable[[str], int] = conservative_tokens,
+        request_budget=None,
+        hybrid=None,
     ):
         self.graph, self.source, self.readiness = graph, source, readiness
         self.repository_lock = repository_lock
         self.settings = settings or ContextSettings.from_env()
         self.token_counter = token_counter
+        self.request_budget = request_budget
+        self.hybrid = hybrid
+        self.last_retrieval_plan = None
+        self.last_retrieval_audit = None
 
     @staticmethod
     def _require_ready(state: BaselineSnapshot, changes: PullRequestChangeSet):
@@ -96,13 +111,28 @@ class ArchitectureContextBuilder:
             )
 
     async def build(self, changes: PullRequestChangeSet) -> ArchitectureContext:
+        self.last_retrieval_plan = self.last_retrieval_audit = None
+        return await self._snapshot(changes, self._materialize)
+
+    async def discover(
+        self, changes: PullRequestChangeSet, query_settings: QuerySettings | None = None
+    ) -> PreliminaryDiscovery:
+        """Step 2A only: source-grounded queries before ADR selection/pruning."""
+        return await self._snapshot(
+            changes,
+            partial(
+                self._materialize, preliminary_only=True, query_settings=query_settings
+            ),
+        )
+
+    async def _snapshot(self, changes, materialize):
         # Existing ingestion registry keys by full_name. Pass its _get_lock here;
         # a Phase 4.3 coordinator may normalize all users to repository-ID keys.
         async with self.repository_lock(changes.repository_full_name):
             baseline = await self.readiness.snapshot(changes.repository_id)
             self._require_ready(baseline, changes)
             worker = asyncio.create_task(
-                asyncio.to_thread(self._materialize, changes, baseline)
+                asyncio.to_thread(materialize, changes, baseline)
             )
             try:
                 result = await asyncio.shield(worker)
@@ -125,9 +155,20 @@ class ArchitectureContextBuilder:
                 )
             return result
 
-    def _materialize(self, changes, baseline):
+    def _materialize(
+        self, changes, baseline, *, preliminary_only=False, query_settings=None
+    ):
         repo, settings = changes.repository_id, self.settings
         source = CachedSource(self.source, repo)
+        if self.hybrid is not None and not preliminary_only:
+            import time
+
+            from .hybrid.index import BoundedSources
+
+            limits = self.hybrid.hydration_limits
+            source = BoundedSources(
+                self.source, repo, limits, time.monotonic() + limits.deadline_seconds
+            )
         analysis = analyze_delta(changes, source, settings)
         evidence, limitations = analysis.evidence, analysis.limitations
         entities: dict[str, AffectedEntityCandidate] = {}
@@ -135,6 +176,7 @@ class ArchitectureContextBuilder:
         requirements = []
         catalog = []
         scope_fingerprints = {}
+        retrieval = None
         baseline_verified_evidence = set()
         adr_status, catalog_complete = "ABSENT", True
         mapping_strength = {
@@ -159,6 +201,17 @@ class ArchitectureContextBuilder:
                     channel + "_LIMIT",
                     "Graph retrieval truncated; additional relevant items may exist",
                 )
+
+        def preliminary_read(method, *args):
+            try:
+                return method(*args)
+            except RepositoryScopeError:
+                raise
+            except Exception as exc:
+                if not preliminary_only:
+                    raise
+                limitation("DISCOVERY_GRAPH_UNAVAILABLE", type(exc).__name__)
+                return Page((), truncated=True)
 
         def keep_entity(
             node,
@@ -244,161 +297,16 @@ class ArchitectureContextBuilder:
             entities[eid] = item
             return True
 
-        def chunk_evidence(chunk):
-            _scope(chunk, repo)
-            text, path, sha = (
-                chunk.get("text"),
-                chunk.get("filePath"),
-                chunk.get("commit"),
-            )
-            if text is None or not path or not sha:
-                limitation(
-                    "CODE_EVIDENCE_INCOMPLETE",
-                    "Chunk lacks source identity or text",
-                    ids=(chunk.get("id", "unknown"),),
-                )
-                return None
-            placement, start = "UNLOCATED", None
-            if chunk.get("contentHash") != digest(text):
-                limitation(
-                    "CHUNK_HASH_MISMATCH",
-                    "Stored chunk hash disagrees with original text",
-                    (path,),
-                    (chunk["id"],),
-                )
-            else:
-                try:
-                    blob = source.read(sha, path)
-                    if blob.status == "complete":
-                        occurrences = blob.text.count(text) if text else 0
-                        if occurrences == 1:
-                            placement = "EXACT"
-                            start = blob.text[: blob.text.index(text)].count("\n") + 1
-                        elif occurrences > 1:
-                            placement = "AMBIGUOUS"
-                except Exception as exc:  # noqa: BLE001 - source port failures become sanitized coverage diagnostics
-                    limitation(
-                        "INDEXED_SOURCE_UNAVAILABLE",
-                        type(exc).__name__,
-                        (path,),
-                        (chunk["id"],),
-                    )
-            if placement != "EXACT":
-                limitation(
-                    "CHUNK_" + placement,
-                    "Chunk cannot be uniquely placed in exact source",
-                    (path,),
-                    (chunk["id"],),
-                )
-            ev = code_evidence(
-                repo,
-                "INDEXED_CODE",
-                path,
-                sha,
-                text,
-                settings,
-                start=start,
-                chunk_id=chunk["id"],
-                placement=placement,
-                content_hash=chunk.get("contentHash"),
-            )
-            evidence[ev.evidence_id] = ev
-            try:
-                target = source.read(changes.base_sha, path)
-                if (
-                    placement == "EXACT"
-                    and target.text is not None
-                    and text
-                    and target.text.count(text) == 1
-                ):
-                    baseline_verified_evidence.add(ev.evidence_id)
-                else:
-                    limitation(
-                        "BASELINE_CHUNK_DIVERGED",
-                        "Stored chunk is not uniquely corroborated in target-base source",
-                        (path,),
-                        (chunk["id"],),
-                    )
-            except Exception as exc:  # noqa: BLE001 - source port failures become sanitized coverage diagnostics
-                limitation(
-                    "BASELINE_SOURCE_UNAVAILABLE",
-                    type(exc).__name__,
-                    (path,),
-                    (chunk["id"],),
-                )
-            if ev.completeness == "EXCERPT":
-                limitation(
-                    "EVIDENCE_LIMIT",
-                    "Code evidence was excerpted",
-                    (path,),
-                    (ev.evidence_id,),
-                )
-            return ev
-
-        def adr_evidence(support):
-            chunk, adr = support.get("chunk"), support.get("adr")
-            if not chunk or not adr:
-                limitation(
-                    "ADR_EVIDENCE_MISSING",
-                    "Requirement/assertion has no original supporting ADR chunk",
-                )
-                return None
-            _scope(chunk, repo)
-            _scope(adr, repo)
-            if (
-                chunk.get("adr_id") != adr.get("id")
-                or not adr.get("content_hash")
-                or chunk.get("text") is None
-            ):
-                limitation(
-                    "ADR_PROVENANCE_INCOMPLETE",
-                    "ADR chunk/document identity is incomplete",
-                )
-                return None
-            if chunk.get("contentHash") != digest(chunk["text"]):
-                limitation(
-                    "ADR_HASH_MISMATCH",
-                    "ADR supporting text hash mismatch",
-                    ids=(chunk.get("id", "unknown"),),
-                )
-                return None
-            text = clipped(chunk["text"], settings.max_evidence_chars)
-            ev = EvidenceSnapshot(
-                evidence_id=stable_id(
-                    repo,
-                    "ADR",
-                    adr["id"],
-                    adr["content_hash"],
-                    chunk["id"],
-                    digest(text),
-                ),
-                repository_id=repo,
-                kind="ADR",
-                origin="ADR_DOCUMENT",
-                adr_id=adr["id"],
-                chunk_id=chunk["id"],
-                document_hash=adr["content_hash"],
-                content_hash=chunk["contentHash"],
-                section=chunk.get("section"),
-                source_name=adr.get("source_name"),
-                source_type=adr.get("source_type"),
-                source_url=adr.get("source_url"),
-                source_version=adr.get("source_version"),
-                excerpt=text,
-                excerpt_hash=digest(text),
-                completeness="EXCERPT"
-                if len(text) < len(chunk["text"])
-                else "COMPLETE",
-                placement="NOT_APPLICABLE",
-            )
-            evidence[ev.evidence_id] = ev
-            if ev.completeness == "EXCERPT":
-                limitation(
-                    "ADR_EVIDENCE_LIMIT",
-                    "Original ADR text was excerpted",
-                    ids=(ev.evidence_id,),
-                )
-            return ev
+        chunk_evidence, adr_evidence = original_evidence_resolvers(
+            repo,
+            settings,
+            source,
+            changes.base_sha,
+            evidence,
+            baseline_verified_evidence,
+            limitation,
+            _scope,
+        )
 
         with self.graph.read_snapshot(repo) as graph:
             paths = tuple(
@@ -406,7 +314,7 @@ class ArchitectureContextBuilder:
                     {p for f in changes.files for p in (f.path, f.previous_path) if p}
                 )
             )
-            chunks = graph.file_chunks(paths, settings.max_chunks)
+            chunks = preliminary_read(graph.file_chunks, paths, settings.max_chunks)
             page_limit(chunks, "CHUNK")
             for row in chunks.rows:
                 if row["path"] not in paths:
@@ -557,18 +465,64 @@ class ArchitectureContextBuilder:
                         distance=0,
                         reason="New declaration has no mapped baseline identity; repository-wide equivalence is unverified",
                     )
+            primary_ids = {
+                eid
+                for eid, e in entities.items()
+                if e.mapping in {"CHANGED_SYMBOL", "CHANGED_CHUNK"}
+            }
+            # Referenced names in a changed file are not all changed subjects.
             frontier = tuple(
                 sorted(
-                    eid for eid, e in entities.items() if e.origin != "NEW_CANDIDATE"
+                    primary_ids
+                    or {
+                        eid
+                        for eid, e in entities.items()
+                        if e.origin != "NEW_CANDIDATE" and e.delta_ids
+                    }
                 )
             )
+            if not frontier:
+                frontier = tuple(
+                    sorted(
+                        eid
+                        for eid, e in entities.items()
+                        if e.origin != "NEW_CANDIDATE"
+                    )
+                )
+            unseeded = {
+                eid
+                for eid, e in entities.items()
+                if e.origin != "NEW_CANDIDATE" and eid not in frontier
+            }
+            if unseeded:
+                limitation(
+                    "RELATIONSHIP_SEED_OMITTED",
+                    "Reference-only file candidates were not expanded as changed subjects",
+                    ids=tuple(sorted(unseeded)),
+                )
             for hop in range(1, settings.dependency_hops + 1):
                 if not frontier:
                     break
-                page = graph.relationships(frontier, settings.max_relationships)
+                page = preliminary_read(
+                    graph.relationships, frontier, settings.max_relationships
+                )
                 page_limit(page, "RELATIONSHIP")
                 next_ids = set()
-                for row in page.rows:
+
+                def row_priority(row):
+                    a = row["assertion"]
+                    return (
+                        a.get("source_type") == "ADR",
+                        0
+                        if a.get("relationshipType") == "CALLS"
+                        else 1
+                        if a.get("relationshipType") in {"READS_FROM", "WRITES_TO"}
+                        else 2,
+                        a.get("id", ""),
+                    )
+
+                counts = dict.fromkeys(frontier, 0)
+                for row in sorted(page.rows, key=row_priority):
                     assertion, src, dst = row["assertion"], row["source"], row["target"]
                     for node in (assertion, src, dst):
                         _scope(node, repo)
@@ -576,6 +530,19 @@ class ArchitectureContextBuilder:
                         raise RepositoryScopeError(
                             "Graph returned an unseeded relationship"
                         )
+                    seeds = {src.get("id"), dst.get("id")} & set(frontier)
+                    if all(
+                        counts[eid] >= settings.max_neighbors_per_subject
+                        for eid in seeds
+                    ):
+                        limitation(
+                            "RELATIONSHIP_SELECTION_OMITTED",
+                            "Incident relationship omitted by bounded relevance selection",
+                            ids=(assertion.get("id", "unknown"),),
+                        )
+                        continue
+                    for eid in seeds:
+                        counts[eid] += 1
                     if not assertion.get("relationshipType"):
                         limitation(
                             "RELATIONSHIP_INCOMPLETE",
@@ -687,8 +654,103 @@ class ArchitectureContextBuilder:
                         )
                     )
                 )
+            # Resolve original declaration chunks for retained direct neighbors;
+            # relationship rationale and shared names never invent source paths.
+            neighbors = tuple(
+                sorted(
+                    eid
+                    for eid, e in entities.items()
+                    if e.origin == "CODE" and eid not in primary_ids
+                )
+            )
+            if neighbors and hasattr(graph, "entity_chunks"):
+                declarations = preliminary_read(
+                    graph.entity_chunks, neighbors, settings.max_neighbor_chunks
+                )
+                page_limit(declarations, "NEIGHBOR_SOURCE")
+                for row in declarations.rows:
+                    c = row["chunk"]
+                    _scope(c, repo)
+                    if row.get("path") != c.get("filePath") or c.get("adr_id"):
+                        raise RepositoryScopeError(
+                            "Neighbor source provenance mismatch"
+                        )
+                    names = set(
+                        symbols(
+                            c.get("text"), 1, len((c.get("text") or "").splitlines())
+                        )
+                    )
+                    names.update(
+                        re.findall(
+                            r"\b(?:class|function|interface|struct|enum|trait|type)\s+([A-Za-z_$][\w$]*)",
+                            c.get("text") or "",
+                        )
+                    )
+                    owners = []
+                    for node in row.get("entities", ()):
+                        _scope(node, repo)
+                        if node.get("id") not in neighbors:
+                            raise RepositoryScopeError(
+                                "Unrequested neighbor source entity"
+                            )
+                        if node.get("name") in names:
+                            owners.append(node)
+                    if not owners:
+                        continue  # References alone cannot establish a declaration.
+                    value = chunk_evidence(c)
+                    if not value or value.evidence_id not in baseline_verified_evidence:
+                        continue
+                    for node in owners:
+                        keep_entity(
+                            node,
+                            paths=(row["path"],),
+                            ev=(value.evidence_id,),
+                            distance=entities[node["id"]].distance,
+                            code=True,
+                            reason="Original declaration source for retained architectural neighbor",
+                        )
+            elif neighbors:
+                limitation(
+                    "NEIGHBOR_SOURCE_UNAVAILABLE",
+                    "Graph adapter cannot resolve declaration evidence for retained neighbors",
+                    ids=neighbors,
+                )
+            if preliminary_only:
+                return build_discovery(
+                    changes,
+                    baseline,
+                    analysis,
+                    entities,
+                    relationships,
+                    evidence,
+                    baseline_verified_evidence,
+                    query_settings,
+                )
+            if self.hybrid is not None:
+                from .hybrid.integration import BuildRetrieval
+
+                preliminary = build_discovery(
+                    changes,
+                    baseline,
+                    analysis,
+                    entities,
+                    relationships,
+                    evidence,
+                    baseline_verified_evidence,
+                    query_settings,
+                )
+                for item in preliminary.limitations:
+                    if item not in limitations:
+                        limitations.append(item)
+                retrieval = BuildRetrieval(self.hybrid, preliminary, limitation)
+                if self.hybrid.mode == "ARCHIVED":
+                    limitation(
+                        "HYBRID_ARCHIVED_SNAPSHOT",
+                        "Offline archived readiness; not an authoritative live publication",
+                    )
             try:
                 documents = graph.adr_catalog(settings.max_adr_documents)
+                catalog_read_hash = digest(json.dumps(documents.rows, sort_keys=True))
                 catalog_complete = not documents.truncated
                 page_limit(documents, "ADR_CATALOG")
                 for row in documents.rows:
@@ -780,7 +842,11 @@ class ArchitectureContextBuilder:
                     page_limit(fallback, "FALLBACK_REQUIREMENT")
                     tokens = words(
                         " ".join(
-                            [e.name for e in entities.values()]
+                            [
+                                e.name
+                                for e in entities.values()
+                                if e.entity_id in primary_ids
+                            ]
                             + [
                                 d.path
                                 + " "
@@ -806,6 +872,16 @@ class ArchitectureContextBuilder:
                         "backend",
                         "app",
                     }
+                    changed_literals = words(
+                        " ".join(
+                            value
+                            for d in analysis.deltas
+                            for text in (d.before or "", d.after or "")
+                            for value in re.findall(
+                                r"['\"]([^'\"\n]{1,160})['\"]", text
+                            )
+                        )
+                    )
                     rows = {
                         r["knowledge"]["id"]: r for r in (*fallback.rows, *direct.rows)
                     }
@@ -866,6 +942,7 @@ class ArchitectureContextBuilder:
                             value = adr_evidence(support)
                             if value:
                                 extra_evidence[doc["id"], chunk["id"]] = value
+                        scope_read_hash = digest(json.dumps(extra.rows, sort_keys=True))
                     selected = {}
                     direct_ids = {r["knowledge"]["id"] for r in direct.rows}
                     for kid, row in sorted(rows.items()):
@@ -919,12 +996,14 @@ class ArchitectureContextBuilder:
                             record,
                             node,
                             row.get("targets", ()),
-                            seeds,
+                            tuple(sorted(primary_ids)) or seeds,
                             supported_ids,
                             adr_mention=adr_mention,
                             tokens=tokens,
                             languages=languages,
                             paths=tuple(f.path for f in changes.files),
+                            nearby_seeds=seeds,
+                            changed_literals=changed_literals,
                         )
                         selected[kid] = (
                             score,
@@ -933,19 +1012,75 @@ class ArchitectureContextBuilder:
                             scope_values,
                             supported_ids,
                         )
+                    if retrieval and retrieval.prepare(
+                        catalog, catalog_complete, rows, selected, evidence
+                    ):
+                        # Reproduce every selected policy's original support and
+                        # referenced qualifiers, not just its retrieval projection.
+                        for kid in list(selected):
+                            try:
+                                group = [*rows[kid].get("support", ())]
+                                record = records[kid]
+                                group.extend(
+                                    s
+                                    for s in (extra.rows if requested_chunks else ())
+                                    if s.get("adr")
+                                    and s["adr"]["id"] in original_adrs[kid]
+                                    and s.get("chunk")
+                                    and s["chunk"]["id"]
+                                    in scope_chunk_ids(record.metadata)
+                                )
+                                if not group or not all(
+                                    retrieval.verify_support(s) for s in group
+                                ):
+                                    raise ValueError(
+                                        "Original policy source verification failed"
+                                    )
+                            except Exception as exc:  # noqa: BLE001 - omit incomplete groups
+                                limitation(
+                                    "HYBRID_HYDRATION_GROUP_REJECTED",
+                                    type(exc).__name__,
+                                    ids=(kid,),
+                                )
+                                selected.pop(kid)
+                        selected = retrieval.prioritize(selected)
                     counts = {"DECISION": 0, "CONSTRAINT": 0}
+                    # Reserve one discovery slot for an unlinked/cross-cutting
+                    # candidate. This is coverage, not a claim of applicability.
+                    retained_ids = set()
+                    for kind, cap in (
+                        ("DECISION", settings.max_decisions),
+                        ("CONSTRAINT", settings.max_constraints),
+                    ):
+                        ranked = sorted(
+                            (v for v in selected.values() if v[2]["kind"] == kind),
+                            key=lambda v: (-v[0], v[2]["knowledge"]["id"]),
+                        )
+                        chosen = ranked[:cap]
+                        unlinked = [
+                            v
+                            for v in ranked
+                            if not set(v[1])
+                            & {
+                                "ENTITY_TARGET",
+                                "SCOPE_ENTITY_TARGET",
+                                "NEIGHBOR_TARGET",
+                            }
+                        ]
+                        if (
+                            cap > 1
+                            and unlinked
+                            and not any(v in unlinked for v in chosen)
+                        ):
+                            chosen[-1] = unlinked[0]
+                        retained_ids.update(v[2]["knowledge"]["id"] for v in chosen)
                     for _, reasons, row, scope_values, supported_ids in sorted(
                         selected.values(),
                         key=lambda v: (-v[0], v[2]["knowledge"]["id"]),
                     ):
                         kind = row["kind"]
-                        limit = (
-                            settings.max_decisions
-                            if kind == "DECISION"
-                            else settings.max_constraints
-                        )
                         node = row["knowledge"]
-                        if counts[kind] >= limit:
+                        if node["id"] not in retained_ids:
                             limitation(
                                 kind + "_LIMIT",
                                 "Relevant requirement candidate omitted",
@@ -1024,6 +1159,83 @@ class ArchitectureContextBuilder:
             except Exception as exc:  # noqa: BLE001 - ADR read/validation failures must degrade rather than imply absence
                 adr_status, catalog_complete = "DEGRADED", False
                 limitation("ADR_RETRIEVAL_FAILED", type(exc).__name__)
+            if retrieval:
+                if adr_status == "ABSENT":
+                    retrieval.prepare(catalog, catalog_complete, {}, {}, evidence)
+                elif retrieval.plan is None and not catalog_complete:
+                    limitation(
+                        "HYBRID_CATALOG_UNVERIFIED",
+                        "Failed catalog retrieval cannot establish policy absence",
+                    )
+                if retrieval.plan:
+                    retrieval.hydrate_code(
+                        graph,
+                        entities,
+                        evidence,
+                        baseline_verified_evidence,
+                        chunk_evidence,
+                        keep_entity,
+                        settings,
+                    )
+                    # Neo4j read transactions are not assumed repeatable. Recheck
+                    # the full bounded inventories before publishing this context.
+                    from .hybrid.integration import row_manifest
+
+                    checked = graph.adr_catalog(settings.max_adr_documents)
+                    if (
+                        checked.truncated != documents.truncated
+                        or digest(json.dumps(checked.rows, sort_keys=True))
+                        != catalog_read_hash
+                    ):
+                        raise ContextConstructionError(
+                            "ADR catalog changed during hybrid materialization"
+                        )
+                    if catalog:
+                        again = graph.requirements(
+                            seeds,
+                            settings.max_catalog_items,
+                            fallback=True,
+                            community_ids=community_ids,
+                            languages=languages,
+                        )
+                        direct_again = graph.requirements(
+                            seeds,
+                            settings.max_catalog_items,
+                            community_ids=community_ids,
+                            languages=languages,
+                        )
+                        now = {
+                            r["knowledge"]["id"]: r
+                            for r in (*again.rows, *direct_again.rows)
+                        }
+                        if (
+                            again.truncated != fallback.truncated
+                            or direct_again.truncated != direct.truncated
+                            or row_manifest(list(now.values()))
+                            != retrieval.current_policy_manifest
+                        ):
+                            raise ContextConstructionError(
+                                "ADR sources or enrichment changed during hybrid materialization"
+                            )
+                        retrieval.recheck_uploads(catalog)
+                        if requested_chunks:
+                            current_scope = graph.applicability_evidence(
+                                tuple(sorted(requested_adrs)),
+                                tuple(sorted(requested_chunks)),
+                                settings.max_scope_evidence_chunks,
+                            )
+                            if (
+                                current_scope.truncated != extra.truncated
+                                or digest(
+                                    json.dumps(current_scope.rows, sort_keys=True)
+                                )
+                                != scope_read_hash
+                            ):
+                                raise ContextConstructionError(
+                                    "ADR qualification sources changed during hydration"
+                                )
+                self.last_retrieval_plan = retrieval.plan
+                self.last_retrieval_audit = retrieval.audit
         coverage = [
             f.model_copy(
                 update={
@@ -1111,6 +1323,16 @@ class ArchitectureContextBuilder:
             json.dumps([a.model_dump() for a in catalog], sort_keys=True)
         )
 
+        def retained_mapping(file):
+            paths = {file.path} | {
+                d.previous_path
+                for d in deltas
+                if d.path == file.path and d.previous_path
+            }
+            return any(
+                e.origin == "CODE" and paths.intersection(e.paths) for e in entities
+            )
+
         def payload():
             used = {
                 eid
@@ -1142,12 +1364,31 @@ class ArchitectureContextBuilder:
                     )
                 ),
                 "coverage": ContextCoverage(
-                    files=tuple(files),
+                    files=tuple(
+                        f.model_copy(
+                            update={
+                                "mapped": retained_mapping(f),
+                                "reasons": tuple(
+                                    sorted(
+                                        set(
+                                            f.reasons
+                                            + (
+                                                ("RKG_MAPPING_OMITTED",)
+                                                if f.mapped and not retained_mapping(f)
+                                                else ()
+                                            )
+                                        )
+                                    )
+                                ),
+                            }
+                        )
+                        for f in files
+                    ),
                     adr_retrieval=adr_status,
                     adr_catalog_complete=catalog_complete,
                     limitations=tuple(
                         sorted(
-                            set(limitations),
+                            limitations,
                             key=lambda l: (l.code, l.paths, l.item_ids, l.message),
                         )
                     ),
@@ -1155,6 +1396,7 @@ class ArchitectureContextBuilder:
                 "budget": ContextBudget(
                     token_limit=self.settings.max_context_tokens,
                     estimated_tokens=0,
+                    accounting="MODEL_PROJECTION",
                     estimator="conservative_utf8_bytes"
                     if self.token_counter is conservative_tokens
                     else getattr(self.token_counter, "name", "injected_token_counter"),
@@ -1183,7 +1425,7 @@ class ArchitectureContextBuilder:
                         )
                     }
                 )
-                measured = self.token_counter(ctx.model_dump_json())
+                measured = self.token_counter(model_context_json(ctx))
                 if type(measured) is not int or measured < 0:
                     raise ContextConstructionError(
                         "Token counter must return a nonnegative integer"
@@ -1198,23 +1440,168 @@ class ArchitectureContextBuilder:
             return ctx.model_copy(
                 update={
                     "budget": ctx.budget.model_copy(
-                        update={"estimated_tokens": estimate}
+                        update={
+                            "estimated_tokens": estimate,
+                            "audit_tokens": self.token_counter(ctx.model_dump_json()),
+                        }
                     )
                 }
             )
 
         omitted = set()
+        primary = {
+            e.entity_id
+            for e in entities
+            if e.mapping in {"CHANGED_SYMBOL", "CHANGED_CHUNK", "NEW_CANDIDATE"}
+        }
+
+        def drop_edge(item):
+            relationships.remove(item)
+            remaining_support = {eid for r in relationships for eid in r.evidence_ids}
+            removed_support = set(item.evidence_ids) - remaining_support
+            # Drop the evidence group as well as its edge. Otherwise neighbor
+            # evidence keeps an omitted relationship's entire transcript alive.
+            for i, e in enumerate(entities):
+                entities[i] = e.model_copy(
+                    update={
+                        "evidence_ids": tuple(
+                            eid
+                            for eid in e.evidence_ids
+                            if eid not in removed_support
+                            or (
+                                evidence[eid].kind == "CODE"
+                                and evidence[eid].path in e.paths
+                            )
+                        )
+                    }
+                )
+
         while True:
             ctx = assemble()
-            if ctx.budget.estimated_tokens <= self.settings.max_context_tokens:
+            probe = self.request_budget(ctx) if self.request_budget else None
+            request_fits = probe is None or probe.fits
+            governed = {eid for r in requirements for eid in r.target_entity_ids}
+            direct = {
+                eid
+                for r in relationships
+                if r.provenance == "OBSERVED_CODE"
+                and r.relationship_type in {"CALLS", "READS_FROM", "WRITES_TO"}
+                and {r.source_id, r.target_id} & primary
+                for eid in (r.source_id, r.target_id)
+            }
+            essential = primary | governed | direct
+            weak_entities = [
+                e
+                for e in entities
+                if e.entity_id not in essential and e.mapping == "FILE_CANDIDATE"
+            ]
+            if self.hybrid is not None:
+                # Requirement target links keep these original identities. An
+                # otherwise unsupported target node adds no source anchor and
+                # must not displace the policy's support/qualifications.
+                weak_entities.extend(
+                    e
+                    for e in entities
+                    if e.entity_id not in primary
+                    and not e.paths
+                    and not any(evidence[eid].kind == "CODE" for eid in e.evidence_ids)
+                    and not any(
+                        e.entity_id in {r.source_id, r.target_id} for r in relationships
+                    )
+                    and e not in weak_entities
+                )
+            weak_edges = [
+                r
+                for r in relationships
+                if not ({r.source_id, r.target_id} & primary)
+                or r.provenance != "OBSERVED_CODE"
+                or r.relationship_type not in {"CALLS", "READS_FROM", "WRITES_TO"}
+            ]
+            secondary = [
+                e
+                for e in entities
+                if e.entity_id not in essential
+                and not any(
+                    e.entity_id in {r.source_id, r.target_id} for r in relationships
+                )
+            ]
+            # Repack first, then reduce only optional peripheral groups. An
+            # intrinsic overflow is never repaired by deleting another policy.
+            if ctx.budget.estimated_tokens <= self.settings.max_context_tokens and (
+                request_fits
+                or (
+                    getattr(probe, "individual_feasibility_checked", False)
+                    and not (weak_entities or secondary or weak_edges)
+                )
+            ):
+                if probe:
+                    ctx = ctx.model_copy(
+                        update={
+                            "budget": ctx.budget.model_copy(
+                                update={
+                                    "request_input_tokens": probe.input_tokens,
+                                    "request_input_limit": probe.input_limit,
+                                    "request_omitted_units": getattr(
+                                        probe, "omitted_units", ()
+                                    ),
+                                }
+                            )
+                        }
+                    )
+                audit = 0
+                for _ in range(16):
+                    ctx = ctx.model_copy(
+                        update={
+                            "budget": ctx.budget.model_copy(
+                                update={"audit_tokens": audit}
+                            )
+                        }
+                    )
+                    measured = self.token_counter(ctx.model_dump_json())
+                    if measured <= audit:
+                        break
+                    audit = measured
                 return ArchitectureContext.model_validate(ctx.model_dump())
-            if requirements:
+            before_ids = (
+                {e.entity_id for e in entities}
+                | {r.relationship_id for r in relationships}
+                | {r.requirement_id for r in requirements}
+                | {d.delta_id for d in deltas}
+            )
+            before_evidence = {
+                eid
+                for obj in (*entities, *relationships, *requirements, *deltas)
+                for eid in obj.evidence_ids
+            }
+            if weak_entities or secondary:
+                item = max(
+                    weak_entities or secondary, key=lambda e: (e.distance, e.entity_id)
+                )
+                entities.remove(item)
+                for r in list(relationships):
+                    if item.entity_id in {r.source_id, r.target_id}:
+                        drop_edge(r)
+            elif weak_edges:
+                item = max(
+                    weak_edges,
+                    key=lambda r: (
+                        r.provenance != "OBSERVED_CODE",
+                        r.relationship_type != "CALLS",
+                        r.relationship_id,
+                    ),
+                )
+                drop_edge(item)
+            elif requirements:
                 item = min(
                     requirements, key=lambda r: (r.relevance_score, r.requirement_id)
                 )
                 requirements.remove(item)
             elif relationships:
-                relationships.pop()
+                item = max(
+                    relationships,
+                    key=lambda r: (r.relationship_type != "CALLS", r.relationship_id),
+                )
+                drop_edge(item)
             elif entities:
                 item = max(
                     entities,
@@ -1233,7 +1620,20 @@ class ArchitectureContextBuilder:
                         update={
                             "status": "BUDGET_OMITTED",
                             "reasons": tuple(
-                                sorted(set(f.reasons + ("CONTEXT_TOKEN_LIMIT",)))
+                                sorted(
+                                    set(
+                                        f.reasons
+                                        + ("CONTEXT_TOKEN_LIMIT",)
+                                        + (
+                                            ("MINIMUM_REQUEST_EVIDENCE_OMITTED",)
+                                            if probe
+                                            and not request_fits
+                                            and ctx.budget.estimated_tokens
+                                            <= self.settings.max_context_tokens
+                                            else ()
+                                        )
+                                    )
+                                )
                             ),
                         }
                     )
@@ -1245,9 +1645,34 @@ class ArchitectureContextBuilder:
                 raise ContextConstructionError(
                     "Token budget cannot hold revision, snapshot and complete file coverage metadata"
                 )
+            after_ids = (
+                {e.entity_id for e in entities}
+                | {r.relationship_id for r in relationships}
+                | {r.requirement_id for r in requirements}
+                | {d.delta_id for d in deltas}
+            )
+            after_evidence = {
+                eid
+                for obj in (*entities, *relationships, *requirements, *deltas)
+                for eid in obj.evidence_ids
+            }
             limitations.append(
                 Limitation(
-                    code="CONTEXT_TOKEN_LIMIT",
-                    message="Context candidates/evidence omitted to meet total serialized budget",
+                    code="REQUEST_EVIDENCE_GROUP_OMITTED"
+                    if probe
+                    and not request_fits
+                    and ctx.budget.estimated_tokens <= self.settings.max_context_tokens
+                    else "CONTEXT_TOKEN_LIMIT",
+                    message=f"Evidence group omitted: serialized assessment requires {probe.input_tokens} input tokens including reserve; capacity {probe.input_limit}"
+                    if probe
+                    and not request_fits
+                    and ctx.budget.estimated_tokens <= self.settings.max_context_tokens
+                    else "Context evidence group omitted to meet the model-facing context budget",
+                    item_ids=tuple(
+                        sorted(
+                            (before_ids - after_ids)
+                            | (before_evidence - after_evidence)
+                        )
+                    ),
                 )
             )

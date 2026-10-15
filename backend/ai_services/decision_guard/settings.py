@@ -6,6 +6,8 @@ from dataclasses import dataclass
 class ContextSettings:
     max_entities: int = 80
     max_relationships: int = 160
+    max_neighbors_per_subject: int = 12
+    max_neighbor_chunks: int = 24
     max_decisions: int = 12
     max_constraints: int = 12
     max_chunks: int = 160

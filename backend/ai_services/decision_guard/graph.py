@@ -27,11 +27,41 @@ RETURN f.path AS path, c {CHUNK} AS chunk, collect(DISTINCT e {ENTITY}) AS entit
 ORDER BY path, chunk.id
 """
 
+CODE_INVENTORY = f"""
+MATCH (f:File {{repository: $repo}})-[:HAS_CHUNK]->(c:Chunk {{repository: $repo}})
+WHERE NOT c:ADRChunk AND c.adr_id IS NULL
+WITH DISTINCT f, c ORDER BY f.path, c.id LIMIT $limit
+OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity {{repository: $repo}})
+RETURN f.path AS path, c {CHUNK} AS chunk, collect(DISTINCT e {ENTITY}) AS entities
+ORDER BY path, chunk.id
+"""
+
+CODE_CHUNKS = CODE_INVENTORY.replace(
+    "AND c.adr_id IS NULL", "AND c.adr_id IS NULL AND c.id IN $chunk_ids"
+)
+
+ADR_CHUNKS = f"""
+MATCH (adr:ADR {{repository: $repo}})-[:HAS_CHUNK]->(c:Chunk:ADRChunk {{repository: $repo}})
+WHERE adr.id IN $adr_ids AND c.adr_id = adr.id
+WITH adr, c ORDER BY adr.id, c.id LIMIT $limit
+OPTIONAL MATCH (c)-[:SUPPORTS]->(k {{repository: $repo}})<-[:DEFINES]-(adr)
+WHERE (k:ArchitecturalDecision OR k:ArchitecturalConstraint) AND k.adr_id = adr.id
+RETURN adr {ADR} AS adr,
+ c {{ .id, .repository, .adr_id, .section, .text, .contentHash, .embedding,
+ .embedding_model, .embedding_provider, .embedding_dimensions, .embedding_revision,
+ .embedding_text_hash }} AS chunk,
+ collect(DISTINCT k {{ .id, .repository, .adr_id }}) AS requirements
+ORDER BY adr.id, chunk.id
+"""
+
 RELATIONSHIPS = f"""
 MATCH (s:Entity {{repository: $repo}})-[:ASSERTS]->(a:GraphAssertion {{repository: $repo}})
       -[:TARGETS]->(t:Entity {{repository: $repo}})
 WHERE s.id IN $entity_ids OR t.id IN $entity_ids
-WITH DISTINCT s, a, t ORDER BY a.id LIMIT $limit
+WITH DISTINCT s, a, t ORDER BY
+  CASE WHEN a.source_type = 'ADR' THEN 1 ELSE 0 END,
+  CASE a.relationshipType WHEN 'CALLS' THEN 0 WHEN 'READS_FROM' THEN 1 WHEN 'WRITES_TO' THEN 1 ELSE 2 END,
+  a.id LIMIT $limit
 OPTIONAL MATCH (c:Chunk {{repository: $repo}})-[:SUPPORTS]->(a)
 OPTIONAL MATCH (adr:ADR {{repository: $repo}})-[:HAS_CHUNK]->(c)
 WHERE c:ADRChunk AND c.adr_id = adr.id AND a.source_id = adr.id
@@ -109,6 +139,21 @@ ORDER BY hint_score DESC, knowledge.id
 """
 
 
+ENTITY_CHUNKS = f"""
+MATCH (e:Entity {{repository: $repo}})<-[:MENTIONS]-(c:Chunk {{repository: $repo}})
+WHERE e.id IN $entity_ids AND NOT c:ADRChunk
+WITH c, min(CASE WHEN c.text CONTAINS 'def ' + e.name + '('
+                 OR c.text CONTAINS 'class ' + e.name
+                 OR c.text CONTAINS 'function ' + e.name + '('
+               THEN 0 ELSE 1 END) AS declaration_hint
+ORDER BY declaration_hint, c.filePath, c.id LIMIT $limit
+MATCH (c)-[:MENTIONS]->(e:Entity {{repository: $repo}})
+WHERE e.id IN $entity_ids
+RETURN c.filePath AS path, c {CHUNK} AS chunk, collect(DISTINCT e {ENTITY}) AS entities
+ORDER BY path, chunk.id
+"""
+
+
 class Neo4jArchitectureGraphReader:
     """Read transaction only: no schema creation, ingestion or application models."""
 
@@ -147,6 +192,18 @@ class _ScopedGraph:
 
     def file_chunks(self, paths, limit):
         return self._read(FILE_CHUNKS, limit, paths=list(paths))
+
+    def code_inventory(self, limit):
+        return self._read(CODE_INVENTORY, limit)
+
+    def code_chunks(self, chunk_ids, limit):
+        return self._read(CODE_CHUNKS, limit, chunk_ids=list(chunk_ids))
+
+    def adr_chunks(self, adr_ids, limit):
+        return self._read(ADR_CHUNKS, limit, adr_ids=list(adr_ids))
+
+    def entity_chunks(self, entity_ids, limit):
+        return self._read(ENTITY_CHUNKS, limit, entity_ids=list(entity_ids))
 
     def relationships(self, entity_ids, limit):
         return self._read(

@@ -101,34 +101,56 @@ def text_hunks(before: str, after: str) -> tuple[Hunk, ...]:
     )
 
 
-def symbols(text: str | None, start: int, count: int) -> tuple[str, ...]:
-    if text is None or count == 0:
+def declaration_nodes(text: str | None):
+    """Shared Python declaration parser; other source forms use text fallback."""
+    if text is None:
         return ()
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return ()
+    return tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    )
+
+
+def declaration_window(text: str, start: int, count: int):
+    """Innermost enclosing declaration range, using the existing symbol parser."""
+    ranges = []
+    for node in declaration_nodes(text):
+        first = min(
+            [node.lineno] + [d.lineno for d in getattr(node, "decorator_list", ())]
+        )
+        last = node.end_lineno or node.lineno
+        if first <= start and last >= start + max(1, count) - 1:
+            ranges.append((first, last))
+    return min(ranges, key=lambda r: (r[1] - r[0], r[0])) if ranges else None
+
+
+def symbols(text: str | None, start: int, count: int) -> tuple[str, ...]:
+    if text is None or count == 0:
+        return ()
     names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            first = min(
-                [node.lineno] + [d.lineno for d in getattr(node, "decorator_list", ())]
-            )
-            if first <= start + count - 1 and (node.end_lineno or node.lineno) >= start:
-                names.add(node.name)
-                for decorator in getattr(node, "decorator_list", ()):
-                    if (
-                        isinstance(decorator, ast.Call)
-                        and isinstance(decorator.func, ast.Attribute)
-                        and decorator.func.attr
-                        in {"get", "post", "put", "patch", "delete"}
-                        and decorator.args
-                        and isinstance(decorator.args[0], ast.Constant)
-                        and isinstance(decorator.args[0].value, str)
-                    ):
-                        names.add(
-                            decorator.func.attr.upper() + " " + decorator.args[0].value
-                        )
+    for node in declaration_nodes(text):
+        first = min(
+            [node.lineno] + [d.lineno for d in getattr(node, "decorator_list", ())]
+        )
+        if first <= start + count - 1 and (node.end_lineno or node.lineno) >= start:
+            names.add(node.name)
+            for decorator in getattr(node, "decorator_list", ()):
+                if (
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Attribute)
+                    and decorator.func.attr in {"get", "post", "put", "patch", "delete"}
+                    and decorator.args
+                    and isinstance(decorator.args[0], ast.Constant)
+                    and isinstance(decorator.args[0].value, str)
+                ):
+                    names.add(
+                        decorator.func.attr.upper() + " " + decorator.args[0].value
+                    )
     return tuple(sorted(names))
 
 
@@ -267,6 +289,11 @@ class CachedSource:
                 raise ValueError("Source response text/status mismatch")
             self.cache[key] = blob
         return self.cache[key]
+
+    def read_blob(self, repository_id, sha, path):
+        if repository_id != self.repository_id:
+            raise ValueError("Cached source repository mismatch")
+        return self.read(sha, path)
 
 
 def analyze_delta(

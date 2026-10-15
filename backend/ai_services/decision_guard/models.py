@@ -236,15 +236,29 @@ class ContextCoverage(Contract):
     limitations: tuple[Limitation, ...]
 
 
+class RequestUnitBudget(Contract):
+    """Measured coherent-unit capacity; audit only, never architectural proof."""
+
+    unit_id: Identifier
+    rule_id: Identifier
+    path: str
+    input_tokens: int = Field(ge=0)
+
+
 class ContextBudget(Contract):
     token_limit: int = Field(gt=0)
     estimated_tokens: int = Field(ge=0)
     estimator: str
+    accounting: Literal["FULL_SERIALIZED", "MODEL_PROJECTION"] = "FULL_SERIALIZED"
+    audit_tokens: int = Field(default=0, ge=0)
+    request_input_tokens: int = Field(default=0, ge=0)
+    request_input_limit: int | None = Field(default=None, ge=1)
+    request_omitted_units: tuple[RequestUnitBudget, ...] = ()
 
 
 class ArchitectureContext(Contract):
     schema_version: Literal["4.1"] = "4.1"
-    context_builder_version: Literal["1", "2"] = "2"
+    context_builder_version: Literal["1", "2", "3", "4"] = "4"
     revision: RevisionIdentity
     baseline: BaselineSnapshot
     coverage_mode: Literal["RKG_ONLY", "RKG_ADR", "RKG_ADR_DEGRADED"]
