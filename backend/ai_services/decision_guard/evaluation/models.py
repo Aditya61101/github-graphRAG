@@ -26,6 +26,7 @@ Attribution = Literal[
 
 
 class EvaluationSettings(Contract):
+    token_encoding: Literal["o200k_base"] | None = None
     profile: Literal["DEFAULT", "EXPANDED", "CUSTOM"] = "DEFAULT"
     max_attempts: int = Field(default=8, ge=1)
     max_tokens: int = Field(default=60000, ge=1)

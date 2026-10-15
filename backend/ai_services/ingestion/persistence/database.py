@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from sqlalchemy import create_engine
-from sqlalchemy import inspect
+
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base, PullRequestRevisionModel
@@ -44,21 +44,38 @@ def init_db() -> None:
     engine = get_engine()
     with engine.begin() as conn:
         tables = inspect(conn).get_table_names()
-        if tables and 'app_schema_version' not in tables:
-            raise RuntimeError('SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_app')
-        if 'app_schema_version' in tables:
-            version = conn.exec_driver_sql('SELECT version FROM app_schema_version').scalar()
+        if tables and "app_schema_version" not in tables:
+            raise RuntimeError(
+                "SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_app"
+            )
+        if "app_schema_version" in tables:
+            version = conn.exec_driver_sql(
+                "SELECT version FROM app_schema_version"
+            ).scalar()
             if version == 1:
-                raise RuntimeError('SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_refresh')
+                raise RuntimeError(
+                    "SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_github_refresh"
+                )
             if version == 2:
-                raise RuntimeError('SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_onboarding')
+                raise RuntimeError(
+                    "SQLite upgrade required: run python -m ai_services.ingestion.persistence.migrate_onboarding"
+                )
             if version != 3:
-                raise RuntimeError('Unsupported application database schema version')
-            if 'onboarding_completed_at' not in {c['name'] for c in inspect(conn).get_columns('users')}:
-                raise RuntimeError('Invalid schema v3: users.onboarding_completed_at is missing')
+                raise RuntimeError("Unsupported application database schema version")
+            if "onboarding_completed_at" not in {
+                c["name"] for c in inspect(conn).get_columns("users")
+            }:
+                raise RuntimeError(
+                    "Invalid schema v3: users.onboarding_completed_at is missing"
+                )
             # Additive PR metadata table only; no existing columns are altered.
             PullRequestRevisionModel.__table__.create(conn, checkfirst=True)
         else:
             Base.metadata.create_all(conn)
-            conn.exec_driver_sql('CREATE TABLE app_schema_version (version INTEGER NOT NULL)')
-            conn.exec_driver_sql('INSERT INTO app_schema_version VALUES (3)')
+            conn.exec_driver_sql(
+                "CREATE TABLE app_schema_version (version INTEGER NOT NULL)"
+            )
+            conn.exec_driver_sql("INSERT INTO app_schema_version VALUES (3)")
+        from .migrate_pr_orchestration import upgrade
+
+        upgrade(conn)

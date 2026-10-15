@@ -1,6 +1,9 @@
-from contextlib import asynccontextmanager
 import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager, suppress
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import AzureChatOpenAI
@@ -8,27 +11,12 @@ from neo4j import GraphDatabase
 from openai import AsyncAzureOpenAI
 from starlette.middleware.sessions import SessionMiddleware
 
-import os
-
-from api_services.app.routers.auth import router as auth_router, GitHubOAuth
-from ai_services.github_app.settings import GitHubAppSettings
-from ai_services.github_app.service import GitHubAppService
-import httpx
-from api_services.app.routers.query import router as query_router
-from api_services.app.routers.health import router as health_router
-from api_services.app.routers.webhook import router as webhook_router
-from api_services.app.routers.repositories import router as repositories_router
-
-from api_services.app.config import (
-    ADRS_STORAGE_DIR,
-    FRONTEND_URL,
-    MAX_ADR_FILE_SIZE_BYTES,
-    MAX_ADR_FILES_PER_UPLOAD,
-    REPOS_STORAGE_DIR,
-    RETRIEVAL_SETTINGS,
-)
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from ai_services.github_app.service import GitHubAppService
+from ai_services.github_app.settings import GitHubAppSettings
+from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
+from ai_services.graph.knowledge import RepositoryKnowledgeService
 from ai_services.ingestion.adr.chunker import ADRChunker
 from ai_services.ingestion.adr.extractor import ADRArchitecturalExtractor
 from ai_services.ingestion.adr.neo4j_writer import ADRNeo4jWriter
@@ -38,14 +26,27 @@ from ai_services.ingestion.adr.service import ADRService
 from ai_services.ingestion.persistence.sqlite_store import (
     SqliteApplicationStore,
 )
-from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.pr.service import PullRequestIngestionService
+from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
-from api_services.app.models.app_dependencies import AppDependencies
-from ai_services.retrievers.retriever_factory import create_retrievers
 from ai_services.retrievers.reranker import Qwen3Reranker
-from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
-from ai_services.graph.knowledge import RepositoryKnowledgeService
+from ai_services.retrievers.retriever_factory import create_retrievers
+from api_services.app.config import (
+    ADRS_STORAGE_DIR,
+    FRONTEND_URL,
+    MAX_ADR_FILE_SIZE_BYTES,
+    MAX_ADR_FILES_PER_UPLOAD,
+    REPOS_STORAGE_DIR,
+    RETRIEVAL_SETTINGS,
+)
+from api_services.app.models.app_dependencies import AppDependencies
+from api_services.app.routers.auth import GitHubOAuth
+from api_services.app.routers.auth import router as auth_router
+from api_services.app.routers.evaluations import router as evaluations_router
+from api_services.app.routers.health import router as health_router
+from api_services.app.routers.query import router as query_router
+from api_services.app.routers.repositories import router as repositories_router
+from api_services.app.routers.webhook import router as webhook_router
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
 
@@ -118,9 +119,12 @@ async def lifespan(app: FastAPI):
     if groq_api_key:
         try:
             from groq import Groq
+
             groq_client = Groq(api_key=groq_api_key)
-        except Exception:
-            pass
+        except Exception as error:  # noqa: BLE001 -- optional planner falls back to the existing classifier
+            logging.getLogger(__name__).debug(
+                "Optional Groq planner unavailable error_type=%s", type(error).__name__
+            )
 
     ingestion_service = RepositoryIngestionService(
         repository_source=repo_source,
@@ -134,8 +138,11 @@ async def lifespan(app: FastAPI):
     )
     sqlite_store.recover_interrupted_pr_revisions()
     pr_ingestion_service = PullRequestIngestionService(
-        repository_source=repo_source, metadata_store=sqlite_store, github_app=github_app,
-        repository_lock=ingestion_service._get_lock, state_dir=ingestion_service.state_dir,
+        repository_source=repo_source,
+        metadata_store=sqlite_store,
+        github_app=github_app,
+        repository_lock=ingestion_service._get_lock,
+        state_dir=ingestion_service.state_dir,
     )
     app.state.pr_ingestion_service = pr_ingestion_service
 
@@ -153,7 +160,9 @@ async def lifespan(app: FastAPI):
         chunker=ADRChunker(),
         extractor=ADRArchitecturalExtractor(
             llm=llm,
-            document_context_max_chars=int(os.getenv("ADR_DOCUMENT_CONTEXT_MAX_CHARS", "6000")),
+            document_context_max_chars=int(
+                os.getenv("ADR_DOCUMENT_CONTEXT_MAX_CHARS", "6000")
+            ),
         ),
         resolver=ADREntityResolver(
             driver=driver,
@@ -175,8 +184,11 @@ async def lifespan(app: FastAPI):
     )
 
     graph_repo = Neo4jGraphRepository(driver=driver, database=database or "neo4j")
-    graph_service = RepositoryGraphService(sqlite_store=sqlite_store, graph_repo=graph_repo,
-                                           read_authorizer=github_app.authorize_repository_read)
+    graph_service = RepositoryGraphService(
+        sqlite_store=sqlite_store,
+        graph_repo=graph_repo,
+        read_authorizer=github_app.authorize_repository_read,
+    )
 
     app.state.sqlite_store = sqlite_store
     app.state.ingestion_service = ingestion_service
@@ -202,6 +214,25 @@ async def lifespan(app: FastAPI):
         graph_service=graph_service,
     )
 
+    from ai_services.decision_guard.evaluation.models import EvaluationSettings
+    from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator
+    from ai_services.decision_guard.orchestration.runtime import production_runtime
+    from ai_services.decision_guard.orchestration.store import EvaluationStore
+    from ai_services.decision_guard.orchestration.worker import EvaluationWorker
+
+    evaluation_store = EvaluationStore(sqlite_store.session_factory)
+    runtime = production_runtime(
+        app, deployment_revision=os.getenv("PR_EVALUATION_DEPLOYMENT_REVISION", "")
+    )
+    evaluation_worker = EvaluationWorker(evaluation_store, runtime)
+    app.state.evaluation_orchestrator = EvaluationOrchestrator(
+        evaluation_store,
+        evaluation_worker,
+        settings=EvaluationSettings.model_validate_json(
+            os.getenv("PR_EVALUATION_SETTINGS", "{}")
+        ),
+    )
+
     # Create the conversational agent once. Creating it inside the request
     # handler would create a new InMemorySaver and lose conversation history.
     app.state.rag_agent = RAGQueryAgent(
@@ -216,9 +247,16 @@ async def lifespan(app: FastAPI):
         retrieval_settings=RETRIEVAL_SETTINGS,
     )
 
+    recovery_task = asyncio.create_task(
+        app.state.evaluation_orchestrator.recover_forever()
+    )
     try:
         yield
     finally:
+        recovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await recovery_task
+        await app.state.evaluation_orchestrator.close()
         driver.close()
         await github_client.aclose()
 
@@ -249,4 +287,5 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(query_router, prefix="/query")
 app.include_router(health_router, prefix="/health")
 app.include_router(webhook_router, prefix="/webhooks")
+app.include_router(evaluations_router, prefix="/repositories")
 app.include_router(repositories_router, prefix="/repositories")

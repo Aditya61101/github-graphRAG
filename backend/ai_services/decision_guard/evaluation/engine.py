@@ -518,6 +518,35 @@ class _Runner(RequestBudget):
             if phase == "ASSESS"
             else {c.proposal_id for c in request.candidates}
         )
+        # Optional durable transport cache. Exact requests still pass the same
+        # manifest and downstream source/proof validation on every replay.
+        cache = getattr(self.model, "cached_reply", None)
+        cached = await cache(request, phase) if cache else None
+        if cached is not None:
+            output = schema.model_validate_json(cached.output_json or "")
+            items = output.units if phase == "ASSESS" else output.decisions
+            ids = [v.unit_id if phase == "ASSESS" else v.proposal_id for v in items]
+            if phase == "CHALLENGE":
+                ids.extend(r.subject_id for r in output.rejections)
+            if (
+                output.batch_id != request.batch_id
+                or set(ids) != expected
+                or len(ids) != len(expected)
+            ):
+                raise ValueError("Cached response manifest mismatch")
+            self.records.append(
+                CallRecord(
+                    batch_id=request.batch_id,
+                    phase=phase,
+                    status="REUSED",
+                    input_tokens=0,
+                    output_tokens=0,
+                    unreported_reserved_tokens=0,
+                    elapsed_ms=0,
+                    request_id=cached.request_id,
+                )
+            )
+            return output, "OK"
         for retry in range(self.settings.retries + 1):
             async with self.semaphore:
                 input_reserve = self.count(request, phase)
