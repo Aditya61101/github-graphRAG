@@ -95,11 +95,11 @@ class GitHubAppService:
             raise GitHubAppError(502, 'Invalid GitHub response shape')
         return result
 
-    async def pages(self, path: str, token: str, field: str | None = None) -> list[dict]:
+    async def pages(self, path: str, token: str, field: str | None = None, *, params: dict | None = None) -> list[dict]:
         output = []
         page = 1
         while True:
-            result = await self.request('GET', path, token, params={'per_page': 100, 'page': page})
+            result = await self.request('GET', path, token, params={**(params or {}), 'per_page': 100, 'page': page})
             values = result.get(field) if field and isinstance(result, dict) else result
             if not isinstance(values, list) or any(not isinstance(item, dict) for item in values):
                 raise GitHubAppError(502, 'Invalid GitHub list response')

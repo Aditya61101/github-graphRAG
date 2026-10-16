@@ -14,7 +14,7 @@ from ai_services.graph.repository import GraphRepositoryError
 from api_services.app.models.knowledge import KnowledgePage, KnowledgeDetail
 from api_services.app.models.overview import (
     Availability, OverviewKPIs, OverviewMetric, OverviewPermissions,
-    OverviewSection, RepositoryOverviewResponse, ReviewActivity,
+    OverviewSection, RepositoryOverviewResponse, ReviewActivity, DecisionsAttention,
 )
 from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
@@ -164,19 +164,29 @@ async def get_repository_overview(repo_id: str, request: Request,
             if exc.status_code not in (403, 503):
                 raise HTTPException(exc.status_code, str(exc)) from None
     unavailable = Availability(status='unavailable', reason='engine_not_implemented')
+    evaluation_service = getattr(request.app.state, 'evaluation_orchestrator', None)
+    metrics = None
+    if evaluation_service is not None:
+        from ai_services.decision_guard.orchestration.projections import RepositoryReadModel
+
+        metrics = RepositoryReadModel(evaluation_service.store).overview(repo.id)
+    available = Availability(status='available') if metrics is not None else unavailable
+    def evaluation_metric(key):
+        return OverviewMetric(availability=available, value=metrics[key] if metrics is not None else None)
     return RepositoryOverviewResponse(
         repository=RepositoryResponse(**repo.to_dict()),
         permissions=OverviewPermissions(can_view_settings=can_view_settings,
                                         can_manage_source_documents=repo.user_id == current_user.id),
         kpis=OverviewKPIs(
             architecture_decisions=decision_metric,
-            decisions_at_risk=OverviewMetric(availability=unavailable),
-            prs_analyzed=OverviewMetric(availability=unavailable),
-            architectural_warnings=OverviewMetric(availability=unavailable),
+            decisions_at_risk=evaluation_metric('decisions_at_risk'),
+            prs_analyzed=evaluation_metric('prs_analyzed'),
+            architectural_warnings=evaluation_metric('architectural_warnings'),
         ),
-        review_activity=ReviewActivity(availability=unavailable),
-        decisions_needing_attention=OverviewSection(availability=unavailable),
-        recent_pr_reviews=OverviewSection(availability=unavailable),
+        review_activity=ReviewActivity(availability=available, items=[r for r in (metrics or {}).get('recent', []) if r['evaluated_at'] >= evaluation_service.store.clock() - 7 * 86400]),
+        decisions_needing_attention=DecisionsAttention(availability=available, items=(metrics or {}).get('attention', []), total=(metrics or {}).get('attention_total', 0)),
+        recent_pr_reviews=OverviewSection(availability=available, items=(metrics or {}).get('recent', [])),
+        risk_breakdown={k: (metrics or {}).get(k, 0) for k in ('confirmed_decisions', 'potential_decisions', 'unmapped_requirements', 'confirmed_warnings', 'potential_warnings', 'uncertain_units')},
     )
 
 

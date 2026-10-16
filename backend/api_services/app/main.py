@@ -225,9 +225,18 @@ async def lifespan(app: FastAPI):
         app, deployment_revision=os.getenv("PR_EVALUATION_DEPLOYMENT_REVISION", "")
     )
     evaluation_worker = EvaluationWorker(evaluation_store, runtime)
+    from ai_services.decision_guard.orchestration.checks import CheckPublisher
+
     app.state.evaluation_orchestrator = EvaluationOrchestrator(
         evaluation_store,
         evaluation_worker,
+        lifecycle_github=github_app,
+        publisher=CheckPublisher(
+            evaluation_store,
+            github_app,
+            enabled=os.getenv("GITHUB_CHECKS_ENABLED", "false").lower() == "true",
+            details_base=os.getenv("GITHUB_CHECKS_DETAILS_BASE") or None,
+        ),
         settings=EvaluationSettings.model_validate_json(
             os.getenv("PR_EVALUATION_SETTINGS", "{}")
         ),

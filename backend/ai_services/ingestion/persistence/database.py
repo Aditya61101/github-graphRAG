@@ -79,3 +79,6 @@ def init_db() -> None:
         from .migrate_pr_orchestration import upgrade
 
         upgrade(conn)
+        from .migrate_frontend_checks import upgrade as upgrade_frontend_checks
+
+        upgrade_frontend_checks(conn)

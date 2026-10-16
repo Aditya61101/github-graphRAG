@@ -66,15 +66,6 @@ async def _verified_payload(request, signature):
         raise HTTPException(400, "Malformed webhook JSON object") from None
 
 
-def _is_merged_pr(payload):
-    pr = payload.get("pull_request")
-    return (
-        payload.get("action") == "closed"
-        and isinstance(pr, dict)
-        and pr.get("merged") is True
-    )
-
-
 def _parse_pr_event(payload, delivery_id):
     try:
         return PullRequestEvent.from_webhook(payload, delivery_id)
@@ -206,23 +197,6 @@ def _queue_push(request, background_tasks, payload, tracked):
     )
 
 
-async def _acknowledge_merged_pr(
-    request, app_service, payload, tracked, installation_id
-):
-    service = getattr(request.app.state, "ingestion_service", None)
-    if service is None:
-        raise HTTPException(503, "Repository ingestion service is not initialized")
-    await app_service.indexing_credential(tracked.id, installation_id)
-    result = await service.handle_github_pull_request_webhook(payload)
-    return {
-        "status": result.status,
-        "event": "pull_request",
-        "repository": result.repository,
-        "message": result.message,
-        "indexed_commit_sha": result.indexed_commit_sha,
-    }
-
-
 @router.post("")
 @router.post("/github")
 async def github_webhook(
@@ -241,7 +215,7 @@ async def github_webhook(
     if event == "pull_request":
         if payload.get("action") in PR_INGESTION_ACTIONS:
             normalized_pr = _parse_pr_event(payload, x_github_delivery)
-        elif not _is_merged_pr(payload):
+        elif payload.get("action") != "closed":
             return {"status": "ignored", "event": event}
 
     app_service = get_github_app(request)
@@ -260,12 +234,49 @@ async def github_webhook(
         if tracked is None:
             return {"status": "ignored", "event": event}
         if normalized_pr is not None:
+            # Metadata is synchronized from GitHub, never from arrival order.
+            from ai_services.decision_guard.orchestration.projections import (
+                request_sync,
+                synchronize,
+            )
+
+            orchestrator = getattr(request.app.state, "evaluation_orchestrator", None)
+            if orchestrator is not None:
+                request_sync(
+                    orchestrator.store, tracked.id, normalized_pr.pull_request_number
+                )
+                try:
+                    await synchronize(
+                        orchestrator.store,
+                        app_service,
+                        tracked.id,
+                        normalized_pr.pull_request_number,
+                    )
+                except GitHubAppError:
+                    pass  # both metadata and evaluation now have durable recovery
             return await _queue_pr(request, background_tasks, normalized_pr, tracked)
         if event == "push":
             return _queue_push(request, background_tasks, payload, tracked)
-        # Only merged PRs reach this point; accepted RKG updates remain push-driven.
-        return await _acknowledge_merged_pr(
-            request, app_service, payload, tracked, installation_id
+        from ai_services.decision_guard.orchestration.projections import (
+            request_sync,
+            synchronize,
         )
+
+        orchestrator = getattr(request.app.state, "evaluation_orchestrator", None)
+        if orchestrator is None:
+            raise HTTPException(503, "PR evaluation orchestration is not initialized")
+        pr = payload.get("pull_request") or {}
+        number = pr.get("number")
+        if type(number) is not int or number <= 0:
+            raise HTTPException(400, "Pull request number is required")
+        request_sync(orchestrator.store, tracked.id, number)
+        try:
+            await synchronize(orchestrator.store, app_service, tracked.id, number)
+        except GitHubAppError:
+            return JSONResponse(
+                status_code=202,
+                content={"status": "metadata_sync_queued", "event": event},
+            )
+        return {"status": "synchronized", "event": event}
     except GitHubAppError as exc:
         raise HTTPException(exc.status_code, str(exc)) from None

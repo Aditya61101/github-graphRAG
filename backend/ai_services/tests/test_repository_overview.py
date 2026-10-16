@@ -116,7 +116,7 @@ def test_engine_metrics_and_sections_are_explicitly_unavailable(overview_env):
         assert result['kpis'][name] == {'value': None, 'availability': unavailable}
     for name in ['review_activity', 'decisions_needing_attention', 'recent_pr_reviews']:
         assert result[name]['availability'] == unavailable
-        assert 'items' not in result[name]
+        assert result[name]['items'] == []
     assert result['review_activity']['window_days'] == 7
 
 

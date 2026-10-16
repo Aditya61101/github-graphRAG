@@ -11,6 +11,8 @@ from ai_services.decision_guard.evaluation.models import (
     EvaluationResult,
     EvaluationSettings,
 )
+from ai_services.decision_guard.orchestration.projections import RepositoryReadModel
+from api_services.app.models.pull_requests import PullRequestDetail, PullRequestPage
 from api_services.app.utils.github_app_access import authorize_repository_read
 from api_services.app.utils.jwt_utils import get_current_user
 
@@ -36,25 +38,28 @@ def owned(service, repository_id, job_id):
 
 def summary(job):
     return {
-        key: getattr(job, key)
-        for key in (
-            "id",
-            "repository_id",
-            "pr_number",
-            "revision_key",
-            "base_sha",
-            "head_sha",
-            "status",
-            "stage",
-            "attempts",
-            "max_attempts",
-            "lease_until",
-            "next_attempt_at",
-            "created_at",
-            "updated_at",
-            "error_code",
-            "error_message",
-        )
+        "deferred": json.loads(job.deferred_json),
+        **{
+            key: getattr(job, key)
+            for key in (
+                "id",
+                "repository_id",
+                "pr_number",
+                "revision_key",
+                "base_sha",
+                "head_sha",
+                "status",
+                "stage",
+                "attempts",
+                "max_attempts",
+                "lease_until",
+                "next_attempt_at",
+                "created_at",
+                "updated_at",
+                "error_code",
+                "error_message",
+            )
+        },
     }
 
 
@@ -87,72 +92,39 @@ async def job_status(repository_id: str, job_id: str, service=Depends(authorized
     return summary(owned(service, repository_id, job_id))
 
 
-@router.get("/{repository_id}/evaluations/{job_id}/result")
+@router.get(
+    "/{repository_id}/evaluations/{job_id}/result", response_model=EvaluationResult
+)
 async def job_result(repository_id: str, job_id: str, service=Depends(authorized)):
-    return result_for(owned(service, repository_id, job_id)).model_dump(mode="json")
+    return result_for(owned(service, repository_id, job_id))
 
 
-@router.get("/{repository_id}/evaluations/{job_id}/findings")
-async def findings(repository_id: str, job_id: str, service=Depends(authorized)):
-    result = result_for(owned(service, repository_id, job_id))
-    return {
-        "outcome": result.outcome,
-        "findings": result.model_dump(mode="json")["findings"],
-        "rejected_findings": result.model_dump(mode="json")["rejected_findings"],
-    }
+@router.get("/{repository_id}/pull-requests", response_model=PullRequestPage)
+async def pull_requests(
+    repository_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    service=Depends(authorized),
+):
+    return RepositoryReadModel(service.store).list_prs(repository_id, limit, offset)
 
 
-@router.get("/{repository_id}/evaluations/{job_id}/coverage")
-async def coverage(repository_id: str, job_id: str, service=Depends(authorized)):
-    job = owned(service, repository_id, job_id)
-    result = result_for(job).model_dump(mode="json")
-    return {
-        **{
-            key: result[key]
-            for key in ("outcome", "execution", "coverage", "units", "limitations")
-        },
-        "deferred": json.loads(job.deferred_json),
-    }
-
-
-@router.get("/{repository_id}/evaluations/{job_id}/diagnostics")
-async def diagnostics(repository_id: str, job_id: str, service=Depends(authorized)):
-    job = owned(service, repository_id, job_id)
-    data = service.store.diagnostics(job_id)
-    # A stored pointer describes the last observed head. Consumers receive a
-    # fresh GitHub check as well; an unknown remote state never means current.
-    data["is_current"] = False
-    if data["is_current_observed_result"]:
-        from ai_services.github_app.service import GitHubAppError
-        from ai_services.ingestion.pr.models import PullRequestEvent
-
-        try:
-            current = await service.worker.runtime.current_event(
-                PullRequestEvent.model_validate_json(job.event_json)
-            )
-            data["is_current"] = (
-                current is not None and current.revision_key == job.revision_key
-            )
-            data["freshness"] = "VERIFIED" if data["is_current"] else "STALE"
-        except (GitHubAppError, ValueError):
-            data["freshness"] = "UNKNOWN"
-    if job.result_json:
-        result = result_for(job).model_dump(mode="json")
-        data.update(
-            {
-                key: result[key]
-                for key in (
-                    "calls",
-                    "input_tokens",
-                    "output_tokens",
-                    "reserved_unreported_tokens",
-                    "elapsed_ms",
-                    "estimated_cost",
-                    "deployment_revision",
-                )
-            }
-        )
-    return data
+@router.get(
+    "/{repository_id}/pull-requests/{pr_number}", response_model=PullRequestDetail
+)
+async def pull_request_detail(
+    repository_id: str,
+    pr_number: int,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    service=Depends(authorized),
+):
+    detail = RepositoryReadModel(service.store).detail(
+        repository_id, pr_number, limit, offset
+    )
+    if detail is None:
+        raise HTTPException(404, "Pull request not found")
+    return detail
 
 
 class ContinuationRequest(BaseModel):

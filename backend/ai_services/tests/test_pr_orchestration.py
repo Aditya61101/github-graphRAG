@@ -158,6 +158,9 @@ def env(tmp_path):
         store=app_store,
         settings=SimpleNamespace(webhook_secret="test-secret"),
         authorize_tracked=AsyncMock(return_value=app_store.get_repository(REPO)),
+        indexing_credential=AsyncMock(),
+        installation_token=AsyncMock(return_value=SimpleNamespace(token="offline")),
+        request=AsyncMock(return_value={**payload(pr)["pull_request"], "state": "open", "updated_at": "2026-10-16T01:00:00Z"}),
     )
     headers = {"Authorization": "Bearer " + create_access_token({"sub": "owner"})}
     yield SimpleNamespace(
@@ -213,13 +216,10 @@ def test_verified_webhook_real_stages_confirmed_findings_and_serialization(env, 
         assert client.get(
             base + "/result", headers=env.headers
         ).json() == result.model_dump(mode="json")
-        assert client.get(base + "/findings", headers=env.headers).json()["findings"]
-        assert (
-            client.get(base + "/coverage", headers=env.headers).json()["coverage"]
-            == result.coverage.model_dump()
-        )
-        diag = client.get(base + "/diagnostics", headers=env.headers).json()
-        assert diag["is_current"] and diag["provider_attempts"] == 2
+        for removed in ("findings", "coverage", "diagnostics"):
+            assert client.get(base + "/" + removed, headers=env.headers).status_code == 404
+        diag = env.store.diagnostics(job_id)
+        assert diag["is_current_observed_result"] and diag["provider_attempts"] == 2
         assert (
             len(
                 client.get(
@@ -448,7 +448,7 @@ def test_evaluation_api_auth_and_job_repository_binding(env):
     job_id = env.store.enqueue(REPO, env.event, env.settings)
     base = f"/repositories/{REPO}/evaluations/{job_id}"
     with TestClient(env.app) as client:
-        for suffix in ("", "/result", "/findings", "/coverage", "/diagnostics"):
+        for suffix in ("", "/result"):
             assert client.get(base + suffix).status_code == 401
         assert client.get(base + "/result", headers=env.headers).status_code == 409
         with env.sessions.begin() as session:
@@ -705,17 +705,17 @@ def test_migration_rollback_is_transactional_on_existing_app(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_result_api_diagnostics_rejects_unobserved_head_change(env):
+async def test_diagnostics_removed_from_frontend_surface(env):
     job_id = env.store.enqueue(REPO, env.event, env.settings)
     await env.worker.run_job(job_id)
     env.runtime.event = env.event.model_copy(update={"head_sha": "d" * 40})
     with TestClient(env.app) as client:
-        diag = client.get(
+        response = client.get(
             f"/repositories/{REPO}/evaluations/{job_id}/diagnostics",
             headers=env.headers,
-        ).json()
-        assert diag["is_current_observed_result"] is True
-        assert diag["is_current"] is False and diag["freshness"] == "STALE"
+        )
+        assert response.status_code == 404
+        assert env.store.diagnostics(job_id)["is_current_observed_result"] is True
 
 
 @pytest.mark.asyncio

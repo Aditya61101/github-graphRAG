@@ -116,20 +116,14 @@ class ProductionRuntime:
             or repo.full_name.lower() != event.repository_full_name.lower()
         ):
             raise ValueError("Repository installation binding changed")
-        await self.github_app.indexing_credential(repo.id, repo.installation_id)
-        credential = await self.github_app.installation_token(
-            repo.installation_id,
-            (repo.github_repository_id,),
-            permissions={
-                "contents": "read",
-                "metadata": "read",
-                "pull_requests": "read",
-            },
-        )
-        pr = await self.github_app.request(
-            "GET",
-            f"/repos/{repo.full_name}/pulls/{event.pull_request_number}",
-            credential.token,
+        from .projections import synchronize
+        from .store import EvaluationStore
+
+        pr = await synchronize(
+            EvaluationStore(self.application_store.session_factory),
+            self.github_app,
+            repo.id,
+            event.pull_request_number,
         )
         if pr.get("state") != "open":
             return None

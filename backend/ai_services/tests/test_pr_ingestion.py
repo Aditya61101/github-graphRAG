@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ai_services.ingestion.persistence.models import Base, RepositoryModel
+from ai_services.decision_guard.orchestration.store import EvaluationStore
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
 from ai_services.ingestion.pr.git_reader import PullRequestGitReader
 from ai_services.ingestion.pr.models import (
@@ -675,10 +676,13 @@ def webhook_app(repository, store):
         store=store,
         settings=SimpleNamespace(webhook_secret="test-secret"),
         indexing_credential=AsyncMock(),
+        installation_token=AsyncMock(return_value=SimpleNamespace(token="offline")),
+        request=AsyncMock(return_value={**payload(repository.event)["pull_request"], "state": "open", "updated_at": "2026-10-16T01:00:00Z"}),
     )
     app.state.pr_ingestion_service = SimpleNamespace(ingest_pull_request=AsyncMock())
     app.state.evaluation_orchestrator = SimpleNamespace(
-        accept=AsyncMock(return_value="job-42")
+        accept=AsyncMock(return_value="job-42"),
+        store=EvaluationStore(store.session_factory),
     )
     app.state.ingestion_service = SimpleNamespace(
         handle_github_pull_request_webhook=AsyncMock(
@@ -721,7 +725,7 @@ def test_supported_webhook_dispatches_normalized_event_without_user_auth_or_rkg(
     event = args[1]
     assert event.delivery_id == "delivery-42" and event.source_event == action
     assert event.head_sha == repository.head
-    webhook_app.state.github_app.indexing_credential.assert_not_awaited()  # execution-time service validates
+    webhook_app.state.github_app.indexing_credential.assert_awaited()  # metadata synchronization
     webhook_app.state.ingestion_service.handle_github_pull_request_webhook.assert_not_awaited()
 
 
@@ -732,7 +736,8 @@ def test_unsupported_actions_and_merged_ack_preserved(webhook_app, repository):
     data["action"] = "closed"
     data["pull_request"]["merged"] = True
     assert send(webhook_app, data).status_code == 200
-    webhook_app.state.ingestion_service.handle_github_pull_request_webhook.assert_awaited_once()
+    webhook_app.state.ingestion_service.handle_github_pull_request_webhook.assert_not_awaited()
+    webhook_app.state.evaluation_orchestrator.accept.assert_not_awaited()
     webhook_app.state.pr_ingestion_service.ingest_pull_request.assert_not_awaited()
 
 

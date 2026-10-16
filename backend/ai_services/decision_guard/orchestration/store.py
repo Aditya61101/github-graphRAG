@@ -14,6 +14,7 @@ from ai_services.decision_guard.evaluation.models import (
 )
 from ai_services.ingestion.persistence.models import RepositoryModel
 
+from . import read_models
 from .models import (
     DispatchIntent,
     EvaluationAttempt,
@@ -94,6 +95,24 @@ class EvaluationStore:
                 )
                 session.add(job)
                 session.flush()
+            elif job.status == "SUPERSEDED" and observed_by is None:
+                current = session.get(
+                    read_models.PullRequestState,
+                    (repository_id, event.pull_request_number),
+                )
+                if (
+                    current
+                    and current.state == "open"
+                    and current.freshness == "OBSERVED"
+                    and (current.base_sha, current.head_sha)
+                    == (event.base_sha, event.head_sha)
+                ):
+                    # Only one of the existing signed analysis actions can revive
+                    # this revision. Lifecycle synchronization never queues AI.
+                    job.status, job.next_attempt_at = "QUEUED", now
+                    job.max_attempts = max(job.max_attempts, job.attempts + 1)
+                    if not (job.result_json and job.stage == "EVALUATED"):
+                        job.settings_json = settings.model_dump_json()
             head = session.get(
                 PullRequestEvaluationHead, (repository_id, event.pull_request_number)
             )
@@ -125,6 +144,28 @@ class EvaluationStore:
                         delivery_id=event.delivery_id, job_id=job.id, received_at=now
                     )
                 )
+            if job.result_json and job.stage == "EVALUATED":
+                current = session.get(
+                    read_models.PullRequestState,
+                    (repository_id, event.pull_request_number),
+                )
+                if (
+                    current
+                    and current.state == "open"
+                    and current.freshness == "OBSERVED"
+                    and (current.base_sha, current.head_sha)
+                    == (event.base_sha, event.head_sha)
+                ):
+                    from .projections import queue_publication
+
+                    queue_publication(
+                        session,
+                        job,
+                        now,
+                        EvaluationResult.model_validate_json(
+                            job.result_json
+                        ).evaluation_id,
+                    )
             if (
                 job.status in {"QUEUED", "RETRY"}
                 and session.get(DispatchIntent, job.id) is None
@@ -347,6 +388,9 @@ class EvaluationStore:
             )
             if status != "SUPERSEDED":
                 head.current_result_job_id = job_id
+            from .projections import project
+
+            project(session, job, result, now)
             intent = session.get(DispatchIntent, job_id)
             if intent:
                 session.delete(intent)
@@ -368,6 +412,19 @@ class EvaluationStore:
                 or "Execution failed; inspect stage and error_code, resolve the dependency, then retry."
             )
             job.next_attempt_at = now + min(300, 2**job.attempts)
+            if job.result_json and job.stage == "EVALUATED":
+                from .projections import project
+
+                project(
+                    session,
+                    job,
+                    EvaluationResult.model_validate_json(job.result_json),
+                    now,
+                )
+            if status == "FAILED" and not job.result_json:
+                from .projections import queue_publication
+
+                queue_publication(session, job, now)
             session.execute(
                 update(EvaluationAttempt)
                 .where(EvaluationAttempt.token == token)
@@ -443,6 +500,9 @@ class EvaluationStore:
             )
         )
         if changed.rowcount:
+            from .projections import queue_publication
+
+            queue_publication(session, job, now)
             session.execute(
                 update(EvaluationAttempt)
                 .where(

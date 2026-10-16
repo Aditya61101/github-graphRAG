@@ -76,8 +76,13 @@ async def test_real_production_worker_pinned_git_checkout_and_live_pr_normalizat
                 status="COMPLETED",
             )
         )
-    pr = {**payload(event)["pull_request"], "state": "open"}
+    pr = {
+        **payload(event)["pull_request"],
+        "state": "open",
+        "updated_at": "2026-10-16T01:00:00Z",
+    }
     github = SimpleNamespace(
+        store=application,
         indexing_credential=AsyncMock(return_value=repository.credential),
         installation_token=AsyncMock(return_value=repository.credential),
         request=AsyncMock(return_value=pr),
@@ -207,7 +212,11 @@ async def test_production_pr_metadata_uses_scoped_installation_permissions_and_r
             if k in PullRequestEvent.model_fields
         }
     ).model_copy(update={"repository_full_name": "owner/repo101"})
-    response = {**payload(event)["pull_request"], "state": "open"}
+    response = {
+        **payload(event)["pull_request"],
+        "state": "open",
+        "updated_at": "2026-10-16T01:00:00Z",
+    }
     original = env.service.request
 
     async def request(method, path, token, **kwargs):

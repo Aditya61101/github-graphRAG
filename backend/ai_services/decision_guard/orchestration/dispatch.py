@@ -113,8 +113,19 @@ class CloudTasksDispatcher:
 
 
 class EvaluationOrchestrator:
-    def __init__(self, store, worker, *, settings=None, dispatcher=None):
+    def __init__(
+        self,
+        store,
+        worker,
+        *,
+        settings=None,
+        dispatcher=None,
+        publisher=None,
+        lifecycle_github=None,
+    ):
         self.store, self.worker = store, worker
+        self.publisher = publisher
+        self.lifecycle_github = lifecycle_github
         self.settings = settings or EvaluationSettings()
         self.tasks = {}
         self.dispatcher = dispatcher or LocalDispatcher(worker, tasks=self.tasks)
@@ -141,6 +152,24 @@ class EvaluationOrchestrator:
             )
 
     async def reconcile(self):
+        if self.lifecycle_github is not None:
+            from .projections import synchronize_due
+
+            try:
+                await synchronize_due(self.store, self.lifecycle_github)
+            except Exception as error:  # noqa: BLE001 -- independently recover lifecycle and evaluation
+                logger.warning(
+                    "PR metadata recovery unavailable error_type=%s",
+                    type(error).__name__,
+                )
+        if self.publisher is not None:
+            try:
+                await self.publisher.reconcile()
+            except Exception as error:  # noqa: BLE001 -- delivery must not block evaluation dispatch
+                logger.warning(
+                    "Check publication recovery unavailable error_type=%s",
+                    type(error).__name__,
+                )
         for job_id in self.store.due():
             try:
                 await self.dispatcher.dispatch(job_id)
