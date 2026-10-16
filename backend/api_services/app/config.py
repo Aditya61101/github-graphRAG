@@ -1,6 +1,8 @@
-from dotenv import load_dotenv
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+from shared.utils.processing import background_processing_enabled
 
 load_dotenv()
 from ai_services.retrievers.settings import RetrievalSettings
@@ -28,3 +30,6 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{(Path(__file__).resolve().parents[2] / 'data' / 'decisionguard.db').as_posix()}",
 )
+
+
+ENABLE_BACKGROUND_PROCESSING = background_processing_enabled()

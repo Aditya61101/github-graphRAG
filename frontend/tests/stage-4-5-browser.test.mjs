@@ -196,6 +196,11 @@ async function visit(path) {
   await browser.navigate(base + path);
 }
 async function link(text) {
+  // A title may already be visible in Overview while the PR list is loading.
+  // Wait for the actual navigation target before exercising it.
+  await browser.waitFor(
+    `Array.from(document.querySelectorAll('a')).some(a => a.textContent.includes(${JSON.stringify(text)}))`
+  );
   await browser.evaluate(
     `Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes(${JSON.stringify(text)})).click()`
   );

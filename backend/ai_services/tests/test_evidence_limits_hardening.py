@@ -346,6 +346,12 @@ async def test_preserved_call_09_production_replay():
     - 2 assessed units, 0 uncertain units.
     - EvaluationResult schema round-trip passes with 0 validation errors.
     """
+    required = [
+        'A_unified_v7_certified_offline_context.json', 'call_08.request.json',
+        'call_08.reply.json', 'call_08.provider.json', 'call_09.provider.json', 'manifest.json',
+    ]
+    if not all((STAGE_4_2_ROOT / name).is_file() for name in required):
+        pytest.skip('Requires preserved Stage 4.2 replay artifacts; no production data is fetched')
     ctx = ArchitectureContext.model_validate_json(
         (STAGE_4_2_ROOT / "A_unified_v7_certified_offline_context.json").read_text()
     )

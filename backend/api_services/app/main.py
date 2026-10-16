@@ -29,7 +29,6 @@ from ai_services.ingestion.persistence.sqlite_store import (
 from ai_services.ingestion.pr.service import PullRequestIngestionService
 from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
-from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.retrievers.retriever_factory import create_retrievers
 from api_services.app.config import (
     ADRS_STORAGE_DIR,
@@ -49,6 +48,7 @@ from api_services.app.routers.repositories import router as repositories_router
 from api_services.app.routers.webhook import router as webhook_router
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
+from api_services.app import config
 
 
 @asynccontextmanager
@@ -60,8 +60,7 @@ async def lifespan(app: FastAPI):
     app.state.github_app = github_app
     app.state.github_oauth = GitHubOAuth(github_settings)
     database = require_env("NEO4J_DATABASE") or None
-    # One model per FastAPI worker; failures propagate and fail startup.
-    reranker = await asyncio.to_thread(Qwen3Reranker, RETRIEVAL_SETTINGS)
+    reranker = None
     app.state.reranker = reranker
 
     # Create application-scoped infrastructure once. These instances are
@@ -136,7 +135,8 @@ async def lifespan(app: FastAPI):
         groq_client=groq_client,
         github_app=github_app,
     )
-    sqlite_store.recover_interrupted_pr_revisions()
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        sqlite_store.recover_interrupted_pr_revisions()
     pr_ingestion_service = PullRequestIngestionService(
         repository_source=repo_source,
         metadata_store=sqlite_store,
@@ -154,7 +154,8 @@ async def lifespan(app: FastAPI):
         database=database or "neo4j",
         embedding_dimensions=embedder.dimensions if embedder else 3072,
     )
-    adr_writer.initialize_constraints()
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        adr_writer.initialize_constraints()
 
     adr_processor = ADRProcessingService(
         chunker=ADRChunker(),
@@ -258,13 +259,14 @@ async def lifespan(app: FastAPI):
 
     recovery_task = asyncio.create_task(
         app.state.evaluation_orchestrator.recover_forever()
-    )
+    ) if config.ENABLE_BACKGROUND_PROCESSING else None
     try:
         yield
     finally:
-        recovery_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await recovery_task
+        if recovery_task is not None:
+            recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery_task
         await app.state.evaluation_orchestrator.close()
         driver.close()
         await github_client.aclose()

@@ -48,6 +48,8 @@ class ADRProcessingService:
 
     async def process_adr(self, doc: ADRDocument) -> None:
         """Execute complete Phase 2 knowledge graph transformation and persistence."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         adr_id = doc.adr_id
         repo_id = doc.repository_id
         logger.info(

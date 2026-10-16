@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
-from typing import Any
 import os
-from cryptography.fernet import Fernet
+from datetime import UTC, datetime
 
+from cryptography.fernet import Fernet
 from sqlalchemy import or_, select, update
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
+from ai_services.ingestion.persistence.concurrency import serialize_metadata_write
 from ai_services.ingestion.persistence.database import get_session_factory, init_db
 from ai_services.ingestion.persistence.models import (
     ADRModel,
@@ -20,7 +21,10 @@ from ai_services.ingestion.persistence.models import (
     UserModel,
     utc_now,
 )
-from ai_services.ingestion.sources.credentials import CredentialProvider, GitHubCredential
+from ai_services.ingestion.sources.credentials import (
+    CredentialProvider,
+    GitHubCredential,
+)
 from ai_services.ingestion.sources.interface import RepositoryMetadata
 
 logger = logging.getLogger(__name__)
@@ -45,27 +49,41 @@ class SqliteApplicationStore:
 
     def claim_pr_revision(self, repository_id, event) -> bool:
         """Unique insert/conditional update atomically excludes running/completed jobs."""
-        values = dict(revision_key=event.revision_key, repository_id=repository_id,
-            github_repository_id=str(event.github_repository_id), pull_request_number=event.pull_request_number,
-            base_sha=event.base_sha, head_sha=event.head_sha, delivery_id=event.delivery_id,
-            status='RUNNING', attempts=1, started_at=utc_now())
+        values = {
+            'revision_key': event.revision_key, 'repository_id': repository_id,
+            'github_repository_id': str(event.github_repository_id), 'pull_request_number': event.pull_request_number,
+            'base_sha': event.base_sha, 'head_sha': event.head_sha, 'delivery_id': event.delivery_id,
+            'status': 'RUNNING', 'attempts': 1, 'started_at': utc_now(),
+        }
         with self.session_factory() as session:
-            result = session.execute(insert(PullRequestRevisionModel).values(**values).on_conflict_do_nothing())
-            claimed = result.rowcount == 1
+            dialect = session.get_bind().dialect.name
+            if dialect == "sqlite":
+                insert = sqlite_insert
+            elif dialect == "postgresql":
+                insert = postgresql_insert
+            else:
+                raise RuntimeError("PR revision claims require SQLite or PostgreSQL")
+            result = session.execute(insert(PullRequestRevisionModel).values(**values)
+                .on_conflict_do_nothing().returning(PullRequestRevisionModel.revision_key))
+            # psycopg/SQLAlchemy need not preserve rowcount for INSERT. The
+            # returned key distinguishes a successful claim from a conflict.
+            claimed = result.scalar_one_or_none() is not None
             if not claimed:
                 result = session.execute(update(PullRequestRevisionModel).where(
                     PullRequestRevisionModel.revision_key == event.revision_key,
                     PullRequestRevisionModel.status.in_(['FAILED', 'SUPERSEDED'])).values(
                     status='RUNNING', delivery_id=event.delivery_id, started_at=utc_now(), completed_at=None,
-                    error=None, error_type=None, attempts=PullRequestRevisionModel.attempts + 1))
-                claimed = result.rowcount == 1
+                    error=None, error_type=None, attempts=PullRequestRevisionModel.attempts + 1)
+                    .returning(PullRequestRevisionModel.revision_key))
+                claimed = result.scalar_one_or_none() is not None
             session.commit()
             return claimed
 
     def finish_pr_revision(self, revision_key, status, error_type=None, error=None):
         with self.session_factory() as session:
             session.execute(update(PullRequestRevisionModel).where(
-                PullRequestRevisionModel.revision_key == revision_key).values(
+                PullRequestRevisionModel.revision_key == revision_key,
+                PullRequestRevisionModel.status == 'RUNNING').values(
                 status=status, completed_at=utc_now(), error_type=error_type, error=error))
             session.commit()
 
@@ -74,12 +92,29 @@ class SqliteApplicationStore:
             return session.get(PullRequestRevisionModel, revision_key)
 
     def recover_interrupted_pr_revisions(self):
-        # Called once at single-worker startup, never by a request or second job.
+        # SQLite preserves the historical single-worker development recovery.
+        # PostgreSQL cannot infer ownership of shared RUNNING revisions.
         with self.session_factory() as session:
+            if session.get_bind().dialect.name != "sqlite":
+                return
             session.execute(update(PullRequestRevisionModel).where(
                 PullRequestRevisionModel.status == 'RUNNING').values(status='FAILED',
                 completed_at=utc_now(), error_type='ProcessInterrupted', error='Worker stopped; redeliver to retry'))
             session.commit()
+
+    def recover_pr_revision(self, revision_key, expected_attempts, *, worker_stopped=False):
+        """Explicit operator recovery only after all possible owners have stopped."""
+        if not worker_stopped:
+            raise ValueError("Confirm the revision's worker is stopped before recovery")
+        with self.session_factory() as session:
+            result = session.execute(update(PullRequestRevisionModel).where(
+                PullRequestRevisionModel.revision_key == revision_key,
+                PullRequestRevisionModel.attempts == expected_attempts,
+                PullRequestRevisionModel.status == 'RUNNING',
+            ).values(status='FAILED', completed_at=utc_now(), error_type='ManualRecovery',
+                     error='Operator confirmed worker stopped; redeliver to retry'))
+            session.commit()
+            return result.rowcount == 1
 
     def encrypt_token(self, token: str) -> str:
         if not self.token_cipher:
@@ -94,7 +129,7 @@ class SqliteApplicationStore:
     def _connection_credential(self, connection):
         if (connection and connection.credential_kind == 'github_app' and connection.access_status == 'ACTIVE'
                 and connection.access_token_expires_at
-                and connection.access_token_expires_at.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)):
+                and connection.access_token_expires_at.replace(tzinfo=UTC) > datetime.now(UTC)):
             return GitHubCredential(self.decrypt_token(connection.access_token), connection.token_type)
         return None
 
@@ -124,6 +159,7 @@ class SqliteApplicationStore:
         encrypted_refresh = self.encrypt_token(refresh_token) if refresh_token else None
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_user_id)
             )
@@ -181,6 +217,7 @@ class SqliteApplicationStore:
     def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at):
         """Commit the entire encrypted rotation, only if authorization is unchanged."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             result = session.execute(update(GitHubConnectionModel).where(
                 GitHubConnectionModel.id == connection.id,
                 GitHubConnectionModel.access_status == 'ACTIVE',
@@ -236,6 +273,7 @@ class SqliteApplicationStore:
     ) -> UserModel:
         """Create or update an application user."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(UserModel).where(
                 or_(UserModel.username == username, UserModel.id == user_id)
             ) if user_id else select(UserModel).where(UserModel.username == username)
@@ -268,6 +306,7 @@ class SqliteApplicationStore:
     ) -> GitHubConnectionModel:
         """Associate a user's GitHub identity and OAuth token with their user account."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(GitHubConnectionModel).where(
                 GitHubConnectionModel.user_id == user_id,
                 GitHubConnectionModel.github_user_id == str(github_user_id),
@@ -304,6 +343,7 @@ class SqliteApplicationStore:
         repo_pk = f"repo_{github_repo_id}"
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(RepositoryModel).where(
                 or_(
                     RepositoryModel.id == repo_pk,
@@ -316,7 +356,9 @@ class SqliteApplicationStore:
             if repo:
                 # Requirement 2: Do not silently transfer repository ownership
                 if repo.user_id and user_id and repo.user_id != user_id:
-                    from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictError
+                    from ai_services.ingestion.sources.interface import (
+                        RepositoryOwnershipConflictError,
+                    )
                     raise RepositoryOwnershipConflictError(
                         f"Repository '{metadata.full_name}' is already connected and owned by another user. "
                         "Ownership transfer is prohibited."
@@ -559,6 +601,7 @@ class SqliteApplicationStore:
         import uuid
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = (
                 select(ADRModel)
                 .where(
@@ -633,6 +676,7 @@ class SqliteApplicationStore:
         import uuid
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             adr = ADRModel(
                 id=adr_id or f"adr_{uuid.uuid4().hex[:12]}",
                 repository_id=repository_id,

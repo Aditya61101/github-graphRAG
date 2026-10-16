@@ -22,6 +22,7 @@ from ai_services.ingestion.pr.models import (
 
 from .packets import DurableEvaluationModel
 from .store import LostLease
+from shared.utils.processing import background_processing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ class EvaluationWorker:
         self.store.finish(job.id, token, result)
 
     async def run_job(self, job_id):
+        if not background_processing_enabled():
+            return
         async with self.semaphore:
             token = self.store.claim(job_id)
             if token is None:

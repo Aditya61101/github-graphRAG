@@ -34,7 +34,21 @@ from api_services.app.routers.auth import router as auth_router, GitHubOAuth
 from api_services.app.routers.repositories import router as repository_router
 from api_services.app.routers.query import router as query_router
 from api_services.app.routers.webhook import router as webhook_router
+from api_services.app.routers.evaluations import router as evaluations_router
 from api_services.app.utils.jwt_utils import create_access_token, decode_access_token
+
+
+@pytest.mark.asyncio
+async def test_check_reconciliation_pagination_preserves_query_parameters():
+    service = object.__new__(GitHubAppService)
+    first = [{'id': i} for i in range(100)]
+    service.request = AsyncMock(side_effect=[{'check_runs': first}, {'check_runs': [{'id': 100}]}])
+    rows = await service.pages('/repos/owner/repo/commits/sha/check-runs', 'test-token',
+        'check_runs', params={'filter': 'all', 'check_name': 'DecisionGuard'})
+    assert len(rows) == 101
+    for page, call in enumerate(service.request.await_args_list, 1):
+        assert call.kwargs['params'] == {
+            'filter': 'all', 'check_name': 'DecisionGuard', 'per_page': 100, 'page': page}
 
 
 def repo(rid=101, private=False):
@@ -100,6 +114,7 @@ def env(monkeypatch):
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
     app.include_router(auth_router, prefix='/auth')
+    app.include_router(evaluations_router, prefix='/repositories')
     app.include_router(repository_router, prefix='/repositories')
     app.include_router(query_router, prefix='/query')
     app.include_router(webhook_router, prefix='/webhooks')

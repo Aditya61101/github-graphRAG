@@ -137,6 +137,7 @@ def test_invalid_entity_names_are_rejected_and_writer_preserves_reserved_identit
         name="Account Service",
         properties={"name": "wrong", "id": "wrong", "label": "wrong", "port": 443},
         evidence_chunk_ids=["chunk-a"],
+        embedding=[0.1] * writer.embedding_dimensions,
     )
     invalid = CanonicalEntity.model_construct(
         canonical_id="invalid-id",
@@ -157,6 +158,7 @@ def test_invalid_entity_names_are_rejected_and_writer_preserves_reserved_identit
         "name": "Account Service",
         "label": "Service",
         "aliases": [],
+        "embedding": [0.1] * writer.embedding_dimensions,
     }
 
 

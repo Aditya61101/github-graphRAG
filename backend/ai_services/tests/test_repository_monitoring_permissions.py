@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ai_services.tests.test_github_app import env, installation, repo
-from ai_services.tests.test_github_refresh import credentials
 from ai_services.ingestion.persistence.models import RepositoryModel
+from ai_services.tests.test_github_app import env as env  # noqa: PLC0414 - re-export the pytest fixture
+from ai_services.tests.test_github_app import installation, repo
+from ai_services.tests.test_github_refresh import credentials
 
 
 def permissions(env, admin):
@@ -16,6 +17,7 @@ def permissions(env, admin):
 
 
 def owned(env, status='IDLE'):
+    env.service.persist_inventory(env.state['installations'][10], env.state['inventory'][10], 'ACTIVE')
     selected = dict(env.state['user_repositories'][10][0], installation_id='10')
     record = env.service.bind_repository(selected, env.user.id)
     with env.store.session_factory() as session:
@@ -101,8 +103,9 @@ def test_owned_failed_repository_needs_live_admin_for_retry_but_not_read(env):
 
 def test_other_decisionguard_owner_is_restricted_even_for_github_admin(env):
     other, _ = env.store.upsert_github_login('2', 'bob', access_token='bob-token',
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
+        expires_at=datetime.now(UTC) + timedelta(hours=1))
     selected = dict(env.state['user_repositories'][10][0], installation_id='10')
+    env.service.persist_inventory(env.state['installations'][10], env.state['inventory'][10], 'ACTIVE')
     record = env.service.bind_repository(selected, other.id)
     response = env.client.get('/repositories', headers=env.headers).json()[0]
     assert response['monitoring']['github_admin'] is True

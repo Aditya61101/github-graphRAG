@@ -38,7 +38,7 @@ class RAGQueryAgent:
         community_retriever: Any,
         chunk_retriever: Any,
         llm: AzureChatOpenAI,
-        reranker: Reranker,
+        reranker: Reranker | None = None,
         retrieval_settings: RetrievalSettings | None = None,
         max_tokens_before_summary: int = 4000,
         messages_to_keep: int = 10,
@@ -54,7 +54,8 @@ class RAGQueryAgent:
             entity_retriever=entity_retriever,
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
-            reranker=reranker,
+            # Retain the argument for callers; conversation retrieval is vector-only.
+            reranker=None,
             retrieval_settings=retrieval_settings,
         )
 

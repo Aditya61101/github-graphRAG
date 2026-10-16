@@ -7,6 +7,7 @@ import logging
 from typing import Protocol
 
 from ai_services.decision_guard.evaluation.models import EvaluationSettings
+from shared.utils.processing import background_processing_enabled as _processing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,10 @@ class EvaluationOrchestrator:
         dispatcher=None,
         publisher=None,
         lifecycle_github=None,
+        processing_enabled=None,
     ):
         self.store, self.worker = store, worker
+        self.processing_enabled = processing_enabled or _processing_enabled
         self.publisher = publisher
         self.lifecycle_github = lifecycle_github
         self.settings = settings or EvaluationSettings()
@@ -131,6 +134,8 @@ class EvaluationOrchestrator:
         self.dispatcher = dispatcher or LocalDispatcher(worker, tasks=self.tasks)
 
     async def accept(self, repository_id, event, background_tasks):
+        if not self.processing_enabled():
+            raise RuntimeError("PR evaluation processing is disabled")
         job_id = self.store.enqueue(repository_id, event, self.settings)
         if isinstance(self.dispatcher, LocalDispatcher):
             await LocalDispatcher(self.worker, background_tasks).dispatch(job_id)
@@ -140,6 +145,8 @@ class EvaluationOrchestrator:
         return job_id
 
     async def _dispatch_persisted(self, job_id):
+        if not self.processing_enabled():
+            return
         try:
             await self.dispatcher.dispatch(job_id)
             self.store.dispatched(job_id)
@@ -152,6 +159,8 @@ class EvaluationOrchestrator:
             )
 
     async def reconcile(self):
+        if not self.processing_enabled():
+            return
         if self.lifecycle_github is not None:
             from .projections import synchronize_due
 

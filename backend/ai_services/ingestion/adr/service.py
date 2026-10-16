@@ -128,6 +128,8 @@ class ADRService:
         Only one file's bytes are held at a time; ingestion uses the existing
         per-document pipeline. Successful items are not rolled back on failure.
         """
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         self.validate_repository_access(repository_id, user_id)
         if not files or len(files) > self.max_files_per_upload:
             raise ValueError(f"Upload between 1 and {self.max_files_per_upload} ADR files.")
@@ -210,6 +212,8 @@ class ADRService:
         file_bytes: bytes,
     ) -> tuple[ADRModel, ADRDocument]:
         """Validate, store, persist, parse, and optionally ingest ADR into Neo4j graph."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         logger.info(
             f"ADR upload initiated for repo '{repository_id}' by user '{user_id}' (file: '{filename}', size: {len(file_bytes)} bytes)"
         )

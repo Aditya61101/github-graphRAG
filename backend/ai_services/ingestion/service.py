@@ -104,6 +104,8 @@ class RepositoryIngestionService:
         installation_id: str | None = None,
     ) -> IngestionResult:
         """Trigger initial or incremental repository ingestion with user credential."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         from ai_services.ingestion.sources.interface import RepositoryAuthenticationError
 
         if self.github_app and repository_id:
@@ -500,6 +502,8 @@ class RepositoryIngestionService:
 
     async def handle_github_push_webhook(self, payload: dict[str, Any]) -> IngestionResult:
         """Process a GitHub push event on a tracked branch using stored user credential."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         repo_data = payload.get("repository", {})
         full_name = repo_data.get("full_name")
         github_repo_id = str(repo_data.get("id")) if repo_data.get("id") else None

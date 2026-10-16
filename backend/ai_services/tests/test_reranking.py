@@ -203,9 +203,10 @@ async def test_tool_keeps_metadata_out_of_prompt_and_uses_effective_query():
     )
     text = command.update["messages"][0].content
     assert "private evidence B" in text
-    assert all(key not in text for key in ["node_ids", "edge_ids", "assertion_ids", "graph_context", "private evidence A"])
-    assert command.update["retrieval_graph_context"]["assertion_ids"] == ["assertion:X"]
-    assert kwargs["reranker"].calls[0][0] == kwargs["query"]
+    assert all(key not in text for key in ["node_ids", "edge_ids", "assertion_ids", "graph_context"])
+    assert command.update["retrieval_graph_context"]["assertion_ids"] == ["assertion:X", "assertion:Y"]
+    assert kwargs["reranker"].calls == []
+    kwargs["embedder"].embed.assert_awaited_once_with([kwargs["query"]])
     with pytest.raises(ValueError, match="authorized"):
         await tool.coroutine(query="q", repository_id="other", runtime=SimpleNamespace(state={"repository_id": "repo"}))
 
@@ -335,3 +336,81 @@ async def test_legacy_vector_filter_fallback_still_requires_matching_repository(
     assert "filters" not in direct.search.call_args_list[1].kwargs
     assert {c.chunk_id for c in kwargs["reranker"].calls[0][1]} == {"A", "B", "C"}
     assert [s["chunk_id"] for s in result.sources["chunks"]] == ["B"]
+
+
+@pytest.mark.asyncio
+async def test_vector_only_preserves_order_metadata_and_scores_without_threshold_or_cap():
+    kwargs = retrieval_kwargs()
+    kwargs["reranker"] = None
+    kwargs["settings"] = RetrievalSettings(rerank_min_score=0.99, rerank_max_evidence=1)
+    hits = kwargs["chunk_retriever"].search.return_value.items
+    hits[0].metadata.update(score=0.05, commit="abc", custom={"origin": "vector"})
+    hits[1].metadata["score"] = None
+    result = await hybrid_retrieve(**kwargs)
+    sources = result.sources["chunks"]
+    assert [s["chunk_id"] for s in sources] == ["A", "B", "C"]
+    assert [s["score"] for s in sources] == [0.05, None, 0.8]
+    assert all(s["score_type"] == "vector_similarity" for s in sources)
+    assert sources[0]["commit"] == "abc"
+    assert sources[0]["custom"] == {"origin": "vector"}
+    assert [s["channel"] for s in sources[1]["retrieval_scores"]] == ["direct_chunk", "entity", "community"]
+    assert kwargs["driver"].calls[1][1]["chunk_ids"] == ["A", "B", "C"]
+    response = build_api_response(RAGAgentResult("answer", result.sources, result.graph_context), "thread")
+    assert [s.score for s in response.sources] == [0.05, None, 0.8]
+
+
+@pytest.mark.asyncio
+async def test_vector_only_retains_discovered_evidence_and_repository_isolation():
+    kwargs = retrieval_kwargs()
+    kwargs["reranker"] = None
+    kwargs["chunk_retriever"] = None
+    kwargs["driver"].discovered.extend([
+        {"chunk_id": "foreign", "repository": "other", "text": "foreign"},
+        {"chunk_id": "legacy", "text": "legacy"},
+    ])
+    result = await hybrid_retrieve(**kwargs)
+    assert [s["chunk_id"] for s in result.sources["chunks"]] == ["B"]
+    assert result.sources["chunks"][0]["score"] == 0.8
+    assert result.graph_context.assertion_ids == ["assertion:X"]
+    kwargs["driver"].discovered = []
+    result = await hybrid_retrieve(**kwargs)
+    assert result.sources == {"chunks": []}
+    assert result.graph_context.node_ids == []
+
+
+@pytest.mark.asyncio
+async def test_standalone_runner_uses_vector_results_even_with_legacy_reranker_argument(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    from ai_services.runs.run_retrieval import query_graph_rag
+    kwargs = retrieval_kwargs()
+    llm = SimpleNamespace(ainvoke=AsyncMock(return_value="answer"))
+    result = await query_graph_rag(llm=llm, **kwargs)
+    assert kwargs["reranker"].calls == []
+    assert result["answer"] == "answer"
+    assert [s["chunk_id"] for s in result["sources"]["chunks"]] == ["A", "B", "C"]
+    assert all(s["score_type"] == "vector_similarity" for s in result["sources"]["chunks"])
+    assert "private evidence A" in llm.ainvoke.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_standalone_main_starts_without_local_model(monkeypatch, capsys):
+    import sys
+    from ai_services.runs import run_retrieval as runner
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    monkeypatch.setattr(sys, "argv", ["run_retrieval", "question", "--repository-id", "repo"])
+    monkeypatch.setattr(runner, "require_env", lambda name, default=None: default or "test")
+    driver = MagicMock()
+    monkeypatch.setattr(runner, "GraphDatabase", SimpleNamespace(driver=MagicMock(return_value=driver)))
+    for name in ("AsyncAzureOpenAI", "AzureOpenAIEmbedder", "AzureOpenAILLM"):
+        monkeypatch.setattr(runner, name, MagicMock())
+    monkeypatch.setattr(runner, "create_retrievers", MagicMock(return_value=(object(), object(), object())))
+    query = AsyncMock(return_value={"answer": "answer", "sources": {"chunks": []}})
+    monkeypatch.setattr(runner, "query_graph_rag", query)
+    await runner.main()
+    assert "reranker" not in query.call_args.kwargs
+    assert query.call_args.kwargs["repository_id"] == "repo"
+    assert '"answer": "answer"' in capsys.readouterr().out
+    driver.close.assert_called_once()

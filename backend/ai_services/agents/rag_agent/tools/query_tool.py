@@ -19,7 +19,7 @@ def create_query_graph_rag_tool(
     entity_retriever,
     community_retriever,
     chunk_retriever,
-    reranker: Reranker,
+    reranker: Reranker | None = None,
     retrieval_settings: RetrievalSettings | None = None,
 ):
     @tool
@@ -59,7 +59,8 @@ def create_query_graph_rag_tool(
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
             repository_id=target_repo_id,
-            reranker=reranker,
+            # Conversational retrieval always uses the vector results directly.
+            reranker=None,
             settings=retrieval_settings,
         )
 

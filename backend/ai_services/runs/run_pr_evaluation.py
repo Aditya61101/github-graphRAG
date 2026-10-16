@@ -27,6 +27,8 @@ from shared.utils.llm_utils import AzureOpenAILLM
 
 
 async def run(job_id):
+    from shared.utils.processing import require_background_processing
+    require_background_processing()
     from api_services.app.config import ADRS_STORAGE_DIR
 
     store = SqliteApplicationStore()

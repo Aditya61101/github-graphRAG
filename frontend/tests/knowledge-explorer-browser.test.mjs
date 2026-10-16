@@ -314,6 +314,10 @@ test("chat continuity, Markdown, per-answer evidence and exact graph highlightin
     ),
     ["entity:db", "entity:orders"]
   );
+  // React Flow mounts the SVG edges after its node measurement pass.
+  await browser.waitFor(
+    "document.querySelector('.answer-context-edge')?.getAttribute('data-id') === 'edge:orders:WRITES_TO:db'"
+  );
   assert.deepEqual(
     await browser.evaluate(
       "Array.from(document.querySelectorAll('.answer-context-edge')).map(e=>e.getAttribute('data-id'))"
