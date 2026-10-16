@@ -23,7 +23,7 @@ let server,
   Findings,
   CoveragePanel,
   Summary,
-  Risks,
+  riskIndicators,
   Queue,
   Attention,
   OverviewReviews;
@@ -51,9 +51,8 @@ before(async () => {
   ({ PRSummary: Summary } = await server.ssrLoadModule(
     "/src/components/repositories/review-summary.tsx"
   ));
-  ({ DecisionRisks: Risks } = await server.ssrLoadModule(
-    "/src/components/repositories/decision-risks.tsx"
-  ));
+  ({ currentDecisionRiskIndicators: riskIndicators } =
+    await server.ssrLoadModule("/src/lib/decision-risk-indicators.ts"));
   ({ PullRequestTable: Queue } = await server.ssrLoadModule(
     "/src/components/repositories/pull-request-table.tsx"
   ));
@@ -351,7 +350,7 @@ test("revision freshness, missing metadata and partial verdicts are explicit", (
   assert.match(stale, /No evaluation for the observed revision/);
   assert.doesNotMatch(stale, /Architectural conflicts detected/);
 });
-test("decision and unmapped requirement associations remain separate and never infer extra decisions", () => {
+test("knowledge risk indicators use only exact current decision identities and never imply safety from absence", () => {
   const risks = [
     {
       identity: "d",
@@ -370,16 +369,23 @@ test("decision and unmapped requirement associations remain separate and never i
       adr_ids: [],
     },
   ];
-  const html = render(Risks, {
-    risks,
-    repositoryId: "repo_1120610241",
-    total: 3,
-  });
-  assert.match(html, /Confirmed conflict/);
-  assert.match(html, /Potential risk/);
-  assert.match(html, /without an explicit decision mapping/);
-  assert.match(html, /Showing 2 of 3/);
-  assert.match(html, /repo_1120610241\/pull-requests\/2/);
+  const map = riskIndicators(
+    [
+      ...risks,
+      { ...risks[0], identity: "potential", classification: "POTENTIAL" },
+      { ...risks[0], classification: "POTENTIAL" },
+    ],
+    true
+  );
+  assert.equal(map.get("d"), "CONFIRMED");
+  assert.equal(map.get("potential"), "POTENTIAL");
+  assert.equal(map.has("r"), false);
+  assert.equal(map.has("same-title-or-ADR"), false);
+  assert.equal(map.has("absent-from-truncated-inventory"), false);
+  assert.equal(riskIndicators(risks, false).size, 0);
+  const actual = riskIndicators(identities.attention, true);
+  assert.equal(actual.size, 2);
+  assert.deepEqual([...actual.values()].sort(), ["CONFIRMED", "POTENTIAL"]);
 });
 test("source links require exact immutable provenance and escape unsafe display text", () => {
   assert.equal(

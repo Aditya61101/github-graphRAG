@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KnowledgeDetailModal } from "@/components/repositories/knowledge-detail-modal";
 import type { ADRUploadResult, KnowledgeItem } from "@/types/knowledge";
-import { DecisionRisks } from "@/components/repositories/decision-risks";
+import { currentDecisionRiskIndicators } from "@/lib/decision-risk-indicators";
 
 const queryOptions = {
   retry: false,
@@ -50,6 +50,10 @@ export default function RepositoryDecisionsPage() {
   const { user, token } = useAuth();
   const scope = [user?.id, token, id];
   const canManage = overview.permissions.can_manage_source_documents === true;
+  const riskIndicators = currentDecisionRiskIndicators(
+    overview.decisions_needing_attention.items ?? [],
+    overview.decisions_needing_attention.availability.status === "available"
+  );
   const [tab, setTab] = useState<"knowledge" | "sources">("knowledge");
   const [uploading, setUploading] = useState(false);
   const [searchInput, setSearchInput] = useState("");
@@ -89,27 +93,6 @@ export default function RepositoryDecisionsPage() {
           evidence.
         </p>
       </section>
-      <section
-        className="space-y-3 rounded-xl border bg-card p-5"
-        aria-label="Current PR decision risks"
-      >
-        <h2 className="font-semibold">Current PR decision risks</h2>
-        <p className="text-sm text-muted-foreground">
-          Confirmed conflicts and potential risks are based on currently
-          observed open PR evidence. A decision with no association has no
-          currently observed PR risk; this does not certify safety. ADR
-          documents, requirements and distinct decisions are different counts.
-        </p>
-        <DecisionRisks
-          risks={overview.decisions_needing_attention.items ?? []}
-          total={overview.decisions_needing_attention.total ?? 0}
-          repositoryId={id}
-          available={
-            overview.decisions_needing_attention.availability.status ===
-            "available"
-          }
-        />
-      </section>
       <div
         role="tablist"
         aria-label="Decision views"
@@ -146,6 +129,7 @@ export default function RepositoryDecisionsPage() {
           role="tab"
           aria-selected={activeTab === "knowledge"}
           aria-controls="knowledge-panel"
+          className="aria-selected:text-primary dark:aria-selected:text-sidebar-primary"
           tabIndex={activeTab === "knowledge" ? 0 : -1}
           disabled={uploading}
           variant={activeTab === "knowledge" ? "secondary" : "ghost"}
@@ -159,6 +143,7 @@ export default function RepositoryDecisionsPage() {
             role="tab"
             aria-selected={activeTab === "sources"}
             aria-controls="sources-panel"
+            className="aria-selected:text-primary dark:aria-selected:text-sidebar-primary"
             tabIndex={activeTab === "sources" ? 0 : -1}
             disabled={uploading}
             variant={activeTab === "sources" ? "secondary" : "ghost"}
@@ -221,6 +206,7 @@ export default function RepositoryDecisionsPage() {
                 size="sm"
                 variant={kind === value ? "secondary" : "ghost"}
                 aria-pressed={kind === value}
+                className="aria-pressed:text-primary dark:aria-pressed:text-sidebar-primary"
                 onClick={() => {
                   setKind(value);
                   setOffset(0);
@@ -293,34 +279,21 @@ export default function RepositoryDecisionsPage() {
                           {item.type.replaceAll("_", " ")}
                         </span>
                       )}
-                      {item.kind === "decision" && (
-                        <span className="rounded-full border px-2 py-1">
-                          {overview.decisions_needing_attention.availability
-                            .status !== "available"
-                            ? "PR risk unavailable"
-                            : overview.decisions_needing_attention.items?.find(
-                                  (risk) =>
-                                    risk.kind === "DECISION" &&
-                                    risk.identity === item.id
-                                )?.classification === "CONFIRMED"
+                      {item.kind === "decision" &&
+                        riskIndicators.has(item.id) && (
+                          <span
+                            className={`rounded-full border px-2 py-1 ${riskIndicators.get(item.id) === "CONFIRMED" ? "border-destructive/30 text-destructive" : "border-amber-700/30 text-amber-700 dark:border-amber-300/30 dark:text-amber-300"}`}
+                            title="Associated with an open PR at the last persisted GitHub observation."
+                          >
+                            {riskIndicators.get(item.id) === "CONFIRMED"
                               ? "Confirmed conflict"
-                              : overview.decisions_needing_attention.items?.some(
-                                    (risk) =>
-                                      risk.kind === "DECISION" &&
-                                      risk.identity === item.id
-                                  )
-                                ? "Potential risk"
-                                : overview.decisions_needing_attention.total >
-                                    (overview.decisions_needing_attention.items
-                                      ?.length ?? 0)
-                                  ? "No association in displayed risk subset"
-                                  : "No currently observed PR risk"}
-                        </span>
-                      )}
+                              : "Potential risk"}
+                          </span>
+                        )}
                     </div>
                     <Button
                       variant="link"
-                      className="h-auto max-w-full justify-start p-0 text-left whitespace-normal"
+                      className="h-auto max-w-full justify-start p-0 text-left whitespace-normal dark:text-sidebar-primary"
                       onClick={(event) => {
                         detailTrigger.current = event.currentTarget;
                         setSelected(item.id);

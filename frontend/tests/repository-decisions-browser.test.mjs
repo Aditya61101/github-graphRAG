@@ -48,6 +48,10 @@ function setup() {
     release: null,
     detail: null,
     detailError: false,
+    attention: { availability: unavailable },
+    items: [decision, constraint],
+    knowledgeDelay: 0,
+    knowledgeError: null,
   };
 }
 before(async () => {
@@ -86,6 +90,11 @@ before(async () => {
               });
             if (f.denied)
               return json({ detail: "Collaborator access revoked" }, 403);
+            if (
+              url.pathname.startsWith("/repositories/") &&
+              !url.pathname.startsWith("/repositories/repo_a/")
+            )
+              return json({ detail: "Repository access denied" }, 403);
             if (url.pathname.endsWith("/overview"))
               return json({
                 repository: {
@@ -114,11 +123,20 @@ before(async () => {
                   },
                 },
                 review_activity: { availability: unavailable, window_days: 7 },
-                decisions_needing_attention: { availability: unavailable },
+                decisions_needing_attention: f.attention,
                 recent_pr_reviews: { availability: unavailable },
               });
             if (url.pathname.endsWith("/knowledge")) {
-              let items = [decision, constraint];
+              if (f.knowledgeDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, f.knowledgeDelay)
+                );
+              if (f.knowledgeError)
+                return json(
+                  { detail: "Knowledge temporarily unavailable" },
+                  f.knowledgeError
+                );
+              let items = f.items;
               const kind = url.searchParams.get("kind");
               const search = url.searchParams.get("search")?.toLowerCase();
               if (kind && kind !== "all")
@@ -129,7 +147,13 @@ before(async () => {
                     .toLowerCase()
                     .includes(search)
                 );
-              return json({ items, total: items.length, offset: 0, limit: 20 });
+              const offset = Number(url.searchParams.get("offset") || 0);
+              return json({
+                items: items.slice(offset, offset + 20),
+                total: items.length,
+                offset,
+                limit: 20,
+              });
             }
             if (url.pathname.endsWith("/knowledge/decision_a")) {
               if (f.detailError)
@@ -655,6 +679,198 @@ test("default knowledge tab supports filtering, search and evidence drawer", asy
   await click("Search");
   await browser.waitFor(contains("No matching architectural knowledge"));
   assert.ok(fixture.calls.some((c) => c.url.includes("search=missing")));
+});
+
+test("knowledge inventory replaces the risk panel and exact positive badges remain truthful with truncated associations", async () => {
+  fixture.items = [
+    decision,
+    constraint,
+    { ...decision, id: "decision_b", title: "Use PostgreSQL for reporting" },
+    ...Array.from({ length: 59 }, (_, index) => ({
+      ...decision,
+      id: `neutral_${index}`,
+      title: `Stored decision ${index + 1}`,
+    })),
+  ];
+  const risk = (identity, classification, kind = "DECISION") => ({
+    identity,
+    classification,
+    kind,
+    pr_numbers: [2],
+    finding_ids: ["finding"],
+    adr_ids: ["adr_a"],
+  });
+  fixture.attention = {
+    availability: { status: "available", reason: null },
+    total: 100,
+    items: [
+      risk("decision_a", "CONFIRMED"),
+      risk("decision_b", "POTENTIAL"),
+      risk("constraint_a", "CONFIRMED", "REQUIREMENT"),
+      risk("neutral_0", "CONFIRMED", "REQUIREMENT"),
+    ],
+  };
+  await visit();
+  assert.equal(
+    await browser.evaluate(contains("Current PR decision risks")),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(contains("Technical association identities")),
+    false
+  );
+  assert.equal(
+    await browser.evaluate("document.querySelectorAll('main article').length"),
+    20
+  );
+  const cards = await browser.evaluate(
+    "Array.from(document.querySelectorAll('main article')).map(e=>e.innerText)"
+  );
+  assert.match(cards[0], /Confirmed conflict/);
+  assert.match(cards[2], /Potential risk/);
+  for (const card of [cards[1], ...cards.slice(3)])
+    assert.doesNotMatch(
+      card,
+      /Confirmed conflict|Potential risk|No currently observed PR risk|risk unavailable|displayed risk subset/
+    );
+  assert.equal(knowledgeCalls(), 1);
+  assert.equal(
+    fixture.calls.some((call) => /evaluations|pull-requests/.test(call.url)),
+    false
+  );
+  for (const width of [390, 320]) {
+    await browser.call("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    assert.equal(
+      await browser.evaluate(
+        "document.documentElement.scrollWidth <= innerWidth"
+      ),
+      true
+    );
+  }
+  await click("Next");
+  await browser.waitFor(contains("Showing 21–40 of 62 entries"));
+  assert.ok(fixture.calls.some((call) => call.url.includes("offset=20")));
+  await click("Constraints");
+  await browser.waitFor(contains("Showing 1–1 of 1 entries"));
+  assert.equal(
+    await browser.evaluate("document.querySelectorAll('main article').length"),
+    1
+  );
+  await click("Decisions");
+  await browser.waitFor(contains("Showing 1–20 of 61 entries"));
+  await click("All");
+  await browser.waitFor(contains("Showing 1–20 of 62 entries"));
+  assert.ok(fixture.calls.every((call) => call.method === "GET"));
+});
+
+test("stable-ID modal links preserve back/forward navigation and open records outside the loaded knowledge page", async () => {
+  await visit();
+  await click("Use PostgreSQL");
+  await browser.waitFor(
+    contains("PostgreSQL provides transactional persistence.")
+  );
+  assert.equal(
+    await browser.evaluate(
+      "new URLSearchParams(location.search).get('record')"
+    ),
+    "decision_a"
+  );
+  await closeDrawer();
+  assert.equal(
+    await browser.evaluate(
+      "new URLSearchParams(location.search).has('record')"
+    ),
+    false
+  );
+  await browser.evaluate("history.back()");
+  await browser.waitFor(
+    "document.querySelector('[data-slot=knowledge-detail-modal]') !== null"
+  );
+  await browser.evaluate("history.back()");
+  await browser.waitFor(
+    "!document.querySelector('[data-slot=knowledge-detail-modal]')"
+  );
+  await browser.evaluate("history.forward()");
+  await browser.waitFor(
+    "document.querySelector('[data-slot=knowledge-detail-modal]') !== null"
+  );
+  assert.equal(
+    fixture.calls.filter((call) => call.url.endsWith("/knowledge/decision_a"))
+      .length,
+    1
+  );
+  fixture.items = [constraint];
+  await browser.navigate(
+    base + "/projects/repo_a/decisions?record=decision_a&origin=overview"
+  );
+  await browser.waitFor(
+    contains("PostgreSQL provides transactional persistence.")
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('main article h2').length"
+    ),
+    1
+  );
+  await closeDrawer();
+  assert.equal(
+    await browser.evaluate(
+      "new URLSearchParams(location.search).get('origin')"
+    ),
+    "overview"
+  );
+  assert.equal(
+    await browser.evaluate(
+      "new URLSearchParams(location.search).has('record')"
+    ),
+    false
+  );
+});
+
+test("knowledge loading, empty, unavailable risk, missing record and repository denial remain honest", async () => {
+  fixture.knowledgeDelay = 600;
+  fixture.items = [];
+  await browser.navigate(base + "/projects/repo_a/decisions");
+  await browser.waitFor(contains("Loading architectural knowledge"));
+  await browser.waitFor(contains("No extracted architectural knowledge yet"));
+  fixture.knowledgeDelay = 0;
+  fixture.knowledgeError = 503;
+  await browser.navigate(base + "/projects/repo_a/decisions");
+  await browser.waitFor(contains("Knowledge temporarily unavailable"));
+  fixture.knowledgeError = null;
+  fixture.items = [decision, constraint];
+  await browser.click("Try again");
+  await browser.waitFor(contains("Use PostgreSQL"));
+  assert.equal(await browser.evaluate(contains("PR risk unavailable")), false);
+  assert.equal(
+    await browser.evaluate(contains("No currently observed PR risk")),
+    false
+  );
+  await browser.navigate(base + "/projects/repo_a/decisions?record=missing");
+  await browser.waitFor(
+    "document.querySelector('[role=dialog] [role=alert]') !== null"
+  );
+  assert.equal(
+    await browser.evaluate(
+      contains("PostgreSQL provides transactional persistence.")
+    ),
+    false
+  );
+  await browser.navigate(
+    base + "/projects/repo_other/decisions?record=decision_a"
+  );
+  await browser.waitFor(contains("Repository access denied"));
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelector('[data-slot=knowledge-detail-modal]') === null"
+    ),
+    true
+  );
 });
 
 test("collaborator source tab is hidden and revocation hides repository content", async () => {
