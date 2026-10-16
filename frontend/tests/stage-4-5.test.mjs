@@ -9,7 +9,16 @@ import { MemoryRouter } from "react-router";
 const fixture = JSON.parse(
   await readFile(new URL("./fixtures/stage-4-5-case-a.json", import.meta.url))
 );
-let server, parse, presentation, service, client, Evidence, Summary, Risks;
+let server,
+  parse,
+  presentation,
+  service,
+  client,
+  Evidence,
+  Findings,
+  CoveragePanel,
+  Summary,
+  Risks;
 before(async () => {
   globalThis.localStorage = { getItem: () => "test-token", removeItem() {} };
   server = await createServer({
@@ -24,8 +33,12 @@ before(async () => {
   ({ apiClient: client } = await server.ssrLoadModule(
     "/src/lib/api-client.ts"
   ));
-  ({ EvaluationEvidence: Evidence } = await server.ssrLoadModule(
-    "/src/components/repositories/evaluation-evidence.tsx"
+  ({
+    ReviewEvidence: Evidence,
+    ReviewFindings: Findings,
+    ReviewCoverage: CoveragePanel,
+  } = await server.ssrLoadModule(
+    "/src/components/repositories/pr-review-evidence.tsx"
   ));
   ({ PRSummary: Summary } = await server.ssrLoadModule(
     "/src/components/repositories/review-summary.tsx"
@@ -123,18 +136,22 @@ test("GET clients encode scoped identities, paginate, propagate abort signals an
   assert.ok(calls.every((call) => call.method === "get"));
 });
 test("Case A evidence separates confirmed, unresolved and rejected records and exposes original comparisons", () => {
-  const html = render(Evidence, {
+  const props = {
     result: fixture.detail.result,
     fullName: "Aditya61101/claimIQ",
-  });
-  assert.match(html, /Confirmed architectural conflicts \(3\)/);
-  assert.match(html, /Additional review required \(1\)/);
-  assert.match(html, /Rejected \/ invalid proof records \(3\)/);
-  assert.match(html, /6 uncertain/);
-  assert.match(html, /Base, merge-base and head comparison/);
-  assert.match(html, /Independent challenger review/);
-  assert.match(html, /Original source evidence and governing ADR/);
-  assert.match(html, /not confirmed violations/);
+  };
+  const html =
+    render(Findings, props) +
+    render(Evidence, props) +
+    render(CoveragePanel, { ...props, lifecycle: "DEFERRED" });
+  assert.match(html, /Confirmed conflicts/);
+  assert.match(html, /Requires review/);
+  assert.match(html, /Unverified \/ rejected allegations \(3\)/);
+  assert.match(html, /Uncertain/);
+  assert.match(html, /Code changes and revision comparison/);
+  assert.match(html, /Independent challenger verification/);
+  assert.match(html, /Original architectural evidence/);
+  assert.match(html, /not confirmed conflicts/);
   assert.match(
     html,
     /could not validate the required original-source evidence/

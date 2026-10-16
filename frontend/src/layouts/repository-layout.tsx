@@ -143,6 +143,7 @@ export default function RepositoryLayout() {
   const { user, token } = useAuth();
   const location = useLocation();
   const isExplorer = location.pathname.endsWith("/explore");
+  const isPRDetails = /\/pull-requests\/[^/]+\/?$/.test(location.pathname);
   const validId = /^repo_[A-Za-z0-9_-]+$/.test(projectId);
   const overview = useQuery({
     queryKey: ["repository-overview", user?.id, token, projectId],
@@ -219,7 +220,9 @@ export default function RepositoryLayout() {
             className={
               isExplorer
                 ? "min-h-0 w-full flex-1 overflow-hidden px-4 py-4 sm:px-6"
-                : "mx-auto w-full max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8"
+                : isPRDetails
+                  ? "w-full min-w-0 space-y-6 p-4 sm:p-6 lg:p-8"
+                  : "mx-auto w-full max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8"
             }
           >
             {!validId || overview.isError ? (
@@ -251,7 +254,7 @@ export default function RepositoryLayout() {
               </p>
             ) : (
               <>
-                {!isExplorer && (
+                {!isExplorer && !isPRDetails && (
                   <section
                     className="flex flex-wrap items-center justify-between gap-3"
                     aria-label="Repository identity"

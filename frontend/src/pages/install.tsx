@@ -52,7 +52,8 @@ export default function InstallPage() {
       const result = await authService.completeOnboarding();
       confirmOnboarding(result);
     },
-    onSuccess: () => navigate("/projects", { replace: true }),
+    // The existing status-based Navigate below runs only after auth consumers
+    // observe completion. An early imperative navigation can race the guard.
     onError: reportError,
   });
   const verify = useMutation({
