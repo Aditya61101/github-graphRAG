@@ -755,7 +755,7 @@ def test_upload_adr_file_cleanup_on_write_failure(test_env):
     store = test_env["store"]
 
     # Mock open() to simulate an I/O error during disk writing
-    with patch("ai_services.ingestion.adr.service.open", side_effect=IOError("Disk write simulated failure")):
+    with patch.object(adr_service.originals, "write", side_effect=IOError("Disk write simulated failure")):
         with pytest.raises(Exception) as exc_info:
             asyncio.run(
                 adr_service.process_adr_upload(
@@ -765,14 +765,14 @@ def test_upload_adr_file_cleanup_on_write_failure(test_env):
                     file_bytes=b"# Test disk fail",
                 )
             )
-        assert "disk" in str(exc_info.value).lower()
+        assert "persist ADR original" in str(exc_info.value)
 
     # Verify ADR record in DB is marked FAILED
     adrs = store.list_adrs(test_env["repo_alice_id"])
     failed_adr = next((a for a in adrs if a.source_name == "disk-fail.md"), None)
     assert failed_adr is not None
     assert failed_adr.status == "FAILED"
-    assert "filesystem write error" in failed_adr.error.lower()
+    assert failed_adr.error == "Original storage write failed"
 
 
 # =========================================================================

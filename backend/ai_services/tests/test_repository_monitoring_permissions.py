@@ -54,7 +54,10 @@ def test_user_permissions_not_inventory_or_owner_name_authorize_activation(env):
     assert env.store.get_repository('101').user_id == env.user.id
     # Alice can administer an organization repo whose owner name is different.
     assert env.user.username != 'owner'
-    env.app.state.ingestion_service.ingest_repository.assert_awaited_once()
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    run = IngestionJobs(env.store.session_factory).get(response.json()['run_id'])
+    assert run.repository_id == env.store.get_repository('101').id and run.status == 'QUEUED'
+    env.app.state.ingestion_service.ingest_repository.assert_not_awaited()
 
 
 @pytest.mark.parametrize('admin,status', [(False, 403), (None, 503), ('true', 503)])
@@ -96,9 +99,13 @@ def test_owned_failed_repository_needs_live_admin_for_retry_but_not_read(env):
     assert env.store.get_repository(record.id).status == 'FAILED'
     env.app.state.ingestion_service.ingest_repository.assert_not_awaited()
     permissions(env, True)
-    assert env.client.post('/repositories/owner/repo101/sync', headers=env.headers,
-                           json={'sync': False}).status_code == 202
-    env.app.state.ingestion_service.ingest_repository.assert_awaited_once()
+    response = env.client.post('/repositories/owner/repo101/sync', headers=env.headers,
+                               json={'sync': False})
+    assert response.status_code == 202
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    run = IngestionJobs(env.store.session_factory).get(response.json()['run_id'])
+    assert run.repository_id == record.id and run.status == 'QUEUED'
+    env.app.state.ingestion_service.ingest_repository.assert_not_awaited()
 
 
 def test_other_decisionguard_owner_is_restricted_even_for_github_admin(env):

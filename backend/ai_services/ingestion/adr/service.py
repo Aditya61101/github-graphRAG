@@ -107,6 +107,8 @@ class ADRService:
         processor: Any | None = None,
         max_files_per_upload: int = 20,
     ) -> None:
+        from .originals import original_storage
+        self.originals = original_storage(storage_dir)
         self.sqlite_store = sqlite_store
         self.storage_dir = Path(storage_dir).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +267,7 @@ class ADRService:
             title=provisional_title,
             source_type="MANUAL_UPLOAD",
             source_name=clean_name,
-            file_path=str(dest_file_path.as_posix()),
+            file_path=self.originals.location(canonical_repo_id, provisional_adr_id, ext),
             file_size=len(file_bytes),
             mime_type=mime_type,
             file_extension=ext,
@@ -286,25 +288,15 @@ class ADRService:
             )
 
         adr_id = adr_record.id
-        dest_file_path = Path(adr_record.file_path)
-        dest_file_path.parent.mkdir(parents=True, exist_ok=True)
+        original_location = adr_record.file_path
         logger.info(f"ADR metadata record claimed/created: id='{adr_id}', status='PENDING'")
 
-        # 8. Save file to disk safely
+        # Persist the immutable original before parsing or graph ingestion.
         try:
-            with open(dest_file_path, "wb") as fp:
-                fp.write(file_bytes)
-            logger.info(f"ADR original file safely stored on disk: '{dest_file_path}'")
-        except Exception as exc:
-            logger.exception(f"Failed to write ADR file to disk for '{adr_id}': {exc}")
-            # Clean up partial file if created
-            if dest_file_path.exists():
-                try:
-                    dest_file_path.unlink()
-                except Exception:
-                    pass
-            self.sqlite_store.update_adr_status(adr_id, status="FAILED", error=f"Filesystem write error: {exc}")
-            raise ADRServiceError(f"Failed to store file on disk: {exc}") from exc
+            self.originals.write(original_location, file_bytes, mime_type, canonical_repo_id, adr_id)
+        except Exception:
+            self.sqlite_store.update_adr_status(adr_id, status="FAILED", error="Original storage write failed")
+            raise ADRServiceError("Failed to persist ADR original") from None
 
         # 9. Parse file into normalized text
         logger.info(f"Parsing ADR content for id='{adr_id}', format='{ext}'")
@@ -315,7 +307,7 @@ class ADRService:
                 source_name=clean_name,
                 adr_id=adr_id,
                 repository_id=canonical_repo_id,
-                file_path=str(dest_file_path.as_posix()),
+                file_path=original_location,
                 content_hash=content_hash,
                 source_type="MANUAL_UPLOAD",
                 mime_type=mime_type,

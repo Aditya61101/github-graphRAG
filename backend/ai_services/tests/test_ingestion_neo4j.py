@@ -302,3 +302,68 @@ async def test_real_worker_full_then_incremental_preserves_unchanged_evidence(gr
     from ai_services.ingestion.readiness import GraphReadBarrier
     assert GraphReadBarrier(sessions,graph[1]).snapshot(repo)[3]==target[0]
     engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_gcs_original_upload_uses_real_adr_transaction_and_repository_fence(graph, tmp_path, monkeypatch):
+    """Mock GCS transport only; use real SQL ownership, ADR writer and Neo4j fence."""
+    from unittest.mock import Mock
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from ai_services.ingestion.persistence.models import Base, RepositoryModel, UserModel
+    from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    from ai_services.ingestion.adr.service import ADRService
+    from ai_services.ingestion.adr.originals import OriginalStorage
+    from ai_services.ingestion.adr.guard import GuardedADRProcessor
+    from ai_services.ingestion.adr.neo4j_writer import ADRNeo4jWriter
+    from ai_services.ingestion.readiness import GraphReadBarrier
+
+    repo = "stage_b_" + uuid.uuid4().hex
+    engine = create_engine(f"sqlite:///{tmp_path/'combined-adr.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions.begin() as s:
+        s.add(UserModel(id=repo, username=repo))
+        s.flush()
+        s.add(RepositoryModel(id=repo, github_repository_id="101", user_id=repo, owner="owner", name="repo",
+            full_name="owner/repo", repository_url="https://github.com/owner/repo",
+            installation_id="10", tracked_branch="main"))
+    store = SqliteApplicationStore(sessions)
+    jobs = IngestionJobs(sessions)
+    baseline = jobs.claim(jobs.enqueue(repo, "a"*40, branch="main", installation_id="10"))
+    graph[1].arm(baseline)
+    graph[1].seal(baseline)
+    jobs.finish(baseline.id, baseline.owner, baseline.target_commit_sha)
+    barrier = GraphReadBarrier(sessions, graph[1])
+    transport = Mock()
+    transport.post.return_value.status_code = 200
+    observed = []
+
+    class Processor:
+        writer = ADRNeo4jWriter(graph[0], embedding_dimensions=3)
+        resolver = SimpleNamespace(driver=graph[0])
+
+        async def process_adr(self, doc):
+            transport.post.assert_called_once()
+            assert isinstance(self.writer.driver, FencedDriver)
+            assert self.resolver.driver is self.writer.driver
+            observed.append((self.writer.driver, doc))
+            self.writer.write_adr_knowledge(doc, [], [], [], [], [], [], [])
+
+    # Community/GDS behavior is covered above; isolate the upload ownership boundary here.
+    monkeypatch.setattr("ai_services.ingestion.service.RepositoryIngestionService._run_community_pipeline", AsyncMock())
+    monkeypatch.setenv("ENABLE_BACKGROUND_PROCESSING", "true")
+    service = ADRService(store, tmp_path/"originals")
+    service.originals = OriginalStorage(service.storage_dir, bucket="isolated-originals", session=transport)
+    service.processor = GuardedADRProcessor(Processor(), store, jobs, graph[1], barrier, None, None)
+    record, doc = await service.process_adr_upload(repo, repo, "policy.md", b"# Policy\nCommit before publishing events.")
+    assert record.status == "COMPLETED"
+    assert record.file_path == doc.file_path == f"gs://isolated-originals/{repo}/{record.id}/original.md"
+    assert graph[0].execute_query("MATCH (a:ADR {id:$id,repository:$repo}) RETURN count(a) AS n",
+        id=record.id, repo=repo).records[0]["n"] == 1
+    assert barrier.snapshot(repo)[3] == "a"*40
+    # The upload's driver loses mutation rights as soon as its ownership epoch is sealed.
+    with pytest.raises(LostIngestionLease):
+        observed[0][0].execute_query("CREATE (:Entity {repository:$repo,id:$id})", repo=repo, id=repo+"forbidden")
+    engine.dispose()

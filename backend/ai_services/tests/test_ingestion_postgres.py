@@ -13,7 +13,7 @@ from ai_services.ingestion.persistence.models import Base, RepositoryModel, User
 from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs, LostIngestionLease
 
 
-def test_real_postgres_ingestion_migration_and_process_ownership():
+def test_real_postgres_ingestion_migration_and_process_ownership(monkeypatch):
     url = os.getenv("DECISIONGUARD_INGESTION_TEST_POSTGRES_URL")
     if not url:
         pytest.skip("Requires an explicitly provisioned empty local ingestion test database")
@@ -84,5 +84,39 @@ print(json.dumps({'id':r.id,'owner':r.owner,'token':r.token} if r else None))
             jobs.finish(first["id"], first["owner"], "b"*40)
         with sessions() as s:
             assert s.get(RepositoryModel,"repo").indexed_commit_sha == newer.target_commit_sha
+        # The PR outbox coexists with the repository queue in this upgraded schema.
+        # Independent processes must share Session B's global admission limit.
+        from ai_services.decision_guard.orchestration.store import EvaluationStore, LostLease
+        from ai_services.decision_guard.orchestration.models import EvaluationJob, DispatchIntent
+        from ai_services.ingestion.pr.models import PullRequestEvent
+        from ai_services.tests.test_processing_gate import event_payload
+        monkeypatch.setenv("PR_EVALUATION_MAX_CONCURRENCY", "1")
+        evaluations = EvaluationStore(sessions)
+        event = PullRequestEvent.from_webhook(event_payload(), "combined-first")
+        alternate = event.model_copy(update={"pull_request_number": 99, "delivery_id": "combined-second"})
+        evaluation_ids = [evaluations.enqueue("repo", e) for e in (event, alternate)]
+        with sessions() as s:
+            assert all(s.get(DispatchIntent, job_id) is not None for job_id in evaluation_ids)
+        code = """
+import json,os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from ai_services.decision_guard.orchestration.store import EvaluationStore
+j=EvaluationStore(sessionmaker(create_engine(os.environ['DECISIONGUARD_INGESTION_TEST_POSTGRES_URL']),expire_on_commit=False))
+print(json.dumps(j.claim(os.environ['INGESTION_TEST_RUN'])))
+"""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            tokens = list(pool.map(claim, evaluation_ids))
+        assert sum(token is not None for token in tokens) == 1
+        claimed_index = next(i for i, token in enumerate(tokens) if token)
+        claimed_id = evaluation_ids[claimed_index]
+        with sessions.begin() as s:
+            s.get(EvaluationJob, claimed_id).lease_until = 0
+        assert evaluations.claim(evaluation_ids[1-claimed_index])
+        with pytest.raises(LostLease):
+            evaluations.heartbeat(claimed_id, tokens[claimed_index])
+        with sessions() as s:
+            assert s.get(IngestionRunModel, "historical").status == "COMPLETED"
+            assert s.get(RepositoryModel, "repo").indexed_commit_sha == newer.target_commit_sha
     finally:
         engine.dispose()

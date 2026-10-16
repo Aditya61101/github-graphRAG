@@ -15,6 +15,8 @@ class UploadAuthority:
     """
 
     def __init__(self, store, storage_dir, max_document_bytes=10 * 1024 * 1024):
+        from ai_services.ingestion.adr.originals import original_storage
+        self.originals = original_storage(storage_dir)
         self.store = store
         self.storage_dir = Path(storage_dir).resolve()
         self.max_document_bytes = max_document_bytes
@@ -37,11 +39,7 @@ class UploadAuthority:
             )
             if approved:
                 try:
-                    path = Path(record.file_path).resolve()
-                    if not path.is_relative_to(self.storage_dir / repo.id / record.id):
-                        raise ValueError("Untrusted upload path")
-                    with path.open("rb") as f:
-                        data = f.read(self.max_document_bytes + 1)
+                    data = self.originals.read(record.file_path, repo.id, record.id, self.max_document_bytes)
                     import hashlib
 
                     approved = (
@@ -101,9 +99,7 @@ class UploadAuthority:
                     != (doc.adr_id, repo.id, doc.content_hash, "COMPLETED")
                 ):
                     raise ValueError("POLICY_IDENTITY_MISMATCH")
-                path = Path(record.file_path).resolve()
-                if not path.is_relative_to(self.storage_dir / repo.id / record.id):
-                    raise ValueError("POLICY_PATH_MISMATCH")
+                path = Path(record.file_path)
                 limit = min(
                     self.max_document_bytes,
                     settings.max_policy_read_bytes,
@@ -111,8 +107,7 @@ class UploadAuthority:
                 )
                 if limit <= 0:
                     raise ValueError("POLICY_SIZE_LIMIT")
-                with path.open("rb") as stream:
-                    data = stream.read(limit + 1)
+                data = self.originals.read(record.file_path, repo.id, record.id, limit)
                 if len(data) > limit:
                     raise ValueError("POLICY_SIZE_LIMIT")
                 size += len(data)
@@ -124,7 +119,7 @@ class UploadAuthority:
                     getattr(record, "source_name", None) or path.name,
                     doc.adr_id,
                     repo.id,
-                    str(path),
+                    record.file_path,
                     doc.content_hash,
                     source_type=getattr(record, "source_type", None) or "UNKNOWN",
                     source_id=getattr(record, "source_id", None),

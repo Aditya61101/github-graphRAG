@@ -3,7 +3,11 @@ import os
 
 
 def background_processing_enabled() -> bool:
-    raw = os.getenv('ENABLE_BACKGROUND_PROCESSING', 'true').strip().lower()
+    production = bool(
+        os.getenv('K_SERVICE') or os.getenv('CLOUD_RUN_JOB')
+        or os.getenv('APP_ENV', '').lower() == 'production'
+    )
+    raw = os.getenv('ENABLE_BACKGROUND_PROCESSING', 'false' if production else 'true').strip().lower()
     if raw in {'true', '1', 'yes', 'on'}:
         return True
     if raw in {'false', '0', 'no', 'off'}:

@@ -193,15 +193,23 @@ async def test_repository_isolation_rejects_missing_metadata_in_all_channels():
 
 @pytest.mark.asyncio
 async def test_tool_keeps_metadata_out_of_prompt_and_uses_effective_query():
+    from contextlib import asynccontextmanager
+    scopes = []
+    @asynccontextmanager
+    async def ready(repository_id):
+        scopes.append(repository_id)
+        yield
     kwargs = retrieval_kwargs()
     tool = create_query_graph_rag_tool(
         **{key: kwargs[key] for key in ["driver", "database", "embedder", "entity_retriever", "community_retriever", "chunk_retriever", "reranker"]},
         retrieval_settings=kwargs["settings"],
+        barrier=SimpleNamespace(read=ready),
     )
     command = await tool.coroutine(
         query=kwargs["query"], runtime=SimpleNamespace(state={"repository_id": "repo"}, tool_call_id="call"),
     )
     text = command.update["messages"][0].content
+    assert scopes == ["repo"]
     assert "private evidence B" in text
     assert all(key not in text for key in ["node_ids", "edge_ids", "assertion_ids", "graph_context"])
     assert command.update["retrieval_graph_context"]["assertion_ids"] == ["assertion:X", "assertion:Y"]
