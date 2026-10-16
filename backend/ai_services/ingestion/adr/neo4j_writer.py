@@ -56,6 +56,8 @@ class ADRNeo4jWriter:
 
         Fails explicitly if deletion cannot be completed.
         """
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not self.driver:
             return
 
@@ -105,6 +107,8 @@ class ADRNeo4jWriter:
         ],  # source_id, target_id, rel_type, rationale, evidence
     ) -> None:
         """Persist full ADR graph transactionally within the existing Neo4j knowledge graph."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not self.driver:
             return
 

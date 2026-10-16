@@ -171,6 +171,8 @@ class ADRApplicabilityStore:
         chunks: Sequence[ADRChunk],
         properties: dict[str, dict],
     ) -> None:
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if set(properties) != {r.id for r in requirements}:
             raise ValueError("Update IDs must match the supplied requirements exactly")
         if any(

@@ -4,6 +4,16 @@ from neo4j import EagerResult
 from .persistence.ingestion_jobs import LostIngestionLease
 
 
+def require_fenced_writer(driver):
+    """Production maintenance/CLI paths must not bypass API ownership either."""
+    import os
+    remote = (os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN_JOB")
+              or os.getenv("APP_ENV", "").lower() == "production"
+              or os.getenv("DATABASE_URL", "").startswith("postgresql"))
+    if remote and not isinstance(driver, FencedDriver):
+        raise RuntimeError("Production graph mutation requires owned repository ingestion")
+
+
 class GraphControl:
     def __init__(self, driver, database="neo4j"):
         self.driver, self.database = driver, database
@@ -100,4 +110,3 @@ class FencedDriver:
             records, keys = list(result), list(result.keys())
             summary = result.consume()
             return EagerResult(records, summary, keys)
-

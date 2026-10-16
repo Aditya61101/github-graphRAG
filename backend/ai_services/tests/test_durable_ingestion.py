@@ -223,3 +223,24 @@ async def test_worker_partial_failure_retries_full_then_recovers_sealed_sql_fail
     assert jobs.get(run_id).status == "INDEXING"
     await worker.run(run_id)
     assert jobs.get(run_id).status == "COMPLETED"
+
+
+def test_production_maintenance_writer_cannot_bypass_fence(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://unused/unused")
+    driver = MagicMock()
+    with pytest.raises(RuntimeError, match="requires owned"):
+        Neo4jRepositoryWriter(driver).reconcile_code("repo")
+    driver.execute_query.assert_not_called()
+
+
+def test_repeated_hard_death_exhaustion_exposes_manual_retry(jobs):
+    run_id = enqueue(jobs)
+    for _ in range(3):
+        assert jobs.claim(run_id)
+        jobs.test_clock[0] += 121
+    assert jobs.claim(run_id) is None
+    assert jobs.get(run_id).status == "FAILED"
+    with jobs.sessions() as session:
+        assert session.get(RepositoryModel, "repo").status == "FAILED"
+    fresh = enqueue(jobs)
+    assert fresh != run_id and jobs.claim(fresh).force_full

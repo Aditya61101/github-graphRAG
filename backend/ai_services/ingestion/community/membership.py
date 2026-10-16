@@ -46,6 +46,8 @@ class Neo4jCommunityStore(CommunityStore):
         supplied communities are updated and unrelated communities are left untouched.
         Canonical entity IDs are required; Neo4j elementId() is never used as a fallback.
         """
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         db = self.config.database
         c_label = self.config.community_label
         e_label = self.config.entity_label
@@ -247,6 +249,8 @@ class Neo4jCommunityStore(CommunityStore):
 
     async def cleanup_temporary_detection_properties(self) -> None:
         """Remove any leftover temporary GDS properties (e.g. _gdsCommunityId) from entity nodes."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         db = self.config.database
         e_label = self.config.entity_label
         temp_prop = self.config.temporary_gds_property
@@ -414,6 +418,8 @@ class Neo4jCommunityStore(CommunityStore):
 
         All persisted properties are Neo4j scalar values or list of scalars.
         """
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not summaries:
             return
 
@@ -455,6 +461,8 @@ class Neo4jCommunityStore(CommunityStore):
         embedding_version_hash: str | None = None,
     ) -> None:
         """Persist vector embeddings and embedded version hash to Community nodes."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not embeddings:
             return
 

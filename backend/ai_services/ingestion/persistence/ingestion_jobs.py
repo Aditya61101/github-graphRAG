@@ -111,6 +111,8 @@ class IngestionJobs:
             if candidate.attempts >= self.max_attempts:
                 candidate.status, candidate.error = "FAILED", "Ingestion retry limit reached"
                 candidate.completed_at = utc_now()
+                candidate.lease_until = None
+                s.get(RepositoryModel, candidate.repository_id).status = "FAILED"
                 state.active_run_id = None
                 if state.state != "READY":
                     state.state = "REPAIR_REQUIRED"
