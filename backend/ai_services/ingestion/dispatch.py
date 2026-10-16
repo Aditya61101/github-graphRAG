@@ -7,7 +7,11 @@ class IngestionJobsDispatcher(CloudRunJobsDispatcher):
     @staticmethod
     def payload(run_id):
         return {"overrides": {"containerOverrides": [{
-            "args": ["python", "-m", "ai_services.runs.run_repository_ingestion"],
+            # Cloud Run's `args` override replaces arguments to the configured
+            # container entrypoint; it does not replace the entrypoint itself.
+            # The Job is configured with command `python`, so omit the binary
+            # here to produce `python -m ai_services.runs.run_repository_ingestion`.
+            "args": ["-m", "ai_services.runs.run_repository_ingestion"],
             "env": [{"name": "INGESTION_RUN_ID", "value": run_id}],
         }]}}
 
