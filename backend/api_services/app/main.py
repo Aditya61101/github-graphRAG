@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +42,6 @@ from ai_services.ingestion.pr.service import PullRequestIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
 from api_services.app.models.app_dependencies import AppDependencies
 from ai_services.retrievers.retriever_factory import create_retrievers
-from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
 from ai_services.graph.knowledge import RepositoryKnowledgeService
 from shared.utils.env_helper import require_env
@@ -59,8 +57,7 @@ async def lifespan(app: FastAPI):
     app.state.github_app = github_app
     app.state.github_oauth = GitHubOAuth(github_settings)
     database = require_env("NEO4J_DATABASE") or None
-    # One model per FastAPI worker; failures propagate and fail startup.
-    reranker = await asyncio.to_thread(Qwen3Reranker, RETRIEVAL_SETTINGS)
+    reranker = None
     app.state.reranker = reranker
 
     # Create application-scoped infrastructure once. These instances are

@@ -1,0 +1,16 @@
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/decisionguard-ai-builder-cup/decisionguard/backend:${_IMAGE_TAG}'
+      - '.'
+
+images:
+  - 'asia-south1-docker.pkg.dev/decisionguard-ai-builder-cup/decisionguard/backend:${_IMAGE_TAG}'
+
+substitutions:
+  _IMAGE_TAG: 'phase1'

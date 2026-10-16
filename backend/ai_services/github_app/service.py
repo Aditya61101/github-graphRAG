@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -12,12 +12,18 @@ import jwt
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 
+from ai_services.ingestion.persistence.concurrency import serialize_metadata_write
 from ai_services.ingestion.persistence.models import (
-    GitHubConnectionModel, GitHubInstallationModel, InstallationRepositoryModel,
-    RepositoryModel, ConversationScopeModel, utc_now,
+    ConversationScopeModel,
+    GitHubConnectionModel,
+    GitHubInstallationModel,
+    InstallationRepositoryModel,
+    RepositoryModel,
+    utc_now,
 )
 from ai_services.ingestion.sources.credentials import GitHubCredential
 from ai_services.ingestion.sources.interface import RepositoryMetadata
+
 from .settings import GitHubAppSettings
 
 
@@ -29,12 +35,12 @@ class GitHubAppError(Exception):
 
 
 def parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+    return datetime.fromisoformat(value).astimezone(UTC)
 
 
 def as_utc(value: datetime) -> datetime:
     # SQLite returns naive UTC values even when aware timestamps were written.
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, datetime, datetime]:
@@ -110,6 +116,7 @@ class GitHubAppService:
 
     def revoke_user(self, github_id: str, expected_token: str | None = None) -> None:
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             connection = session.scalars(select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_id))).first()
             if connection and (expected_token is None or connection.access_token == expected_token):
@@ -149,7 +156,7 @@ class GitHubAppService:
         except (InvalidToken, RuntimeError):
             # Missing/misconfigured encryption keys are operational failures.
             raise GitHubAppError(503, 'Stored GitHub credentials unavailable') from None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expiry = connection.access_token_expires_at
         if expiry and as_utc(expiry) > now + timedelta(seconds=60) and token != rejected_token:
             return token
@@ -191,7 +198,7 @@ class GitHubAppService:
     def _persist_rotation(self, user_id, connection, credentials):
         try:
             self.store.rotate_github_tokens(connection, *credentials)
-        except Exception:
+        except Exception:  # noqa: BLE001 - sanitize storage errors and retain pending rotation
             raise GitHubAppError(503, 'Unable to persist GitHub token refresh; retry later') from None
         del self.pending_rotations[user_id]
 
@@ -228,7 +235,7 @@ class GitHubAppService:
         async with lock:
             generation = self.generations.get(str(installation_id), 0)
             cached = self.tokens.get(key)
-            if cached and cached[1] > datetime.now(timezone.utc) + timedelta(seconds=60):
+            if cached and cached[1] > datetime.now(UTC) + timedelta(seconds=60):
                 return GitHubCredential(cached[0])
             body: dict[str, Any] = {'permissions': permissions}
             if repository_ids:
@@ -238,7 +245,7 @@ class GitHubAppService:
             if not isinstance(result, dict) or not isinstance(result.get('token'), str) or not result.get('expires_at'):
                 raise GitHubAppError(502, 'Invalid installation token response')
             expires = parse_time(result['expires_at'])
-            if expires <= datetime.now(timezone.utc) + timedelta(seconds=60):
+            if expires <= datetime.now(UTC) + timedelta(seconds=60):
                 raise GitHubAppError(502, 'Installation token already expired')
             if self.generations.get(str(installation_id), 0) != generation:
                 raise GitHubAppError(403, 'Installation access changed while issuing credentials')
@@ -248,6 +255,7 @@ class GitHubAppService:
     def persist_inventory(self, installation: dict, repositories: list[dict], status: str):
         iid = str(installation['id'])
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             item = session.get(GitHubInstallationModel, iid)
             previous = (item.status, item.repository_selection) if item else None
             if not item:
@@ -399,7 +407,17 @@ class GitHubAppService:
             tracked_branch=branch or item.get('default_branch') or 'main',
             repository_url=item['html_url'], visibility='public'), user_id=user_id, connection_id=connection.id)
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             record = session.get(RepositoryModel, repo.id)
+            if record.user_id != user_id:
+                raise GitHubAppError(409, 'Repository ownership changed during binding')
+            installation = session.get(GitHubInstallationModel, str(item['installation_id']))
+            granted = session.get(InstallationRepositoryModel,
+                                  (str(item['installation_id']), record.github_repository_id))
+            if (not installation or installation.status != 'ACTIVE' or not granted
+                    or not granted.granted or granted.is_private
+                    or granted.full_name.lower() != record.full_name.lower()):
+                raise GitHubAppError(409, 'Installation access changed during repository binding')
             record.installation_id, record.access_state = item['installation_id'], 'ACTIVE'
             session.commit()
         return self.store.get_repository(repo.id)
@@ -497,6 +515,7 @@ class GitHubAppService:
         if len(conversation_id) > 255:
             raise GitHubAppError(400, 'Conversation ID is too long')
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             scope = session.get(ConversationScopeModel, (user_id, conversation_id))
             if scope and scope.repository_id != repository_id:
                 raise GitHubAppError(409, 'Conversation belongs to a different repository')

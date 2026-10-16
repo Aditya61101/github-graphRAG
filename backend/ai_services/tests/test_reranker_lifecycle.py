@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -48,12 +48,13 @@ def test_qwen_uses_causal_yes_no_scoring_left_padding_and_loads_once(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_fastapi_lifespan_shares_one_model_with_dependencies_and_agent(monkeypatch):
+async def test_fastapi_lifespan_needs_no_local_model(monkeypatch):
     import api_services.app.main as main
 
-    reranker = SimpleNamespace()
-    factory = MagicMock(return_value=reranker)
-    monkeypatch.setattr(main, "Qwen3Reranker", factory)
+    factory = MagicMock(side_effect=AssertionError("No model loading at startup"))
+    monkeypatch.setattr(Qwen3Reranker, "__init__", factory)
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
     monkeypatch.setattr(main, "require_env", lambda name, default=None: default or "test")
     monkeypatch.setattr(main.GitHubAppSettings, 'from_env', MagicMock(return_value=MagicMock()))
     driver = MagicMock()
@@ -72,29 +73,12 @@ async def test_fastapi_lifespan_shares_one_model_with_dependencies_and_agent(mon
     monkeypatch.setattr(main, "RAGQueryAgent", agent_factory)
     app = FastAPI()
     async with main.lifespan(app):
-        assert app.state.reranker is reranker
-        assert app.state.deps.reranker is reranker
-        assert agent_factory.call_args.kwargs["reranker"] is reranker
+        assert app.state.reranker is None
+        assert app.state.deps.reranker is None
+        assert agent_factory.call_args.kwargs["reranker"] is None
         assert agent_factory.call_args.kwargs["retrieval_settings"] is main.RETRIEVAL_SETTINGS
-        factory.assert_called_once_with(main.RETRIEVAL_SETTINGS)
+        factory.assert_not_called()
         assert app.state.pr_ingestion_service is app.state.deps.pr_ingestion_service
         assert main.PullRequestIngestionService.call_args.kwargs['repository_source'] is main.GitHubRepositorySource.return_value
         assert main.PullRequestIngestionService.call_args.kwargs['repository_lock'] == main.RepositoryIngestionService.return_value._get_lock
     driver.close.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_model_load_failure_fails_startup(monkeypatch):
-    import api_services.app.main as main
-
-    factory = MagicMock(side_effect=RuntimeError("model unavailable"))
-    monkeypatch.setattr(main, "Qwen3Reranker", factory)
-    monkeypatch.setattr(main, "require_env", lambda name: "neo4j")
-    monkeypatch.setattr(main.GitHubAppSettings, 'from_env', MagicMock(return_value=MagicMock()))
-    for name in ('SqliteApplicationStore', 'GitHubAppService', 'GitHubOAuth'):
-        monkeypatch.setattr(main, name, MagicMock())
-    monkeypatch.setattr(main.httpx, 'AsyncClient', MagicMock(return_value=SimpleNamespace(aclose=AsyncMock())))
-    with pytest.raises(RuntimeError, match="model unavailable"):
-        async with main.lifespan(FastAPI()):
-            pytest.fail("Startup should not yield after a model-load failure")
-    factory.assert_called_once()

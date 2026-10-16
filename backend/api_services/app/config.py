@@ -1,6 +1,7 @@
-from dotenv import load_dotenv
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 load_dotenv()
 from ai_services.retrievers.settings import RetrievalSettings
@@ -28,3 +29,16 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{(Path(__file__).resolve().parents[2] / 'data' / 'decisionguard.db').as_posix()}",
 )
+
+
+def background_processing_enabled() -> bool:
+    """Default to local behavior; reject typos rather than accidentally enabling work."""
+    raw = os.getenv("ENABLE_BACKGROUND_PROCESSING", "true").strip().lower()
+    if raw in {"true", "1", "yes", "on"}:
+        return True
+    if raw in {"false", "0", "no", "off"}:
+        return False
+    raise RuntimeError("ENABLE_BACKGROUND_PROCESSING must be a boolean value")
+
+
+ENABLE_BACKGROUND_PROCESSING = background_processing_enabled()

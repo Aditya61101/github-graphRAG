@@ -23,7 +23,7 @@ class AppDependencies:
     entity_retriever: Any
     chunk_retriever: Any
     community_retriever: Any
-    reranker: Reranker
+    reranker: Reranker | None
     retrieval_settings: RetrievalSettings
     ingestion_service: Any = None
     pr_ingestion_service: Any = None

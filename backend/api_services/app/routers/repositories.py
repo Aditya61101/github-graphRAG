@@ -1,28 +1,61 @@
 from __future__ import annotations
 
+# FastAPI Depends/File defaults are route metadata, not ordinary mutable defaults.
+# ruff: noqa: B008
 import logging
 from typing import Any, Literal
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 
 from ai_services.github_app.service import GitHubAppError
-from ai_services.ingestion.persistence.models import UserModel
-from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictError, RepositorySourceError
-from api_services.app.models.adr import ADRResponse, ADRBatchUploadResponse, ADRUploadItemResponse
-from api_services.app.models.graph import RepositoryGraphResponse
 from ai_services.graph.repository import GraphRepositoryError
-from api_services.app.models.knowledge import KnowledgePage, KnowledgeDetail
+from ai_services.ingestion.persistence.models import UserModel
+from ai_services.ingestion.sources.interface import (
+    RepositoryOwnershipConflictError,
+    RepositorySourceError,
+)
+from api_services.app.models.adr import (
+    ADRBatchUploadResponse,
+    ADRResponse,
+    ADRUploadItemResponse,
+)
+from api_services.app.models.graph import RepositoryGraphResponse
+from api_services.app.models.knowledge import KnowledgeDetail, KnowledgePage
 from api_services.app.models.overview import (
-    Availability, OverviewKPIs, OverviewMetric, OverviewPermissions,
-    OverviewSection, RepositoryOverviewResponse, ReviewActivity,
+    Availability,
+    OverviewKPIs,
+    OverviewMetric,
+    OverviewPermissions,
+    OverviewSection,
+    RepositoryOverviewResponse,
+    ReviewActivity,
 )
 from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
-    AvailableRepositoryResponse, IngestRepositoryRequest, IngestionJobResponse,
-    RepositoryResponse, SyncRepositoryRequest,
+    AvailableRepositoryResponse,
+    IngestionJobResponse,
+    IngestRepositoryRequest,
+    RepositoryResponse,
+    SyncRepositoryRequest,
 )
-from api_services.app.utils.github_app_access import get_github_app, authorize_repository, authorize_repository_read, query_authorized
+from api_services.app.utils.github_app_access import (
+    authorize_repository,
+    authorize_repository_read,
+    get_github_app,
+    query_authorized,
+)
 from api_services.app.utils.jwt_utils import get_current_user
+from api_services.app.utils.processing import require_processing_enabled
 from api_services.app.utils.query_response_mapper import build_api_response
 
 logger = logging.getLogger(__name__)
@@ -51,6 +84,7 @@ async def _run_ingest_background(service, repo_id, installation_id, user_id, bra
 
 
 async def _start_index(request, background_tasks, user, repo, branch, force_full, sync, trigger):
+    require_processing_enabled()
     service = resource(request, 'ingestion_service')
     args = (service, repo.id, repo.installation_id, user.id, branch, force_full, trigger)
     if not sync:
@@ -75,6 +109,7 @@ async def _start_index(request, background_tasks, user, repo, branch, force_full
 async def ingest_repository(payload: IngestRepositoryRequest, request: Request,
                             background_tasks: BackgroundTasks,
                             current_user: UserModel = Depends(get_current_user)) -> Any:
+    require_processing_enabled()
     app_service = get_github_app(request)
     try:
         selected = await app_service.select_repository(current_user.id, payload.repository, payload.installation_id)
@@ -256,6 +291,7 @@ async def get_repository(owner: str, name: str, request: Request,
 async def sync_repository(owner: str, name: str, request: Request, background_tasks: BackgroundTasks,
                           payload: SyncRepositoryRequest | None = None,
                           current_user: UserModel = Depends(get_current_user)):
+    require_processing_enabled()
     repo = await authorize_repository(request, current_user.id, f'{owner}/{name}', require_admin=True)
     payload = payload or SyncRepositoryRequest()
     return await _start_index(request, background_tasks, current_user, repo, repo.tracked_branch,
@@ -267,6 +303,7 @@ async def sync_repository(owner: str, name: str, request: Request, background_ta
 async def upload_adr(repo_id: str, request: Request,
                      files: list[UploadFile] = File(..., description='One or more ADR documents (.md, .txt, .pdf, .docx)'),
                      current_user: UserModel = Depends(get_current_user)) -> Any:
+    require_processing_enabled()
     repo = await authorize_repository(request, current_user.id, repo_id)
     try:
         items = await resource(request, 'adr_service').process_adr_uploads(repo.id, current_user.id, files)

@@ -10,7 +10,6 @@ from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
 from ai_services.ingestion.rkg.llm_adapters import AzureOpenAILLM
 from ai_services.retrievers.retriever_factory import create_retrievers
 from shared.utils.env_helper import require_env
-from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.retrievers.settings import RetrievalSettings
 
 GRAPH_RAG_SYSTEM_PROMPT = """
@@ -68,7 +67,7 @@ async def query_graph_rag(
     community_retriever,
     chunk_retriever,
     llm,
-    reranker,
+    reranker=None,  # Legacy argument retained; retrieval is vector-only.
     repository_id: str | None = None,
     settings: RetrievalSettings | None = None,
 ):
@@ -80,7 +79,7 @@ async def query_graph_rag(
         entity_retriever=entity_retriever,
         community_retriever=community_retriever,
         chunk_retriever=chunk_retriever,
-        reranker=reranker,
+        reranker=None,
         repository_id=repository_id,
         settings=settings,
     )
@@ -104,7 +103,6 @@ async def main() -> None:
     parser.add_argument("--repository-id", required=True, help="Repository identity stored on Neo4j chunks/entities.")
     args = parser.parse_args()
     settings = RetrievalSettings.from_env()
-    reranker = await asyncio.to_thread(Qwen3Reranker, settings)
 
     database = require_env("NEO4J_DATABASE") or None
     driver = GraphDatabase.driver(
@@ -141,7 +139,6 @@ async def main() -> None:
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
             llm=llm,
-            reranker=reranker,
             repository_id=args.repository_id,
             settings=settings,
         )

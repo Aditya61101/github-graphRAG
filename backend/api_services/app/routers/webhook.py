@@ -4,13 +4,17 @@ import hashlib
 import hmac
 import json
 import logging
+
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+
 from ai_services.github_app.service import GitHubAppError
+from ai_services.ingestion.pr.models import PullRequestEvent
+from api_services.app import config
 from api_services.app.config import GITHUB_APP_WEBHOOK_SECRET
 from api_services.app.utils.github_app_access import get_github_app
-from ai_services.ingestion.pr.models import PullRequestEvent
-from pydantic import ValidationError
+from api_services.app.utils.processing import require_processing_enabled
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,10 +36,13 @@ async def _process_push_in_background(service, payload):
 
 async def _process_pr_in_background(service, event):
     try:
-        print('processing pr in background: ', event.model_dump_json(indent=2))
-        pr_request_change_set = await service.ingest_pull_request(event)
-        print('pr request change set: ', pr_request_change_set.model_dump_json(indent=2))
-    except Exception as exc:
+        result = await service.ingest_pull_request(event)
+        logger.info(
+            'PR background processing finished github_repository=%s pr=%s revision=%s result=%s',
+            event.github_repository_id, event.pull_request_number, event.revision_key,
+            'duplicate_or_ignored' if result is None else 'constructed',
+        )
+    except Exception as exc:  # noqa: BLE001 - log only safe operational metadata
         logger.error(
             'PR background ingestion failed github_repository=%s pr=%s base=%s head=%s delivery=%s error_type=%s',
             event.github_repository_id, event.pull_request_number, event.base_sha, event.head_sha,
@@ -61,9 +68,9 @@ async def _verified_payload(request, signature):
     try:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
-            raise ValueError()
+            raise TypeError()
         return payload
-    except (ValueError, UnicodeError):
+    except (ValueError, TypeError, UnicodeError):
         raise HTTPException(400, 'Malformed webhook JSON object') from None
 
 
@@ -98,6 +105,7 @@ def _tracked_repository(app_service, payload, installation_id):
 
 async def _handle_authorization(app_service, payload, event):
     from sqlalchemy import select
+
     from ai_services.ingestion.persistence.models import GitHubConnectionModel
 
     sender = payload.get('sender')
@@ -137,6 +145,7 @@ def _queue_pr(request, background_tasks, normalized_pr, tracked):
     if (normalized_pr.base_repository_id != normalized_pr.github_repository_id
             or normalized_pr.repository_full_name.lower() != tracked.full_name.lower()):
         raise HTTPException(400, 'Pull request repository identity mismatch')
+    require_processing_enabled()
     service = getattr(request.app.state, 'pr_ingestion_service', None)
     if service is None:
         raise HTTPException(503, 'Pull request ingestion service is not initialized')
@@ -154,6 +163,7 @@ def _queue_push(request, background_tasks, payload, tracked):
     if (not isinstance(ref, str) or ref != 'refs/heads/' + tracked.tracked_branch
             or not payload.get('after') or payload['after'] == '0' * 40):
         return {'status': 'ignored', 'event': 'push'}
+    require_processing_enabled()
     service = getattr(request.app.state, 'ingestion_service', None)
     if service is None:
         raise HTTPException(503, 'Repository ingestion service is not initialized')
@@ -163,6 +173,10 @@ def _queue_push(request, background_tasks, payload, tracked):
 
 
 async def _acknowledge_merged_pr(request, app_service, payload, tracked, installation_id):
+    if not config.ENABLE_BACKGROUND_PROCESSING:
+        return {'status': 'acknowledged', 'event': 'pull_request', 'repository': tracked.full_name,
+                'indexed_commit_sha': tracked.indexed_commit_sha,
+                'message': 'Merged PR acknowledged; processing is disabled and no synchronization was queued.'}
     service = getattr(request.app.state, 'ingestion_service', None)
     if service is None:
         raise HTTPException(503, 'Repository ingestion service is not initialized')
