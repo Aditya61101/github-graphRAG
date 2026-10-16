@@ -18,7 +18,8 @@ let server,
   Findings,
   CoveragePanel,
   Summary,
-  Risks;
+  Risks,
+  Queue;
 before(async () => {
   globalThis.localStorage = { getItem: () => "test-token", removeItem() {} };
   server = await createServer({
@@ -46,6 +47,90 @@ before(async () => {
   ({ DecisionRisks: Risks } = await server.ssrLoadModule(
     "/src/components/repositories/decision-risks.tsx"
   ));
+  ({ PullRequestTable: Queue } = await server.ssrLoadModule(
+    "/src/components/repositories/pull-request-table.tsx"
+  ));
+});
+
+test("PR queue distinguishes incomplete, missing, running and stale evaluations and never invents a Check link", () => {
+  const pr = fixture.detail.pull_request;
+  const before = JSON.stringify(pr);
+  const display = (changes = {}, evaluation = pr.evaluation) =>
+    render(Queue, { items: [{ ...pr, ...changes, evaluation }] });
+  const html = display();
+  assert.match(html, /3 confirmed/);
+  assert.match(html, /1 requiring review/);
+  assert.match(html, /Partial/);
+  assert.match(html, /116733676654/);
+  assert.match(html, /not a live branch check/);
+  assert.doesNotMatch(html, /rejected records|<pre|View pull request/);
+  for (const state of ["PENDING", "FAILED", "DISABLED", "RETRY", "SKIPPED"]) {
+    const unpublished = display(
+      {},
+      {
+        ...pr.evaluation,
+        publication: { ...pr.evaluation.publication, status: state },
+      }
+    );
+    assert.doesNotMatch(unpublished, /116733676654|GitHub Check/);
+    assert.match(unpublished, /Confirmed conflicts/);
+  }
+  const clean = {
+    ...pr.evaluation,
+    confirmed_conflicts: 0,
+    review_required_findings: 0,
+    outcome: "NO_CONFLICTS_FOUND",
+    coverage: {
+      ...pr.evaluation.coverage,
+      scope: "COMPLETE_FOR_RETAINED_SCOPE",
+    },
+  };
+  assert.doesNotMatch(display({}, clean), /incomplete review/);
+  assert.match(
+    display(
+      {},
+      { ...clean, coverage: { ...clean.coverage, scope: "PARTIAL" } }
+    ),
+    /incomplete review/
+  );
+  assert.match(display({}, { ...clean, coverage: null }), /incomplete review/);
+  assert.match(
+    display({}, { ...clean, execution: "PARTIAL" }),
+    /incomplete review/
+  );
+  assert.match(
+    display({}, { ...clean, outcome: "REVIEW_REQUIRED" }),
+    /Requires review/
+  );
+  for (const scope of ["PARTIAL", "UNASSESSABLE"])
+    assert.doesNotMatch(
+      display({}, { ...clean, coverage: { ...clean.coverage, scope } }),
+      /queue-neutral/
+    );
+  for (const status of ["QUEUED", "RUNNING", "FAILED"]) {
+    const pending = display({}, { ...clean, status, outcome: null });
+    assert.match(
+      pending,
+      new RegExp(
+        {
+          QUEUED: "Evaluation queued",
+          RUNNING: "Evaluating",
+          FAILED: "Evaluation unavailable",
+        }[status]
+      )
+    );
+    assert.doesNotMatch(pending, /No confirmed conflicts/);
+  }
+  const missing = display(
+    { title: null, author: null, freshness: "UNKNOWN", observed_at: null },
+    null
+  );
+  assert.match(missing, /Title unavailable/);
+  assert.match(missing, /Author unavailable/);
+  assert.match(missing, /Not evaluated/);
+  assert.doesNotMatch(missing, /No confirmed conflicts|116733676654/);
+  assert.match(display({ freshness: "STALE" }, null), /Stale analysis/);
+  assert.equal(JSON.stringify(pr), before);
 });
 after(async () => {
   await server?.close();

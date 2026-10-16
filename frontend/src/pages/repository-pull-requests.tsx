@@ -5,9 +5,9 @@ import { useAuth } from "@/contexts/auth-context";
 import { useRepositoryOverview } from "@/layouts/repository-layout";
 import {
   Pagination,
-  PRSummary,
   ReviewFailure,
 } from "@/components/repositories/review-summary";
+import { PullRequestTable } from "@/components/repositories/pull-request-table";
 
 export default function RepositoryPullRequestsPage() {
   const { repository } = useRepositoryOverview();
@@ -25,11 +25,12 @@ function PullRequests({ id }: { id: string }) {
   });
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">Pull Requests</h1>
-      <p className="text-sm text-muted-foreground">
-        Architectural reviews of observed pull requests. Supported
-        governing-rule findings are not necessarily separate bugs.
-      </p>
+      <header className="space-y-2">
+        <h1 className="text-2xl font-semibold">Pull Requests</h1>
+        <p className="text-sm text-muted-foreground">
+          Architectural reviews of pull requests in this repository.
+        </p>
+      </header>
       {query.isPending ? (
         <p role="status" aria-busy="true">
           Loading pull requests...
@@ -39,11 +40,7 @@ function PullRequests({ id }: { id: string }) {
       ) : (
         <>
           {query.data.items.length ? (
-            <div className="space-y-4">
-              {query.data.items.map((pr) => (
-                <PRSummary key={pr.pr_number} pr={pr} />
-              ))}
-            </div>
+            <PullRequestTable items={query.data.items} />
           ) : (
             <p className="rounded-xl border border-dashed p-8">
               No observed pull requests on this page. Reviews appear after a

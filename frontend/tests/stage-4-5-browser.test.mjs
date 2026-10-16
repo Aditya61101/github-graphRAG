@@ -78,7 +78,7 @@ before(async () => {
                         title: "Previous PR",
                       },
                     ]
-                  : actual.page.items,
+                  : current.items || actual.page.items,
                 total: 21,
                 limit: 20,
                 offset,
@@ -166,6 +166,7 @@ async function screenshot(name, stage = "stage_4_5") {
     );
     assert.ok(overflow.page <= overflow.width, JSON.stringify(overflow));
   }
+  if (process.env.CAPTURE_REVIEW_SCREENSHOTS !== "1") return;
   const directory = new URL(`../../backend/data/${stage}/`, import.meta.url);
   await mkdir(directory, { recursive: true });
   const image = await browser.call("Page.captureScreenshot", {
@@ -200,14 +201,7 @@ test("real Case A Overview, PR list, detail, Check link, original evidence and m
   await screenshot("overview-desktop.png");
   await link("View all PRs");
   await browser.waitFor(contains(actual.detail.pull_request.title));
-  assert.equal(
-    await browser.evaluate(
-      contains(
-        "3 supported governing-rule findings · 1 requiring review · 3 rejected records"
-      )
-    ),
-    true
-  );
+  assert.equal(await browser.evaluate(contains("3 confirmed")), true);
   await link("#2 ");
   await browser.waitFor(contains("Key architectural findings"));
   await browser.click("Findings");
@@ -252,11 +246,113 @@ test("real Case A Overview, PR list, detail, Check link, original evidence and m
     false
   );
 });
+
+test("compact PR queue preserves Case A identity, publication, responsive layout and read-only navigation", async () => {
+  await visit(root + "/pull-requests");
+  await browser.waitFor(contains(actual.detail.pull_request.title));
+  const table = "document.querySelector('.pr-queue')";
+  assert.equal(
+    await browser.evaluate(`${table}.querySelectorAll('tbody tr').length`),
+    1
+  );
+  for (const text of [
+    actual.detail.pull_request.author,
+    "Confirmed conflicts",
+    "3 confirmed",
+    "1 requiring review",
+    "Partial",
+    "Matches observed revision",
+  ])
+    assert.equal(
+      await browser.evaluate(
+        `${table}.innerText.includes(${JSON.stringify(text)})`
+      ),
+      true,
+      text
+    );
+  assert.equal(
+    await browser.evaluate(
+      `${table}.querySelector('.queue-review .queue-secondary').title.includes('not a live branch check')`
+    ),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(
+      `${table}.querySelector('.queue-links a:last-child').href`
+    ),
+    "https://github.com/Aditya61101/claimIQ/runs/116733676654"
+  );
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Refresh')"
+    ),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('[data-availability], pre').length"
+    ),
+    0
+  );
+  assert.equal(
+    await browser.evaluate(
+      `${table}.querySelector('table').getBoundingClientRect().width <= ${table}.getBoundingClientRect().width`
+    ),
+    true
+  );
+  for (const width of [1024, 768, 390, 320]) {
+    await browser.call("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: width < 768,
+    });
+    assert.equal(
+      await browser.evaluate(
+        "document.documentElement.scrollWidth <= window.innerWidth"
+      ),
+      true,
+      `overflow at ${width}`
+    );
+    assert.equal(
+      await browser.evaluate(
+        `${table}.querySelector('tbody tr').getBoundingClientRect().width <= innerWidth`
+      ),
+      true
+    );
+  }
+  assert.equal(
+    state.calls.filter((call) => /\/pull-requests\?/.test(call.url)).length,
+    1
+  );
+  await link("#2 ");
+  await browser.waitFor(contains("Key architectural findings"));
+  assert.ok(state.calls.every((call) => call.method === "GET"));
+  assert.equal(
+    state.calls.some((call) => /continue|publish/.test(call.url)),
+    false
+  );
+});
 test("PR pagination loads a separate offset and repository isolation blocks foreign routes", async () => {
   await visit(root + "/pull-requests");
   await browser.waitFor(contains(actual.detail.pull_request.title));
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Previous').disabled"
+    ),
+    true
+  );
   await browser.click("Next");
   await browser.waitFor(contains("Previous PR"));
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Next').disabled"
+    ),
+    true
+  );
+  assert.equal(await browser.evaluate(contains("21–21 of 21")), true);
+  await browser.click("Previous");
+  await browser.waitFor(contains(actual.detail.pull_request.title));
   assert.ok(state.calls.some((call) => call.url.includes("offset=20")));
   await visit("/projects/repo_other/pull-requests/2");
   await browser.waitFor(contains("Repository access denied"));
@@ -329,7 +425,7 @@ test("stale current metadata preserves history without presenting old conflicts 
   await browser.waitFor(contains("Key architectural findings"));
 });
 
-test("Stage 4.5.1 five tabs, finding navigation, evidence provenance and six design screenshots", async () => {
+test("Stage 4.5.1 five tabs, finding navigation, evidence provenance and responsive layouts", async () => {
   await visit(root + "/pull-requests/2");
   await browser.waitFor(contains("Key architectural findings"));
   assert.deepEqual(
