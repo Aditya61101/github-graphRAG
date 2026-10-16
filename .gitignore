@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 .env
+.env.prod
 
 # OAuth2 credentials
 **/token.json
@@ -20,3 +21,5 @@ backend/data/
 
 *.zip
 backend/secrets/
+
+instructions/
