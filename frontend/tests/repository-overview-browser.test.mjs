@@ -190,11 +190,10 @@ test("canonical index redirect, actual KPIs, section order and repository metada
     ),
     [
       "Architecture Overview",
-      "Architecture Decisions",
+      "Architectural Decisions",
       "Decisions at Risk",
       "PRs Analyzed",
       "Architectural Warnings",
-      "Architectural review activity",
       "Decisions needing attention",
       "Recent architectural PR reviews",
     ]
@@ -210,7 +209,10 @@ test("canonical index redirect, actual KPIs, section order and repository metada
       "Analysis not available yet",
     ]
   );
-  assert.equal(await browser.evaluate(contains("Last 7 days")), true);
+  assert.equal(
+    await browser.evaluate(contains("Architectural review activity")),
+    false
+  );
   assert.equal(await browser.evaluate(contains("abcdef1")), true);
   assert.equal(
     await browser.evaluate(contains("Tracked branch: develop")),

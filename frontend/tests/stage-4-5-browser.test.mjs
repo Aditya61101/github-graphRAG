@@ -7,6 +7,11 @@ import { openBrowser } from "./browser-helper.mjs";
 const actual = JSON.parse(
   await readFile(new URL("./fixtures/stage-4-5-case-a.json", import.meta.url))
 );
+const identities = JSON.parse(
+  await readFile(
+    new URL("./fixtures/stage-4-5-3-identities.json", import.meta.url)
+  )
+);
 const root = "/projects/repo_1120610241";
 let server, browser, base, state;
 const token =
@@ -56,6 +61,26 @@ before(async () => {
               return json(current.overview);
             if (url.pathname === "/repositories/repo_1120610241/knowledge")
               return json({ items: [], total: 0, offset: 0, limit: 20 });
+            if (
+              url.pathname.startsWith(
+                "/repositories/repo_1120610241/knowledge/"
+              )
+            ) {
+              const id = decodeURIComponent(url.pathname.split("/").at(-1));
+              const record = identities.knowledge.find(
+                (item) => item.id === id
+              );
+              return record
+                ? json({
+                    ...record,
+                    entities: [],
+                    evidence: [],
+                    entities_truncated: false,
+                    evidence_truncated: false,
+                    relationship_basis: "documented_ADR_knowledge",
+                  })
+                : json({ detail: "Not found" }, 404);
+            }
             if (url.pathname.startsWith("/repositories/repo_other"))
               return json({ detail: "Denied" }, 403);
             if (current.delay)
@@ -138,6 +163,22 @@ beforeEach(async () => {
     empty: false,
     history: false,
   };
+  state.overview.decisions_needing_attention.items = identities.attention.map(
+    (risk) => ({
+      ...risk,
+      knowledge_resolution: "RESOLVED",
+      knowledge: identities.knowledge.find((item) => item.id === risk.identity),
+    })
+  );
+  for (const section of ["review_activity", "recent_pr_reviews"]) {
+    state.overview[section].items = state.overview[section].items.map(
+      (review) => ({
+        ...review,
+        title: actual.detail.pull_request.title,
+        observed_at: actual.detail.pull_request.observed_at,
+      })
+    );
+  }
   await browser.call("Emulation.setDeviceMetricsOverride", {
     width: 1440,
     height: 1000,
@@ -332,6 +373,108 @@ test("compact PR queue preserves Case A identity, publication, responsive layout
     state.calls.some((call) => /continue|publish/.test(call.url)),
     false
   );
+});
+
+test("Overview resolves actual knowledge identities, keeps two separate requirements, and targets exact records", async () => {
+  await visit(root + "/overview");
+  const confirmed = identities.attention.find(
+    (item) => item.kind === "DECISION" && item.classification === "CONFIRMED"
+  );
+  const decision = identities.knowledge.find(
+    (item) => item.id === confirmed.identity
+  );
+  await browser.waitFor(contains(decision.title));
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('[data-risk-kind=DECISION]').length"
+    ),
+    2
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelectorAll('[data-risk-kind=REQUIREMENT]').length"
+    ),
+    2
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelector('#attention-title').closest('section').querySelector('details').open"
+    ),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(
+      contains("2 other affected architectural requirements")
+    ),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(contains("Architectural review activity")),
+    false
+  );
+  assert.equal(
+    await browser.evaluate("document.querySelectorAll('main pre').length"),
+    0
+  );
+  assert.deepEqual(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('[data-availability]')).map(e => e.textContent)"
+    ),
+    ["74", "2", "1", "7"]
+  );
+  await browser.evaluate(
+    "document.querySelector('#attention-title').closest('section').querySelector('summary').click()"
+  );
+  for (const requirement of identities.knowledge.filter(
+    (item) => item.kind === "constraint"
+  ))
+    assert.equal(
+      await browser.evaluate(contains(requirement.description)),
+      true
+    );
+  for (const width of [1440, 768, 390, 320]) {
+    await browser.call("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: 1000,
+      deviceScaleFactor: 1,
+      mobile: width < 768,
+    });
+    assert.equal(
+      await browser.evaluate(
+        "document.documentElement.scrollWidth <= innerWidth"
+      ),
+      true,
+      `Overview overflow at ${width}`
+    );
+  }
+  await browser.evaluate(
+    `document.querySelector('a[href*="record=${confirmed.identity}"]').click()`
+  );
+  await browser.waitFor(
+    "document.querySelector('[data-slot=knowledge-detail-modal]')?.innerText.includes(" +
+      JSON.stringify(decision.title) +
+      ")"
+  );
+  assert.ok(
+    state.calls.some((call) =>
+      call.url.includes("/knowledge/" + confirmed.identity)
+    )
+  );
+  await browser.click("Close architectural knowledge");
+  await browser.waitFor(
+    "!document.querySelector('[data-slot=knowledge-detail-modal]')"
+  );
+  assert.equal(
+    await browser.evaluate(
+      "new URLSearchParams(location.search).has('record')"
+    ),
+    false
+  );
+  await visit(root + "/overview");
+  await browser.waitFor(contains(decision.title));
+  await link("Review PR #2");
+  await browser.waitFor(contains("Key architectural findings"));
+  assert.ok(state.calls.every((call) => call.method === "GET"));
 });
 test("PR pagination loads a separate offset and repository isolation blocks foreign routes", async () => {
   await visit(root + "/pull-requests");

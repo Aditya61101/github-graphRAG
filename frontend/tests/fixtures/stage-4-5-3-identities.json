@@ -1,0 +1,438 @@
+{
+  "repository_id": "repo_1120610241",
+  "requirements": [
+    {
+      "requirement_id": "b9652205302af1fa53bddf46fcaa7c7fa0aecb07138504891a105f2ead97a31a",
+      "kind": "CONSTRAINT",
+      "title": null,
+      "statement": "Claim.processing_status may transition to READY_FOR_EVALUATION only when all associated documents have achieved VERIFIED.",
+      "requirement_type": "data_access_rule",
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ],
+      "target_entity_ids": [
+        "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+        "9e9f691398acc16b031872eba42963f0a6a2ea5abd04f0d4c6917f08d225bd35",
+        "c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d",
+        "efc624cc068e3bdf2e6dbe54a8e1ddfb8621f64b403589f08a930148f5d4a997"
+      ],
+      "target_links": [
+        {
+          "entity_id": "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+          "name": "Document",
+          "entity_type": "Component",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "9e9f691398acc16b031872eba42963f0a6a2ea5abd04f0d4c6917f08d225bd35",
+          "name": "Claim",
+          "entity_type": "Component",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d",
+          "name": "derive_processing_status",
+          "entity_type": "Module",
+          "relationship": "CONSTRAINS",
+          "origin": "CODE"
+        },
+        {
+          "entity_id": "efc624cc068e3bdf2e6dbe54a8e1ddfb8621f64b403589f08a930148f5d4a997",
+          "name": "update_claim_processing_status",
+          "entity_type": "Module",
+          "relationship": "CONSTRAINS",
+          "origin": "CODE"
+        }
+      ],
+      "evidence_ids": [
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "discovery_reasons": [
+        "ENTITY_TARGET",
+        "ADR_MENTION",
+        "LEXICAL_FALLBACK",
+        "CHANGED_LITERAL"
+      ],
+      "relevance_score": 159.0,
+      "declared_applicability_json": "{\"schema_version\":\"adr-applicability-v1\",\"prompt_version\":\"adr-applicability-prompt-v1\",\"applicability\":{\"scopes\":[\"entity\",\"other\"],\"targets\":[{\"kind\":\"entity\",\"name\":\"Claim.processing_status\",\"label\":null,\"description\":\"The claim processing status field for transition to READY_FOR_EVALUATION.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:4\"]},{\"kind\":\"other\",\"name\":\"Associated active documents for a claim\",\"label\":null,\"description\":\"The set of active documents associated with the claim whose statuses gate READY_FOR_EVALUATION.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:4\"]}],\"conditions\":[{\"kind\":\"operation\",\"expression\":\"Applies when transitioning Claim.processing_status to READY_FOR_EVALUATION.\",\"selectors\":[\"READY_FOR_EVALUATION\"]},{\"kind\":\"other\",\"expression\":\"Allowed only when every associated active Document has reached status VERIFIED.\",\"selectors\":[\"VERIFIED\"]}],\"exceptions\":[],\"qualifiers\":[\"Architectural constraint text specifies associated active Document, which narrows the all-documents condition to active documents.\"],\"basis\":\"explicit\",\"rationale\":\"The decision states the all-VERIFIED condition, and the architectural constraint clarifies that every associated active Document must be VERIFIED.\",\"uncertainty\":[\"Document context was truncated.\"],\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:4\"]},\"entity_ids\":[],\"community_ids\":[],\"unresolved_targets\":[\"Associated active documents for a claim\",\"Claim.processing_status\"],\"resolution_version\":\"adr-applicability-resolution-v1\",\"graph_snapshot\":\"a62b9c28a40221067b88b3eaf9c904f82c0f791bbf436268011053e20bb2c676\",\"context_truncated\":true}",
+      "scope_metadata_status": "VALID",
+      "enrichment_fingerprint": "09485325c91ae63caf32c31c558d8a019e7f0a1540f525f248b2d2ab1c0a1ae1",
+      "enrichment_status": "completed",
+      "enrichment_model": "legacy-preview-unknown",
+      "supported_community_ids": [],
+      "scope_evidence_ids": [
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "applicability": "UNASSESSED",
+      "policy_status": "UNKNOWN"
+    },
+    {
+      "requirement_id": "88b75ad379a96b9cd33c20f0db931b7080ff81852cdd2f25f7092523f6857fde",
+      "kind": "DECISION",
+      "title": "Claim status aggregation is centralized in claim status service",
+      "statement": "Status aggregation is strictly mediated by update_claim_processing_status in app.services.claim_status. The derive_processing_status helper evaluates all documents associated with a Claim.id to determine the aggregate claim status and populate action_required diagnostics when blocking document states exist.",
+      "requirement_type": "architectural_pattern",
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ],
+      "target_entity_ids": [
+        "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+        "47698629d11227fe711ad393873b56b3341c9482995e588af6f79a78176dfead",
+        "9e9f691398acc16b031872eba42963f0a6a2ea5abd04f0d4c6917f08d225bd35",
+        "c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d",
+        "efc624cc068e3bdf2e6dbe54a8e1ddfb8621f64b403589f08a930148f5d4a997"
+      ],
+      "target_links": [
+        {
+          "entity_id": "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+          "name": "Document",
+          "entity_type": "Component",
+          "relationship": "AFFECTS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "47698629d11227fe711ad393873b56b3341c9482995e588af6f79a78176dfead",
+          "name": "claim_processing",
+          "entity_type": "Interface",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "9e9f691398acc16b031872eba42963f0a6a2ea5abd04f0d4c6917f08d225bd35",
+          "name": "Claim",
+          "entity_type": "Component",
+          "relationship": "AFFECTS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "9e9f691398acc16b031872eba42963f0a6a2ea5abd04f0d4c6917f08d225bd35",
+          "name": "Claim",
+          "entity_type": "Component",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d",
+          "name": "derive_processing_status",
+          "entity_type": "Module",
+          "relationship": "AFFECTS",
+          "origin": "CODE"
+        },
+        {
+          "entity_id": "c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d",
+          "name": "derive_processing_status",
+          "entity_type": "Module",
+          "relationship": "CONSTRAINS",
+          "origin": "CODE"
+        },
+        {
+          "entity_id": "efc624cc068e3bdf2e6dbe54a8e1ddfb8621f64b403589f08a930148f5d4a997",
+          "name": "update_claim_processing_status",
+          "entity_type": "Module",
+          "relationship": "AFFECTS",
+          "origin": "CODE"
+        },
+        {
+          "entity_id": "efc624cc068e3bdf2e6dbe54a8e1ddfb8621f64b403589f08a930148f5d4a997",
+          "name": "update_claim_processing_status",
+          "entity_type": "Module",
+          "relationship": "CONSTRAINS",
+          "origin": "CODE"
+        }
+      ],
+      "evidence_ids": [
+        "68f7d169bdcf7244514170a692a6f9040db3041a8a6499f6be2434ff139d2b09",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "discovery_reasons": [
+        "ENTITY_TARGET",
+        "ADR_MENTION",
+        "LEXICAL_FALLBACK"
+      ],
+      "relevance_score": 155.0,
+      "declared_applicability_json": "{\"schema_version\":\"adr-applicability-v1\",\"prompt_version\":\"adr-applicability-prompt-v1\",\"applicability\":{\"scopes\":[\"entity\",\"other\"],\"targets\":[{\"kind\":\"entity\",\"name\":\"app.services.claim_status.update_claim_processing_status\",\"label\":null,\"description\":\"The service function through which claim status aggregation is strictly mediated.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:4\"]},{\"kind\":\"entity\",\"name\":\"app.services.claim_status.derive_processing_status\",\"label\":null,\"description\":\"The helper that evaluates all documents associated with a Claim.id and determines aggregate claim status.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\"]},{\"kind\":\"other\",\"name\":\"Claim status aggregation service behavior\",\"label\":null,\"description\":\"Centralized aggregation of document states into claim-level processing status and action_required diagnostics.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:6\"]}],\"conditions\":[{\"kind\":\"operation\",\"expression\":\"Applies whenever aggregate claim status is computed or updated.\",\"selectors\":[\"status aggregation\",\"update_claim_processing_status\",\"derive_processing_status\"]},{\"kind\":\"other\",\"expression\":\"Includes evaluating all documents associated with Claim.id and populating action_required diagnostics when blocking states exist.\",\"selectors\":[\"Claim.id\",\"action_required\"]}],\"exceptions\":[],\"qualifiers\":[\"Centralization is about claim status aggregation behavior, not all logic in the claim status service.\"],\"basis\":\"explicit\",\"rationale\":\"The decision explicitly centralizes aggregation in update_claim_processing_status and assigns document-wide evaluation to derive_processing_status; consequences reinforce this centralization.\",\"uncertainty\":[\"Document context was truncated.\"],\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:6\",\"adr:adr_917ed0fc62a7:chunk:4\"]},\"entity_ids\":[\"4766a37a1c4627984c73a3eef823ada3164948d69f04898ac83bc20a5582c02a\"],\"community_ids\":[],\"unresolved_targets\":[\"Claim status aggregation service behavior\",\"app.services.claim_status.derive_processing_status\"],\"resolution_version\":\"adr-applicability-resolution-v1\",\"graph_snapshot\":\"a62b9c28a40221067b88b3eaf9c904f82c0f791bbf436268011053e20bb2c676\",\"context_truncated\":true}",
+      "scope_metadata_status": "VALID",
+      "enrichment_fingerprint": "ab1f3c02a6797394af0f3e8735f88d35fb8b92c8ffe6b9d7b42633f048240666",
+      "enrichment_status": "completed",
+      "enrichment_model": "legacy-preview-unknown",
+      "supported_community_ids": [],
+      "scope_evidence_ids": [
+        "68f7d169bdcf7244514170a692a6f9040db3041a8a6499f6be2434ff139d2b09",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "applicability": "UNASSESSED",
+      "policy_status": "UNKNOWN"
+    },
+    {
+      "requirement_id": "f78de3660d650b6518509d3e92133766f824e541cfd2b992be32b6eb9e0dea22",
+      "kind": "DECISION",
+      "title": "Adopt two-phase asynchronous ingestion architecture",
+      "statement": "The system uses a two-phase ingestion architecture where file upload and persistence occur first, and document extraction is executed asynchronously in the background. Database state transitions are deterministic and govern processing lifecycle.",
+      "requirement_type": "architectural_pattern",
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ],
+      "target_entity_ids": [
+        "18e5a406d0d377ec78accf9229758ef701cb10fabf26de9d90210a93fc3d27c9",
+        "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+        "f4f6b3f3f82eb39a633e27fede05caf5a93f72869da6c013c64e64cd0c2361e7"
+      ],
+      "target_links": [
+        {
+          "entity_id": "18e5a406d0d377ec78accf9229758ef701cb10fabf26de9d90210a93fc3d27c9",
+          "name": "upload_files",
+          "entity_type": "Interface",
+          "relationship": "AFFECTS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "18e5a406d0d377ec78accf9229758ef701cb10fabf26de9d90210a93fc3d27c9",
+          "name": "upload_files",
+          "entity_type": "Interface",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+          "name": "Document",
+          "entity_type": "Component",
+          "relationship": "AFFECTS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "1cc904d56f005f4d8841d87c358d57cf26d5fe74090f67ff828bc9a601fddc0b",
+          "name": "Document",
+          "entity_type": "Component",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "f4f6b3f3f82eb39a633e27fede05caf5a93f72869da6c013c64e64cd0c2361e7",
+          "name": "extract_document",
+          "entity_type": "Module",
+          "relationship": "AFFECTS",
+          "origin": "UNKNOWN"
+        },
+        {
+          "entity_id": "f4f6b3f3f82eb39a633e27fede05caf5a93f72869da6c013c64e64cd0c2361e7",
+          "name": "extract_document",
+          "entity_type": "Module",
+          "relationship": "CONSTRAINS",
+          "origin": "UNKNOWN"
+        }
+      ],
+      "evidence_ids": [
+        "2541cc0492e8ea08ea9addb06269dd612dbcea26eb25f2fb110ed13ca3d45c4f",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "da4a869add9a9b7d42ab6569925ba41979df303a66ff7cf8b98c40127ccca664",
+        "e19d26e206295fdf69cbd4c6f33378136be847764d37872cbcd37bd124639652"
+      ],
+      "discovery_reasons": [
+        "NEIGHBOR_TARGET",
+        "REPOSITORY_SCOPE",
+        "ADR_MENTION",
+        "LEXICAL_FALLBACK"
+      ],
+      "relevance_score": 141.0,
+      "declared_applicability_json": "{\"schema_version\":\"adr-applicability-v1\",\"prompt_version\":\"adr-applicability-prompt-v1\",\"applicability\":{\"scopes\":[\"repository\",\"community\",\"other\"],\"targets\":[{\"kind\":\"community\",\"name\":\"document ingestion and extraction pipeline\",\"label\":null,\"description\":\"The two-phase asynchronous ingestion architecture covering upload/persistence first and background document extraction second.\",\"basis\":\"explicit\",\"governs_entire_scope\":true,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:2\"]},{\"kind\":\"community\",\"name\":\"claim-level processing coordination\",\"label\":null,\"description\":\"The related second phase of claim-level coordination described in document context as part of the same architecture.\",\"basis\":\"explicit\",\"governs_entire_scope\":true,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:3\"]},{\"kind\":\"other\",\"name\":\"two-phase asynchronous ingestion architecture\",\"label\":null,\"description\":\"Architectural pattern adopted by the system for document ingestion and downstream processing lifecycle.\",\"basis\":\"explicit\",\"governs_entire_scope\":true,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:2\",\"adr:adr_917ed0fc62a7:chunk:3\"]}],\"conditions\":[{\"kind\":\"workflow\",\"expression\":\"Phase 1 covers file upload, persistence, background extraction, and deterministic document state transitions.\",\"selectors\":[]},{\"kind\":\"workflow\",\"expression\":\"Phase 2 covers claim-level processing coordination and claim status derivation based on document states.\",\"selectors\":[]},{\"kind\":\"operation\",\"expression\":\"Extraction must execute asynchronously in the background rather than inside the HTTP request-response thread.\",\"selectors\":[]},{\"kind\":\"other\",\"expression\":\"Database state transitions govern the processing lifecycle deterministically.\",\"selectors\":[]}],\"exceptions\":[],\"qualifiers\":[\"Repository scope is inferred from the ADR describing a system architecture for the backend platform, but the concrete governed behavior is limited to the ingestion and claim-processing pipeline rather than every repository artifact.\"],\"basis\":\"inferred\",\"rationale\":\"The ADR establishes an architecture for the backend platform with two named phases and affected components spanning API, services, extraction routers, and claim status handling. This supports repository-level architectural applicability, while the explicit targets are the ingestion/extraction and claim-processing subsystems.\",\"uncertainty\":[\"The full repository boundary is not enumerated; repository-wide applicability is architectural rather than line-by-line.\",\"Document context is truncated, so additional affected components may exist beyond those shown.\",\"Document context was truncated.\"],\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:2\",\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:1\",\"adr:adr_917ed0fc62a7:chunk:5\"]},\"entity_ids\":[],\"community_ids\":[],\"unresolved_targets\":[\"claim-level processing coordination\",\"document ingestion and extraction pipeline\",\"two-phase asynchronous ingestion architecture\"],\"resolution_version\":\"adr-applicability-resolution-v1\",\"graph_snapshot\":\"a62b9c28a40221067b88b3eaf9c904f82c0f791bbf436268011053e20bb2c676\",\"context_truncated\":true}",
+      "scope_metadata_status": "VALID",
+      "enrichment_fingerprint": "f52a969a5abe8f27b9d91ff610484a85702f22784997c4bd18d3ca1a889a57b5",
+      "enrichment_status": "completed",
+      "enrichment_model": "legacy-preview-unknown",
+      "supported_community_ids": [],
+      "scope_evidence_ids": [
+        "2541cc0492e8ea08ea9addb06269dd612dbcea26eb25f2fb110ed13ca3d45c4f",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "da4a869add9a9b7d42ab6569925ba41979df303a66ff7cf8b98c40127ccca664",
+        "e19d26e206295fdf69cbd4c6f33378136be847764d37872cbcd37bd124639652"
+      ],
+      "applicability": "UNASSESSED",
+      "policy_status": "UNKNOWN"
+    },
+    {
+      "requirement_id": "fd6723954d2498091e4cad6cc75c3a4520cee9903c4dae4aa4a19ef8716a59fe",
+      "kind": "CONSTRAINT",
+      "title": null,
+      "statement": "app.services.claim_status.update_claim_processing_status must invoke app.orchestration.claim.claim_executor.invoke_claim_graph exclusively when derive_processing_status returns READY_FOR_EVALUATION.",
+      "requirement_type": "communication_rule",
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ],
+      "target_entity_ids": [
+        "1e1e9ab852799aadd5e6ffed432f34b0d1b1f851fc75101e8d3f0472ba386bf9",
+        "4766a37a1c4627984c73a3eef823ada3164948d69f04898ac83bc20a5582c02a"
+      ],
+      "target_links": [
+        {
+          "entity_id": "1e1e9ab852799aadd5e6ffed432f34b0d1b1f851fc75101e8d3f0472ba386bf9",
+          "name": "app.orchestration.claim.claim_executor",
+          "entity_type": "Component",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        },
+        {
+          "entity_id": "4766a37a1c4627984c73a3eef823ada3164948d69f04898ac83bc20a5582c02a",
+          "name": "app.services.claim_status.update_claim_processing_status",
+          "entity_type": "Service",
+          "relationship": "CONSTRAINS",
+          "origin": "ADR_ONLY"
+        }
+      ],
+      "evidence_ids": [
+        "2541cc0492e8ea08ea9addb06269dd612dbcea26eb25f2fb110ed13ca3d45c4f",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "discovery_reasons": [
+        "SCOPE_ENTITY_TARGET",
+        "NEIGHBOR_TARGET",
+        "ADR_MENTION",
+        "LEXICAL_FALLBACK"
+      ],
+      "relevance_score": 135.0,
+      "declared_applicability_json": "{\"schema_version\":\"adr-applicability-v1\",\"prompt_version\":\"adr-applicability-prompt-v1\",\"applicability\":{\"scopes\":[\"entity\"],\"targets\":[{\"kind\":\"entity\",\"name\":\"app.services.claim_status.update_claim_processing_status\",\"label\":null,\"description\":\"Function responsible for updating aggregated claim processing status and triggering claim-level orchestration.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:4\",\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:5\"]},{\"kind\":\"entity\",\"name\":\"app.orchestration.claim.claim_executor.invoke_claim_graph\",\"label\":null,\"description\":\"Claim-level orchestration function that may be invoked only under the specified status condition.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:4\",\"adr:adr_917ed0fc62a7:chunk:3\"]},{\"kind\":\"entity\",\"name\":\"derive_processing_status\",\"label\":null,\"description\":\"Status-derivation helper whose READY_FOR_EVALUATION result gates invocation of invoke_claim_graph.\",\"basis\":\"explicit\",\"governs_entire_scope\":false,\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:4\",\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:5\"]}],\"conditions\":[{\"kind\":\"operation\",\"expression\":\"Invoke invoke_claim_graph only when derive_processing_status returns READY_FOR_EVALUATION.\",\"selectors\":[\"READY_FOR_EVALUATION\"]},{\"kind\":\"layer\",\"expression\":\"Applies during claim-status aggregation/update logic in the claim-status service.\",\"selectors\":[\"claim-status service\",\"status aggregation\"]}],\"exceptions\":[],\"qualifiers\":[\"Invocation is exclusive to the READY_FOR_EVALUATION outcome.\"],\"basis\":\"explicit\",\"rationale\":\"The requirement explicitly constrains update_claim_processing_status and ties claim-graph invocation to a single derived status outcome. Context confirms this behavior occurs during claim-level processing coordination and status aggregation.\",\"uncertainty\":[\"Document context was truncated.\"],\"evidence_chunk_ids\":[\"adr:adr_917ed0fc62a7:chunk:4\",\"adr:adr_917ed0fc62a7:chunk:3\",\"adr:adr_917ed0fc62a7:chunk:5\"]},\"entity_ids\":[\"4766a37a1c4627984c73a3eef823ada3164948d69f04898ac83bc20a5582c02a\",\"c5016f745ae245152c27ce8044009a65dc4dc2d906924f15e00ccab35f4e016d\",\"f30aa409a43d71796d96e1dcd3b475c483a3192e1e0ffef2213c9e46b8d8deca\"],\"community_ids\":[],\"unresolved_targets\":[],\"resolution_version\":\"adr-applicability-resolution-v1\",\"graph_snapshot\":\"a62b9c28a40221067b88b3eaf9c904f82c0f791bbf436268011053e20bb2c676\",\"context_truncated\":true}",
+      "scope_metadata_status": "VALID",
+      "enrichment_fingerprint": "e49bb6736d7fb31235cb70803021823f4c2d568c71938b34eecb247d383c0afd",
+      "enrichment_status": "completed",
+      "enrichment_model": "legacy-preview-unknown",
+      "supported_community_ids": [],
+      "scope_evidence_ids": [
+        "2541cc0492e8ea08ea9addb06269dd612dbcea26eb25f2fb110ed13ca3d45c4f",
+        "aa7efa1a95fb0437b8986ec653d7b50fc3bbf750b36ce17024c633316aef7ed8",
+        "aea46d0ce4de55b6457a9ae5e15c3f3cec9851bced944ee3ce37e12911e17e7e"
+      ],
+      "applicability": "UNASSESSED",
+      "policy_status": "UNKNOWN"
+    }
+  ],
+  "knowledge": [
+    {
+      "id": "88b75ad379a96b9cd33c20f0db931b7080ff81852cdd2f25f7092523f6857fde",
+      "kind": "decision",
+      "title": "Claim status aggregation is centralized in claim status service",
+      "description": "Status aggregation is strictly mediated by update_claim_processing_status in app.services.claim_status. The derive_processing_status helper evaluates all documents associated with a Claim.id to determine the aggregate claim status and populate action_required diagnostics when blocking document states exist.",
+      "sources": [
+        {
+          "content_hash": "1004829d53ee4234837f820569b8b6bb0b5f6f39ea3d03026099198c175c02f0",
+          "id": "adr_917ed0fc62a7",
+          "source_name": "ADR-001-two-phase-document-ingestion-and-state-derivation.md",
+          "source_type": "MANUAL_UPLOAD",
+          "source_version": null,
+          "title": "ADR-001: Two-Phase Asynchronous Document Ingestion and State Derivation Pipeline"
+        }
+      ]
+    },
+    {
+      "id": "f78de3660d650b6518509d3e92133766f824e541cfd2b992be32b6eb9e0dea22",
+      "kind": "decision",
+      "title": "Adopt two-phase asynchronous ingestion architecture",
+      "description": "The system uses a two-phase ingestion architecture where file upload and persistence occur first, and document extraction is executed asynchronously in the background. Database state transitions are deterministic and govern processing lifecycle.",
+      "sources": [
+        {
+          "content_hash": "1004829d53ee4234837f820569b8b6bb0b5f6f39ea3d03026099198c175c02f0",
+          "id": "adr_917ed0fc62a7",
+          "source_name": "ADR-001-two-phase-document-ingestion-and-state-derivation.md",
+          "source_type": "MANUAL_UPLOAD",
+          "source_version": null,
+          "title": "ADR-001: Two-Phase Asynchronous Document Ingestion and State Derivation Pipeline"
+        }
+      ]
+    },
+    {
+      "id": "b9652205302af1fa53bddf46fcaa7c7fa0aecb07138504891a105f2ead97a31a",
+      "kind": "constraint",
+      "title": null,
+      "description": "Claim.processing_status may transition to READY_FOR_EVALUATION only when all associated documents have achieved VERIFIED.",
+      "sources": [
+        {
+          "content_hash": "1004829d53ee4234837f820569b8b6bb0b5f6f39ea3d03026099198c175c02f0",
+          "id": "adr_917ed0fc62a7",
+          "source_name": "ADR-001-two-phase-document-ingestion-and-state-derivation.md",
+          "source_type": "MANUAL_UPLOAD",
+          "source_version": null,
+          "title": "ADR-001: Two-Phase Asynchronous Document Ingestion and State Derivation Pipeline"
+        }
+      ]
+    },
+    {
+      "id": "fd6723954d2498091e4cad6cc75c3a4520cee9903c4dae4aa4a19ef8716a59fe",
+      "kind": "constraint",
+      "title": null,
+      "description": "app.services.claim_status.update_claim_processing_status must invoke app.orchestration.claim.claim_executor.invoke_claim_graph exclusively when derive_processing_status returns READY_FOR_EVALUATION.",
+      "sources": [
+        {
+          "content_hash": "1004829d53ee4234837f820569b8b6bb0b5f6f39ea3d03026099198c175c02f0",
+          "id": "adr_917ed0fc62a7",
+          "source_name": "ADR-001-two-phase-document-ingestion-and-state-derivation.md",
+          "source_type": "MANUAL_UPLOAD",
+          "source_version": null,
+          "title": "ADR-001: Two-Phase Asynchronous Document Ingestion and State Derivation Pipeline"
+        }
+      ]
+    }
+  ],
+  "attention": [
+    {
+      "identity": "88b75ad379a96b9cd33c20f0db931b7080ff81852cdd2f25f7092523f6857fde",
+      "kind": "DECISION",
+      "classification": "CONFIRMED",
+      "pr_numbers": [
+        2
+      ],
+      "finding_ids": [
+        "d9b0df4f39698ee64d904e4f8f2357c3170e94c2e510be20ec60920e784bf428"
+      ],
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ]
+    },
+    {
+      "identity": "f78de3660d650b6518509d3e92133766f824e541cfd2b992be32b6eb9e0dea22",
+      "kind": "DECISION",
+      "classification": "POTENTIAL",
+      "pr_numbers": [
+        2
+      ],
+      "finding_ids": [
+        "335f9cc7ca3f4e17126d273e432605dae2ef800353f5952b7fc6a884bd2faebc"
+      ],
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ]
+    },
+    {
+      "identity": "b9652205302af1fa53bddf46fcaa7c7fa0aecb07138504891a105f2ead97a31a",
+      "kind": "REQUIREMENT",
+      "classification": "CONFIRMED",
+      "pr_numbers": [
+        2
+      ],
+      "finding_ids": [
+        "59ec66a100190fca4cbdc1cb27c5cca6d6f51705edd174c5804197e60b02fecb"
+      ],
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ]
+    },
+    {
+      "identity": "fd6723954d2498091e4cad6cc75c3a4520cee9903c4dae4aa4a19ef8716a59fe",
+      "kind": "REQUIREMENT",
+      "classification": "CONFIRMED",
+      "pr_numbers": [
+        2
+      ],
+      "finding_ids": [
+        "48dbc41eae5c33e6d11757d1713cc95d290d0f6b07fb392e68afc0ca05066ace"
+      ],
+      "adr_ids": [
+        "adr_917ed0fc62a7"
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileText, Loader, Search, Upload } from "lucide-react";
 import { knowledgeService } from "@/api/knowledge-service";
@@ -55,7 +56,16 @@ export default function RepositoryDecisionsPage() {
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState("all");
   const [offset, setOffset] = useState(0);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [recordParams, setRecordParams] = useSearchParams();
+  const selected = recordParams.get("record");
+  const setSelected = (record: string | null) => {
+    setRecordParams((params) => {
+      const next = new URLSearchParams(params);
+      if (record) next.set("record", record);
+      else next.delete("record");
+      return next;
+    });
+  };
   const detailTrigger = useRef<HTMLButtonElement>(null);
   const knowledge = useQuery({
     ...queryOptions,

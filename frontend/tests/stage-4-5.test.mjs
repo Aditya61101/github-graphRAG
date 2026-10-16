@@ -9,6 +9,11 @@ import { MemoryRouter } from "react-router";
 const fixture = JSON.parse(
   await readFile(new URL("./fixtures/stage-4-5-case-a.json", import.meta.url))
 );
+const identities = JSON.parse(
+  await readFile(
+    new URL("./fixtures/stage-4-5-3-identities.json", import.meta.url)
+  )
+);
 let server,
   parse,
   presentation,
@@ -19,7 +24,9 @@ let server,
   CoveragePanel,
   Summary,
   Risks,
-  Queue;
+  Queue,
+  Attention,
+  OverviewReviews;
 before(async () => {
   globalThis.localStorage = { getItem: () => "test-token", removeItem() {} };
   server = await createServer({
@@ -50,6 +57,86 @@ before(async () => {
   ({ PullRequestTable: Queue } = await server.ssrLoadModule(
     "/src/components/repositories/pull-request-table.tsx"
   ));
+  ({ OverviewAttention: Attention } = await server.ssrLoadModule(
+    "/src/components/repositories/overview-attention.tsx"
+  ));
+  ({ Reviews: OverviewReviews } = await server.ssrLoadModule(
+    "/src/pages/repository-overview.tsx"
+  ));
+});
+
+test("Overview uses verified decision titles and two distinct governing requirements without invented mappings", () => {
+  const risks = identities.attention.map((risk) => ({
+    ...risk,
+    knowledge_resolution: "RESOLVED",
+    knowledge: identities.knowledge.find((item) => item.id === risk.identity),
+  }));
+  const props = {
+    risks,
+    repositoryId: identities.repository_id,
+    total: 4,
+    additionalTotal: 2,
+    available: true,
+  };
+  const html = render(Attention, props);
+  for (const record of identities.knowledge)
+    assert.ok(html.includes(record.title || record.description));
+  assert.equal((html.match(/data-risk-kind="REQUIREMENT"/g) || []).length, 2);
+  assert.equal((html.match(/data-risk-kind="DECISION"/g) || []).length, 2);
+  assert.match(html, /2 other affected architectural/);
+  assert.match(html, /Confirmed conflict/);
+  assert.match(html, /Potential risk/);
+  assert.match(html, /excluded from Decisions at/);
+  assert.match(html, /ADR-001: Two-Phase/);
+  assert.doesNotMatch(html, /<pre|<details open/);
+  assert.match(html, /decisions\?record=/);
+  const missing = render(Attention, {
+    ...props,
+    risks: risks.map((risk) => ({
+      ...risk,
+      knowledge_resolution: "NOT_FOUND",
+      knowledge: null,
+    })),
+  });
+  assert.match(missing, /exact knowledge record could not be resolved/);
+  assert.doesNotMatch(missing, /decisions\?record=/);
+  assert.match(missing, /Review PR #2/);
+  const mismatch = render(Attention, {
+    ...props,
+    risks: [
+      { ...risks[0], knowledge: { ...risks[0].knowledge, id: "foreign" } },
+    ],
+  });
+  assert.doesNotMatch(mismatch, /decisions\?record=/);
+  assert.match(
+    render(Attention, { ...props, risks: [], total: 0, additionalTotal: 0 }),
+    /No currently observed/
+  );
+});
+
+test("Overview recent reviews retain actual titles, uncertainty, rejected-proof distinction and persisted freshness", () => {
+  const items = fixture.overview.recent_pr_reviews.items.map((item) => ({
+    ...item,
+    title: fixture.detail.pull_request.title,
+  }));
+  for (const [freshness, expected] of [
+    ["CURRENT_OBSERVED", "Matches observed revision"],
+    ["STALE", "Stale analysis"],
+    ["UNKNOWN", "Freshness unknown"],
+  ]) {
+    const html = render(OverviewReviews, {
+      items: items.map((item) => ({ ...item, freshness })),
+      repositoryId: identities.repository_id,
+    });
+    assert.match(html, /Partial/);
+    assert.match(html, /3 confirmed/);
+    assert.match(html, /1 requiring review/);
+    assert.match(html, /Rejected records are not confirmed violations/);
+    assert.match(html, new RegExp(expected));
+    assert.match(html, /not a live branch check/);
+    assert.ok(html.includes(fixture.detail.pull_request.title));
+    assert.doesNotMatch(html, /job_id|<pre/);
+  }
 });
 
 test("PR queue distinguishes incomplete, missing, running and stale evaluations and never invents a Check link", () => {

@@ -1,7 +1,7 @@
 .pr-queue {
   --queue-danger: var(--destructive);
   --queue-caution: #986000;
-  --queue-link: #1868b7;
+  --queue-link: var(--primary);
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -9,7 +9,7 @@
 }
 .dark .pr-queue {
   --queue-caution: #f4bd64;
-  --queue-link: #8cbcf3;
+  --queue-link: var(--sidebar-primary);
 }
 .pr-queue table {
   width: 100%;

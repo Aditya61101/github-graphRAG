@@ -3,14 +3,14 @@
   overflow-x: clip;
   --review-danger: var(--destructive);
   --review-amber: #a15c00;
-  --review-blue: #1868b7;
+  --review-accent: var(--primary);
   --review-code: color-mix(in oklch, var(--background), var(--muted) 45%);
   color: var(--foreground);
   font-size: 0.875rem;
 }
 .dark .pr-review {
   --review-amber: #f4bd64;
-  --review-blue: #8cbcf3;
+  --review-accent: var(--sidebar-primary);
   --review-code: #0f1217;
 }
 .pr-review .review-card {
@@ -34,7 +34,7 @@
   line-height: 1.65;
 }
 .pr-review .review-link {
-  color: var(--review-blue);
+  color: var(--review-accent);
   text-decoration: none;
   text-underline-offset: 4px;
 }
@@ -43,7 +43,7 @@
 }
 .pr-review .review-link:focus-visible,
 .pr-review summary:focus-visible {
-  outline: 2px solid var(--review-blue);
+  outline: 2px solid var(--review-accent);
   outline-offset: 4px;
   border-radius: 3px;
 }
@@ -106,11 +106,11 @@
   min-height: 44px;
 }
 .pr-review .review-tabs button[aria-selected="true"] {
-  border-bottom-color: var(--review-blue);
-  color: var(--review-blue);
+  border-bottom-color: var(--review-accent);
+  color: var(--review-accent);
 }
 .pr-review .review-tabs button:focus-visible {
-  outline: 2px solid var(--review-blue);
+  outline: 2px solid var(--review-accent);
   outline-offset: -3px;
 }
 .pr-review .review-diff {
@@ -157,7 +157,7 @@
   background: color-mix(in oklch, var(--review-danger), transparent 83%);
 }
 .pr-review .review-code-row.added {
-  background: color-mix(in oklch, var(--review-blue), transparent 83%);
+  background: color-mix(in oklch, var(--review-accent), transparent 83%);
 }
 .pr-review .review-finding {
   border-left: 3px solid var(--review-danger);

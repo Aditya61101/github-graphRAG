@@ -3,6 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from api_services.app.models.knowledge import KnowledgeItem
 
 from ai_services.decision_guard.evaluation.models import (
     EvaluationCoverage,
@@ -98,6 +99,8 @@ class RecentReview(EvaluationSummary):
     pr_number: int
     state: str
     freshness: str
+    title: str | None = None
+    observed_at: float | None = None
 
 
 class ReviewSection(BaseModel):
@@ -111,3 +114,5 @@ class DecisionRisk(BaseModel):
     pr_numbers: list[int]
     finding_ids: list[str]
     adr_ids: list[str]
+    knowledge: KnowledgeItem | None = None
+    knowledge_resolution: Literal['RESOLVED', 'NOT_FOUND', 'UNAVAILABLE'] = 'UNAVAILABLE'

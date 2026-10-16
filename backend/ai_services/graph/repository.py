@@ -136,6 +136,20 @@ class Neo4jGraphRepository:
         items = self._knowledge_query(query, repo_ids, **params, offset=offset, limit=limit)
         return dict(items=items, total=totals[0]['total'], offset=offset, limit=limit)
 
+    def get_architectural_knowledge_batch(self, repo_ids: list[str], item_ids: list[str]):
+        """One exact-ID lookup for bounded Overview associations, never a prose join."""
+        if not item_ids:
+            return []
+        return self._knowledge_query("""
+        MATCH (d) WHERE d.id IN $item_ids AND d.repository IN $repo_ids
+          AND (d:ArchitecturalDecision OR d:ArchitecturalConstraint)
+        MATCH (a:ADR)-[:DEFINES]->(d) WHERE a.repository IN $repo_ids
+        RETURN d.id AS id, CASE WHEN d:ArchitecturalDecision THEN 'decision' ELSE 'constraint' END AS kind,
+               d.title AS title, coalesce(d.description, '') AS description,
+               coalesce(d.decision_type, d.constraint_type) AS type,
+               collect(DISTINCT a { .id, .title, .source_name, .source_type, .source_version, .content_hash }) AS sources
+        """, repo_ids, item_ids=sorted(set(item_ids)))
+
     def get_architectural_knowledge(self, repo_ids: list[str], item_id: str):
         query = """
         MATCH (d) WHERE d.id = $item_id AND d.repository IN $repo_ids

@@ -171,6 +171,15 @@ async def get_repository_overview(repo_id: str, request: Request,
 
         metrics = RepositoryReadModel(evaluation_service.store).overview(repo.id)
     available = Availability(status='available') if metrics is not None else unavailable
+    if metrics and metrics['attention']:
+        knowledge_service = getattr(request.app.state, 'knowledge_service', None)
+        if knowledge_service is not None:
+            try:
+                metrics['attention'] = await knowledge_service.enrich_risks(repo.id, current_user.id, metrics['attention'])
+            except GraphRepositoryError:
+                logger.warning('Overview risk knowledge unavailable repository=%s', repo.id)
+            except GitHubAppError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from None
     def evaluation_metric(key):
         return OverviewMetric(availability=available, value=metrics[key] if metrics is not None else None)
     return RepositoryOverviewResponse(

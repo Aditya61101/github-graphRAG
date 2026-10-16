@@ -576,6 +576,8 @@ class RepositoryReadModel:
                         else "STALE"
                         if s
                         else "UNKNOWN",
+                        "title": s.title if s else json.loads(j.event_json or '{}').get('title'),
+                        "observed_at": s.observed_at if s else None,
                     }
                     for j, p in recent
                 ],

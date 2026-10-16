@@ -1,5 +1,5 @@
 import asyncio
-from api_services.app.models.knowledge import KnowledgeDetail, KnowledgePage
+from api_services.app.models.knowledge import KnowledgeDetail, KnowledgePage, KnowledgeItem
 
 
 class RepositoryKnowledgeService:
@@ -22,3 +22,19 @@ class RepositoryKnowledgeService:
         result = await asyncio.to_thread(self.graph_service.graph_repo.get_architectural_knowledge,
                                         scope, item_id)
         return KnowledgeDetail(**result) if result else None
+
+    async def enrich_risks(self, repository_id, user_id, risks):
+        scope = await self._scope(repository_id, user_id)
+        records = await asyncio.to_thread(self.graph_service.graph_repo.get_architectural_knowledge_batch,
+                                          scope, [risk['identity'] for risk in risks])
+        by_id = {}
+        for record in records:
+            by_id.setdefault(record['id'], []).append(record)
+        enriched = []
+        for risk in risks:
+            matches = by_id.get(risk['identity'], [])
+            expected = 'decision' if risk['kind'] == 'DECISION' else 'constraint'
+            record = matches[0] if len(matches) == 1 and matches[0]['kind'] == expected else None
+            enriched.append({**risk, 'knowledge': KnowledgeItem(**record).model_dump() if record else None,
+                             'knowledge_resolution': 'RESOLVED' if record else 'NOT_FOUND'})
+        return enriched
