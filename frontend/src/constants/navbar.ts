@@ -2,7 +2,7 @@ import { BookOpen, GitForkIcon, Settings } from "lucide-react";
 
 export const NAV_DATA = {
   header: {
-    name: "Decision Guard",
+    name: "DecisionGuard",
     logo: GitForkIcon,
     subtext: "Guard your decisions",
   },
