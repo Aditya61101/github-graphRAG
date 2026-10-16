@@ -622,7 +622,9 @@ class SqliteApplicationStore:
                 existing.title = title
                 existing.description = description
                 existing.source_name = source_name
-                existing.file_path = file_path
+                # A retry keeps the same ADR identity and immutable original.
+                # The proposed path contains a new provisional ID and cannot
+                # safely become this record's provenance location.
                 existing.file_size = file_size
                 existing.mime_type = mime_type
                 existing.file_extension = file_extension

@@ -31,7 +31,7 @@ class ADRDocument(BaseModel):
     source_version: str | None = Field(default=None, description="Source version or revision.")
 
     # File and content metadata
-    file_path: str = Field(description="Local filesystem path where the raw file is stored.")
+    file_path: str = Field(description="Original document location: local path or gs:// URI.")
     content_hash: str = Field(description="SHA-256 hash of the uploaded document.")
     file_size: int | None = Field(default=None, description="Size of the raw document in bytes.")
     mime_type: str | None = Field(default=None, description="MIME type of the document.")

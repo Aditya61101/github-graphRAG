@@ -216,10 +216,11 @@ async def lifespan(app: FastAPI):
     )
 
     from ai_services.decision_guard.evaluation.models import EvaluationSettings
-    from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator
+    from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator, LocalDispatcher
     from ai_services.decision_guard.orchestration.runtime import production_runtime
     from ai_services.decision_guard.orchestration.store import EvaluationStore
     from ai_services.decision_guard.orchestration.worker import EvaluationWorker
+    from ai_services.decision_guard.orchestration.gcp import configured_dispatcher
 
     evaluation_store = EvaluationStore(sqlite_store.session_factory)
     runtime = production_runtime(
@@ -231,6 +232,7 @@ async def lifespan(app: FastAPI):
     app.state.evaluation_orchestrator = EvaluationOrchestrator(
         evaluation_store,
         evaluation_worker,
+        dispatcher=configured_dispatcher(github_client),
         lifecycle_github=github_app,
         publisher=CheckPublisher(
             evaluation_store,
@@ -259,7 +261,10 @@ async def lifespan(app: FastAPI):
 
     recovery_task = asyncio.create_task(
         app.state.evaluation_orchestrator.recover_forever()
-    ) if config.ENABLE_BACKGROUND_PROCESSING else None
+    ) if config.ENABLE_BACKGROUND_PROCESSING and isinstance(
+        app.state.evaluation_orchestrator.dispatcher,
+        LocalDispatcher,
+    ) else None
     try:
         yield
     finally:

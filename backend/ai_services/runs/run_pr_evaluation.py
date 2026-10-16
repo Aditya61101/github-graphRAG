@@ -66,6 +66,13 @@ async def run(job_id):
                 ),
             )
             await EvaluationWorker(jobs, runtime).run_job(job_id)
+            from ai_services.decision_guard.orchestration.checks import CheckPublisher
+
+            await CheckPublisher(
+                jobs, github,
+                enabled=os.getenv("GITHUB_CHECKS_ENABLED", "false").lower() == "true",
+                details_base=os.getenv("GITHUB_CHECKS_DETAILS_BASE") or None,
+            ).reconcile()
         finally:
             driver.close()
     job = jobs.get(job_id)

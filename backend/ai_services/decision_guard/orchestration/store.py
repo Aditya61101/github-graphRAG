@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 
 from ai_services.decision_guard.evaluation.models import (
     EvaluationResult,
@@ -233,6 +234,19 @@ class EvaluationStore:
     def claim(self, job_id):
         now, token = self.clock(), uuid.uuid4().hex
         with self.sessions.begin() as session:
+            limit = int(os.getenv("PR_EVALUATION_MAX_CONCURRENCY", "2"))
+            if limit < 1:
+                raise ValueError("PR_EVALUATION_MAX_CONCURRENCY must be positive")
+            # Serialize admission across instances and revisions. Only short SQL
+            # work holds this lock; execution remains protected by job leases.
+            if session.get_bind().dialect.name == "postgresql":
+                session.execute(text("SELECT pg_advisory_xact_lock(4920260304)"))
+            else:
+                session.execute(text("BEGIN IMMEDIATE"))
+            active = session.scalar(select(func.count()).select_from(EvaluationJob).where(
+                EvaluationJob.status == "RUNNING", EvaluationJob.lease_until > now))
+            if active >= limit:
+                return None
             eligible = or_(
                 and_(
                     EvaluationJob.status.in_(["QUEUED", "RETRY"]),
