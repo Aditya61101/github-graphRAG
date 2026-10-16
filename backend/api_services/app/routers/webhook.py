@@ -182,7 +182,7 @@ async def _queue_pr(request, background_tasks, normalized_pr, tracked):
     )
 
 
-def _queue_push(request, background_tasks, payload, tracked):
+async def _queue_push(request, background_tasks, payload, tracked):
     ref = payload.get("ref")
     if (
         not isinstance(ref, str)
@@ -192,13 +192,11 @@ def _queue_push(request, background_tasks, payload, tracked):
     ):
         return {"status": "ignored", "event": "push"}
     require_processing_enabled()
-    service = getattr(request.app.state, "ingestion_service", None)
-    if service is None:
-        raise HTTPException(503, "Repository ingestion service is not initialized")
-    # Execution-time ingestion reacquires and rechecks installation credentials.
-    background_tasks.add_task(_process_push_in_background, service, payload)
+    from api_services.app.utils.ingestion import accept
+    run_id = await accept(request, background_tasks, tracked, target=payload["after"],
+        trigger="webhook_push", delivery_id=request.headers.get("X-GitHub-Delivery"))
     return JSONResponse(
-        status_code=202, content={"status": "accepted", "event": "push"}
+        status_code=202, content={"status": "accepted", "event": "push", "run_id": run_id}
     )
 
 
@@ -262,7 +260,7 @@ async def github_webhook(
                     pass  # both metadata and evaluation now have durable recovery
             return await _queue_pr(request, background_tasks, normalized_pr, tracked)
         if event == "push":
-            return _queue_push(request, background_tasks, payload, tracked)
+            return await _queue_push(request, background_tasks, payload, tracked)
         if not config.ENABLE_BACKGROUND_PROCESSING:
             pr = payload.get("pull_request") or {}
             return {

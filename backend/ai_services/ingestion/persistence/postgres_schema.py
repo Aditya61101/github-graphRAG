@@ -17,6 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import SQLAlchemyError
 
 from .models import Base
+from .migrate_ingestion import version_table as ingestion_version, upgrade as upgrade_ingestion, EXTRA_COLUMNS
 from .migrate_pr_orchestration import version_table as orchestration_version, upgrade as upgrade_orchestration
 from .migrate_frontend_checks import version_table as frontend_version, upgrade as upgrade_frontend
 from ai_services.decision_guard.orchestration.models import TABLES as ORCHESTRATION_TABLES
@@ -28,7 +29,7 @@ LOCK_KEY = 4920260302
 VERSION_TABLE = Table("app_schema_version", MetaData(), Column("version", Integer, nullable=False), schema=SCHEMA)
 COMMAND = "python -m ai_services.ingestion.persistence.postgres_schema"
 COMPONENT_TABLES = [*ORCHESTRATION_TABLES, *FRONTEND_TABLES]
-VERSION_TABLES = [(VERSION_TABLE, 3), (orchestration_version, 1), (frontend_version, 1)]
+VERSION_TABLES = [(VERSION_TABLE, 3), (orchestration_version, 1), (frontend_version, 1), (ingestion_version, 1)]
 
 
 class PostgreSQLSchemaError(RuntimeError):
@@ -57,12 +58,17 @@ def _tables(conn):
     return set(inspector.get_table_names(schema=SCHEMA))
 
 
-def _validate_table(conn, inspector, table):
+def _validate_table(conn, inspector, table, *, legacy_ingestion=False):
     name = table.name
     actual = {c["name"]: c for c in inspector.get_columns(name, schema=SCHEMA)}
-    if set(actual) != set(table.columns.keys()):
+    expected_columns = set(table.columns.keys())
+    if legacy_ingestion and name == "ingestion_runs":
+        expected_columns -= set(EXTRA_COLUMNS) - set(actual)
+    if set(actual) != expected_columns:
         raise PostgreSQLSchemaError(f"PostgreSQL schema is incomplete or incompatible: columns in {name}.")
     for column in table.columns:
+        if column.name not in actual and legacy_ingestion:
+            continue
         reflected = actual[column.name]
         actual_type = str(reflected["type"].compile(dialect=conn.dialect)).upper()
         expected_type = str(column.type.compile(dialect=conn.dialect)).upper()
@@ -101,7 +107,8 @@ def _validate_table(conn, inspector, table):
 
 def _validate(conn, *, allow_missing_components=False):
     expected = set(Base.metadata.tables) | {t.name for t, _ in VERSION_TABLES}
-    component_names = {t.name for t in COMPONENT_TABLES} | {orchestration_version.name, frontend_version.name}
+    component_names = {t.name for t in COMPONENT_TABLES} | {orchestration_version.name, frontend_version.name,
+        ingestion_version.name, "repository_ingestion_state", "ingestion_deliveries"}
     actual = _tables(conn)
     if not actual:
         raise PostgreSQLSchemaError(f"PostgreSQL schema is not initialized; run {COMMAND} explicitly.")
@@ -118,7 +125,7 @@ def _validate(conn, *, allow_missing_components=False):
             raise PostgreSQLSchemaError(f"PostgreSQL requires exactly one {marker.name} row with version {version}.")
     for table in Base.metadata.sorted_tables:
         if table.name in actual:
-            _validate_table(conn, inspector, table)
+            _validate_table(conn, inspector, table, legacy_ingestion=allow_missing_components)
 
 
 def validate_postgresql_schema(engine):
@@ -146,6 +153,7 @@ def initialize_postgresql_schema(engine):
             conn.execute(VERSION_TABLE.insert().values(version=SCHEMA_VERSION))
             upgrade_orchestration(conn)
             upgrade_frontend(conn)
+            upgrade_ingestion(conn)
             # New Inspector instances avoid reusing pre-DDL reflection caches.
             _validate(conn)
         return True
@@ -166,6 +174,7 @@ def upgrade_postgresql_schema(engine):
             _validate(conn, allow_missing_components=True)
             upgrade_orchestration(conn)
             upgrade_frontend(conn)
+            upgrade_ingestion(conn)
             _validate(conn)
     except SQLAlchemyError:
         raise PostgreSQLSchemaError("Unable to upgrade PostgreSQL schema; transaction rolled back. Check connectivity and privileges.") from None

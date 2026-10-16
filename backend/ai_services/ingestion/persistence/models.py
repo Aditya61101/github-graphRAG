@@ -214,6 +214,15 @@ class IngestionRunModel(Base):
     completed_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
 
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at = Column(Integer, nullable=False, default=0, server_default="0")
+    owner = Column(String(64), nullable=True)
+    token = Column(Integer, nullable=True)
+    lease_until = Column(Integer, nullable=True)
+    force_full = Column(Integer, nullable=False, default=0, server_default="0")
+    branch = Column(String(100), nullable=True)
+    installation_id = Column(String(64), nullable=True)
+
     repository = relationship("RepositoryModel", back_populates="ingestion_runs")
 
     def to_dict(self) -> dict[str, Any]:
@@ -229,6 +238,25 @@ class IngestionRunModel(Base):
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
         }
+
+
+class RepositoryIngestionState(Base):
+    """One durable ownership/read barrier per repository; no source or LLM cache."""
+    __tablename__ = "repository_ingestion_state"
+    repository_id = Column(String(64), ForeignKey("repositories.id"), primary_key=True)
+    epoch = Column(Integer, nullable=False, default=0)
+    state = Column(String(32), nullable=False, default="UNVERIFIED")
+    active_run_id = Column(String(64), nullable=True)
+    published_run_id = Column(String(64), nullable=True)
+    published_token = Column(Integer, nullable=True)
+
+
+class IngestionDelivery(Base):
+    __tablename__ = "ingestion_deliveries"
+    delivery_id = Column(String(255), primary_key=True)
+    repository_id = Column(String(64), ForeignKey("repositories.id"), nullable=False)
+    target_sha = Column(String(40), nullable=False)
+    run_id = Column(String(64), ForeignKey("ingestion_runs.id"), nullable=False)
 
 
 class ADRModel(Base):

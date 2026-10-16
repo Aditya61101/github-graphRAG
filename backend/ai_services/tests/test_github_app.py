@@ -119,8 +119,17 @@ def env(monkeypatch):
     app.include_router(query_router, prefix='/query')
     app.include_router(webhook_router, prefix='/webhooks')
     app.state.sqlite_store, app.state.github_app, app.state.github_oauth = store, service, oauth
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def ready_graph(repo_id):
+        yield (repo_id, 'mock-published-epoch')
+    # These tests isolate authorization; real barrier behavior is tested separately.
+    app.state.graph_barrier = SimpleNamespace(read=ready_graph)
+    monkeypatch.setattr('api_services.app.utils.ingestion.dispatch_one', AsyncMock())
     app.state.rag_agent = SimpleNamespace(query=AsyncMock(return_value=RAGAgentResult(answer='grounded', sources={})))
     app.state.ingestion_service = SimpleNamespace(
+        repository_source=SimpleNamespace(resolve_ref=lambda *args, **kwargs: 'ref',
+            resolve_target=AsyncMock(return_value='a'*40)),
         ingest_repository=AsyncMock(return_value=IngestionResult('owner/repo101', 'repo_101', 'completed', 'sha', False)),
         handle_github_push_webhook=AsyncMock(return_value=IngestionResult('owner/repo101', 'repo_101', 'completed', 'sha', True)))
     client = TestClient(app, follow_redirects=False)
@@ -262,9 +271,11 @@ def test_manual_job_passes_ids_not_user_credentials(env):
     response = env.client.post('/repositories/ingest', headers=env.headers,
                               json={'repository': 'owner/repo101'})
     assert response.status_code == 202
-    call = env.app.state.ingestion_service.ingest_repository.call_args.kwargs
-    assert call['repository_id'] == 'repo_101' and call['installation_id'] == '10'
-    assert 'credential' not in call and 'connection_id' not in call
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    run = IngestionJobs(env.store.session_factory).get(response.json()['run_id'])
+    assert run.repository_id == 'repo_101' and run.installation_id == '10'
+    assert run.status == 'QUEUED' and run.target_commit_sha == 'a'*40
+    env.app.state.ingestion_service.ingest_repository.assert_not_awaited()
 
 
 @pytest.mark.asyncio

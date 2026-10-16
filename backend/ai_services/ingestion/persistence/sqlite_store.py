@@ -458,6 +458,8 @@ class SqliteApplicationStore:
     ) -> IngestionRunModel:
         """Record the start of an ingestion run and transition repository to INDEXING."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             repo = session.get(RepositoryModel, repository_id)
             if not repo:
                 # Try finding by full_name or github_id
@@ -490,6 +492,8 @@ class SqliteApplicationStore:
     ) -> None:
         """Mark ingestion run and repository as COMPLETED and update indexed_commit_sha."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             run = session.get(IngestionRunModel, run_id)
             if run:
                 run.status = "COMPLETED"
@@ -517,6 +521,8 @@ class SqliteApplicationStore:
     ) -> None:
         """Mark ingestion run and repository as FAILED without advancing indexed_commit_sha."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             run = session.get(IngestionRunModel, run_id)
             if run:
                 run.status = "FAILED"

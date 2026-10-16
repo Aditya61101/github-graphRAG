@@ -1,0 +1,42 @@
+"""Cloud Run Jobs launch transport, using existing orchestration dispatcher."""
+import os
+from ai_services.decision_guard.orchestration.dispatch import CloudRunJobsDispatcher
+
+
+class IngestionJobsDispatcher(CloudRunJobsDispatcher):
+    @staticmethod
+    def payload(run_id):
+        return {"overrides": {"containerOverrides": [{
+            "args": ["python", "-m", "ai_services.runs.run_repository_ingestion"],
+            "env": [{"name": "INGESTION_RUN_ID", "value": run_id}],
+        }]}}
+
+
+async def access_token():
+    import asyncio
+    def resolve():
+        import google.auth
+        from google.auth.transport.requests import Request
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        credentials.refresh(Request())
+        return credentials.token
+    return await asyncio.to_thread(resolve)
+
+
+def configured_dispatcher(client):
+    resource = os.getenv("INGESTION_JOB_RESOURCE")
+    if not resource:
+        raise RuntimeError("INGESTION_JOB_RESOURCE must identify the baseline Cloud Run Job")
+    return IngestionJobsDispatcher(client, access_token, resource)
+
+
+async def reconcile(jobs, dispatcher):
+    from shared.utils.processing import require_background_processing
+    require_background_processing()
+    for run_id in jobs.due():
+        try:
+            await dispatcher.dispatch(run_id)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Ingestion dispatch deferred run=%s type=%s",
+                                                run_id, type(exc).__name__)

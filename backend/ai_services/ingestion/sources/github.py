@@ -8,6 +8,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from contextlib import asynccontextmanager
+import re
 from typing import Sequence
 
 import httpx
@@ -127,6 +129,63 @@ class GitHubRepositorySource(RepositorySource):
     def _repo_clone_path(self, ref: RepositoryRef) -> Path:
         return self.storage_dir / ref.owner / ref.name
 
+    async def resolve_target(self, ref, credential):
+        """Resolve the tracked branch once; accepted executions persist this SHA."""
+        from urllib.parse import quote
+        metadata = await self.get_metadata(ref, credential=credential)
+        branch = ref.branch or metadata.default_branch
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                f"{self.api_base_url}/repos/{metadata.full_name}/commits/{quote(branch, safe='')}",
+                headers=self._get_api_headers(credential))
+        if response.status_code != 200:
+            raise RepositorySourceError("Tracked branch commit is unavailable")
+        sha = response.json().get("sha", "")
+        if not re.fullmatch("[0-9a-f]{40}", sha):
+            raise RepositorySourceError("GitHub returned an invalid commit identity")
+        return sha
+
+    @asynccontextmanager
+    async def open_workspace(self, ref, target_sha, base_sha=None, credential=None):
+        """Cold, pinned checkout per execution. No accepted clone is read or reset."""
+        if not re.fullmatch("[0-9a-f]{40}", target_sha):
+            raise ValueError("Exact target SHA required")
+        async def drained(function):
+            task = asyncio.create_task(asyncio.to_thread(function))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await task
+                except Exception:
+                    pass
+                raise
+        with tempfile.TemporaryDirectory(prefix="decisionguard-ingestion-") as directory:
+            root = Path(directory) / "repository"
+            base_available = True
+            def prepare():
+                nonlocal base_available
+                url = f"https://github.com/{ref.full_name}.git"
+                self._run_git(["init", str(root)], timeout_seconds=30)
+                self._run_git(["-c", "core.hooksPath=" + str(Path(directory) / "no-hooks"),
+                    "fetch", "--no-tags", "--depth=1", url, target_sha],
+                    cwd=root, credential=credential, timeout_seconds=180)
+                actual = self._run_git(["rev-parse", target_sha + "^{commit}"], cwd=root,
+                                       timeout_seconds=30).stdout.strip()
+                if actual != target_sha:
+                    raise RepositorySourceError("Target commit identity mismatch")
+                if base_sha and base_sha != target_sha:
+                    result = self._run_git(["fetch", "--no-tags", "--depth=1", url, base_sha],
+                        cwd=root, credential=credential, check=False, timeout_seconds=180)
+                    base_available = result.returncode == 0
+                self._run_git(["-c", "core.hooksPath=" + str(Path(directory) / "no-hooks"),
+                    "checkout", "--detach", "--force", target_sha], cwd=root, timeout_seconds=120)
+                if self._resolve_head_sha(root) != target_sha:
+                    raise RepositorySourceError("Checkout differs from accepted target")
+            await drained(prepare)
+            yield RepositorySnapshot(ref=ref, root_path=root, commit_sha=target_sha,
+                                     branch=ref.branch), base_available
+
     def _run_git(
         self,
         args: Sequence[str],
@@ -151,6 +210,9 @@ class GitHubRepositorySource(RepositorySource):
         env['GIT_CONFIG_VALUE_0'] = ''
         env['GIT_CONFIG_KEY_1'] = 'http.extraheader'
         env['GIT_CONFIG_VALUE_1'] = ''
+        # Untrusted repositories must never invoke a local checkout filter or hook.
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
         if credential and credential.token:
             auth = base64.b64encode(f'x-access-token:{credential.token}'.encode()).decode()
             env['GIT_CONFIG_COUNT'] = '3'
@@ -372,9 +434,11 @@ class GitHubRepositorySource(RepositorySource):
             return []
 
         res = self._run_git(
-            ["diff", "--name-status", "-M", base_commit, target_commit],
+            ["diff", "--name-status", "-z", "-M", base_commit, target_commit],
             cwd=snapshot.root_path,
             check=False,
+            max_output_bytes=8 * 1024 * 1024,
+            timeout_seconds=60,
         )
         if res.returncode != 0:
             cleaned_err = sanitize_sensitive_text(res.stderr.strip())
@@ -383,23 +447,21 @@ class GitHubRepositorySource(RepositorySource):
             )
 
         changes: list[FileChange] = []
-        for line in res.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split("\t")
-            status = parts[0]
+        entries = iter(res.stdout.split("\0"))
+        for status in entries:
+            if not status:
+                break
+            path = next(entries)
 
             if status.startswith("A"):
-                changes.append(FileChange(path=parts[1], kind=ChangeKind.ADDED))
-            elif status.startswith("M"):
-                changes.append(FileChange(path=parts[1], kind=ChangeKind.MODIFIED))
+                changes.append(FileChange(path=path, kind=ChangeKind.ADDED))
+            elif status.startswith(("M", "T")):
+                changes.append(FileChange(path=path, kind=ChangeKind.MODIFIED))
             elif status.startswith("D"):
-                changes.append(FileChange(path=parts[1], kind=ChangeKind.DELETED))
+                changes.append(FileChange(path=path, kind=ChangeKind.DELETED))
             elif status.startswith("R"):
-                old_path = parts[1]
-                new_path = parts[2]
+                old_path = path
+                new_path = next(entries)
                 changes.append(FileChange(path=old_path, kind=ChangeKind.DELETED))
                 changes.append(FileChange(path=new_path, kind=ChangeKind.ADDED))
 

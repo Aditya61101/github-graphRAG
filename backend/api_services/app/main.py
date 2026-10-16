@@ -184,11 +184,22 @@ async def lifespan(app: FastAPI):
         processor=adr_processor,
     )
 
+    from ai_services.ingestion.graph_control import GraphControl
+    from ai_services.ingestion.readiness import GraphReadBarrier
+    graph_barrier = GraphReadBarrier(sqlite_store.session_factory, GraphControl(driver, database or "neo4j"))
+    app.state.graph_barrier = graph_barrier
+    from ai_services.ingestion.adr.guard import GuardedADRProcessor
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        graph_barrier.control.initialize()
+    adr_service.processor = GuardedADRProcessor(adr_processor, sqlite_store,
+        IngestionJobs(sqlite_store.session_factory), graph_barrier.control, graph_barrier, llm, embedder)
     graph_repo = Neo4jGraphRepository(driver=driver, database=database or "neo4j")
     graph_service = RepositoryGraphService(
         sqlite_store=sqlite_store,
         graph_repo=graph_repo,
         read_authorizer=github_app.authorize_repository_read,
+        barrier=graph_barrier,
     )
 
     app.state.sqlite_store = sqlite_store
@@ -255,6 +266,7 @@ async def lifespan(app: FastAPI):
         llm=chat_llm,
         reranker=reranker,
         retrieval_settings=RETRIEVAL_SETTINGS,
+        barrier=graph_barrier,
     )
 
     recovery_task = asyncio.create_task(

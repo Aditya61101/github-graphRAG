@@ -14,7 +14,7 @@ from api_services.app.routers.webhook import router
 
 
 @pytest.fixture
-def app():
+def app(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(router, prefix='/webhooks')
     tracked = SimpleNamespace(id='repo_101', installation_id='10', full_name='owner/repo', tracked_branch='main')
@@ -22,7 +22,18 @@ def app():
         settings=SimpleNamespace(webhook_secret='test-secret'),
         store=SimpleNamespace(get_repository=Mock(return_value=tracked)),
         invalidate=Mock(), reconcile=AsyncMock(), indexing_credential=AsyncMock())
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from ai_services.ingestion.persistence.models import Base, RepositoryModel
+    engine = create_engine(f"sqlite:///{tmp_path/'webhook.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions.begin() as s:
+        s.add(RepositoryModel(id='repo_101', github_repository_id='101', owner='owner', name='repo',
+            full_name='owner/repo', repository_url='url', tracked_branch='main', installation_id='10'))
+    app.state.sqlite_store = SimpleNamespace(session_factory=sessions)
     app.state.ingestion_service = SimpleNamespace(handle_github_push_webhook=AsyncMock())
+    monkeypatch.setattr('api_services.app.utils.ingestion.dispatch_one', AsyncMock())
     return app
 
 
@@ -43,7 +54,10 @@ def test_push_dispatch_uses_background_service_without_route_token_request(app):
     payload = push_payload()
     response = send(app, 'push', payload)
     assert response.status_code == 202
-    app.state.ingestion_service.handle_github_push_webhook.assert_awaited_once_with(payload)
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    run = IngestionJobs(app.state.sqlite_store.session_factory).get(response.json()['run_id'])
+    assert run.status == 'QUEUED' and run.target_commit_sha == payload['after']
+    app.state.ingestion_service.handle_github_push_webhook.assert_not_awaited()
     app.state.github_app.indexing_credential.assert_not_awaited()
 
 

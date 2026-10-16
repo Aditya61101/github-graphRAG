@@ -101,6 +101,8 @@ def init_db() -> None:
                 "CREATE TABLE app_schema_version (version INTEGER NOT NULL)"
             )
             conn.exec_driver_sql("INSERT INTO app_schema_version VALUES (3)")
+        from .migrate_ingestion import upgrade as upgrade_ingestion
+        upgrade_ingestion(conn)
         from .migrate_pr_orchestration import upgrade
 
         upgrade(conn)

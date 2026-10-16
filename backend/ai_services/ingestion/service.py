@@ -106,6 +106,9 @@ class RepositoryIngestionService:
         """Trigger initial or incremental repository ingestion with user credential."""
         from shared.utils.processing import require_background_processing
         require_background_processing()
+        from ai_services.ingestion.sources.github import GitHubRepositorySource
+        if isinstance(self.repository_source, GitHubRepositorySource):
+            raise RuntimeError("Repository ingestion must execute through the durable isolated worker")
         from ai_services.ingestion.sources.interface import RepositoryAuthenticationError
 
         if self.github_app and repository_id:
@@ -269,6 +272,8 @@ class RepositoryIngestionService:
                 progress_callback=audit.record_result,
                 publication_guard=lambda: self._check_publication(repo_id),
             )
+            # Full ingestion is an authoritative code-only reconciliation.
+            pipeline.neo4j_writer.reconcile_code(repo_id)
             result = await pipeline.ingest(plan.files)
             audit.record_result(result)
             audit.counts.persisted = await asyncio.to_thread(
@@ -479,12 +484,12 @@ class RepositoryIngestionService:
     async def _run_community_pipeline(self, repository_id: str):
         """Run community detection and summarization scoped strictly to the specified repository."""
         if not self.llm or not self.embedder:
-            logger.info("Skipping community detection: LLM or Embedder not configured.")
-            return
+            raise RuntimeError("Required community LLM and embedder are not configured")
 
         try:
             config = CommunityConfig(
-                graph_name="entityGraph",
+                graph_name=(f"entityGraph_{repository_id}_{self.neo4j_driver.run.token}"
+                            if hasattr(self.neo4j_driver, "run") else "entityGraph"),
                 repository_id=repository_id,
                 algorithm="leiden",
                 random_seed=42,
@@ -497,8 +502,9 @@ class RepositoryIngestionService:
                 config=config,
             )
             return await community_pipeline.run(force_refresh=False)
-        except Exception as exc:
-            logger.warning(f"Community pipeline error for repo {repository_id}: {exc}")
+        except Exception:
+            logger.exception("Required community pipeline failed")
+            raise
 
     async def handle_github_push_webhook(self, payload: dict[str, Any]) -> IngestionResult:
         """Process a GitHub push event on a tracked branch using stored user credential."""

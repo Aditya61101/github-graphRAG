@@ -326,7 +326,7 @@ class GDSProjectionManager:
         database: str | None = None,
     ) -> dict[str, Any]:
         """Drop any existing projection with the target name, then create a fresh projection."""
-        gname = graph_name or self.config.graph_name
+        gname = graph_name or self.config.effective_graph_name
         db = database or self.config.database
         await self.drop_projection_if_exists(driver, graph_name=gname, database=db)
         return await self.create_projection(driver, graph_name=gname, database=db)

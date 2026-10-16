@@ -10,6 +10,8 @@ from ai_services.ingestion.persistence.models import RepositoryModel
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
 from api_services.app.models.graph import GraphEdge, GraphNode, RepositoryGraphResponse
 
+from ai_services.ingestion.readiness import guarded_read
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,10 +33,12 @@ class RepositoryGraphService:
         sqlite_store: SqliteApplicationStore,
         graph_repo: Neo4jGraphRepository,
         read_authorizer=None,
+        barrier=None,
     ) -> None:
         self.sqlite_store = sqlite_store
         self.graph_repo = graph_repo
         self.read_authorizer = read_authorizer
+        self.barrier = barrier
 
     def validate_repository_access(self, repository_identifier: str, user_id: str) -> RepositoryModel:
         """Verify repository exists and belongs to the authenticated user.
@@ -64,11 +68,13 @@ class RepositoryGraphService:
             return await self.read_authorizer(user_id, repository_identifier)
         return self.validate_repository_access(repository_identifier, user_id)
 
+    @guarded_read
     async def count_architectural_decisions(self, repository_identifier: str, user_id: str) -> int:
         repo = await self.validate_repository_read_access(repository_identifier, user_id)
         repo_ids = list(dict.fromkeys(filter(None, [repo.id, repo.github_repository_id])))
         return await asyncio.to_thread(self.graph_repo.count_architectural_decisions, repo_ids)
 
+    @guarded_read
     async def get_repository_graph(
         self,
         repository_identifier: str,

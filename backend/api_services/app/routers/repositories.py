@@ -53,6 +53,8 @@ from api_services.app.utils.jwt_utils import get_current_user
 from api_services.app.utils.processing import require_processing_enabled
 from api_services.app.utils.query_response_mapper import build_api_response
 
+from ai_services.ingestion.readiness import guarded_route
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -80,25 +82,12 @@ async def _run_ingest_background(service, repo_id, installation_id, user_id, bra
 
 
 async def _start_index(request, background_tasks, user, repo, branch, force_full, sync, trigger):
-    require_processing_enabled()
-    service = resource(request, 'ingestion_service')
-    args = (service, repo.id, repo.installation_id, user.id, branch, force_full, trigger)
-    if not sync:
-        background_tasks.add_task(_run_ingest_background, *args)
-        return JSONResponse(status_code=202, content=IngestionJobResponse(
-            status='accepted', repository=repo.full_name, repository_id=repo.id,
-            message='Indexing scheduled with execution-time installation authorization.',
-        ).model_dump())
-    try:
-        result = await _index(*args)
-    except GitHubAppError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from None
-    except RepositorySourceError:
-        raise HTTPException(400, 'Repository could not be indexed; verify public access and branch') from None
-    except Exception:
-        logger.exception('Indexing failed repository=%s', repo.id)
-        raise HTTPException(500, 'Repository indexing failed') from None
-    return IngestionJobResponse(**vars(result))
+    from api_services.app.utils.ingestion import accept
+    run_id = await accept(request, background_tasks, repo, force_full=force_full, trigger=trigger)
+    return JSONResponse(status_code=202, content=IngestionJobResponse(
+        status='accepted', repository=repo.full_name, repository_id=repo.id, run_id=run_id,
+        message='Indexing accepted durably; check repository status for completion.',
+    ).model_dump())
 
 
 @router.post('/ingest', response_model=IngestionJobResponse)
@@ -168,6 +157,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
 
 
 @router.get('/{repo_id}/overview', response_model=RepositoryOverviewResponse)
+@guarded_route
 async def get_repository_overview(repo_id: str, request: Request,
                                  current_user: UserModel = Depends(get_current_user)):
     repo = await authorize_repository_read(request, current_user.id, repo_id)

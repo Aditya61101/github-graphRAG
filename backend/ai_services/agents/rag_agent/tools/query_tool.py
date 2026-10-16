@@ -21,6 +21,7 @@ def create_query_graph_rag_tool(
     chunk_retriever,
     reranker: Reranker | None = None,
     retrieval_settings: RetrievalSettings | None = None,
+    barrier=None,
 ):
     @tool
     async def query_graph_rag(
@@ -50,19 +51,22 @@ def create_query_graph_rag_tool(
             raise ValueError('Missing backend-authorized repository scope')
         target_repo_id = state_repo
 
-        result: HybridRetrievalResult = await hybrid_retrieve(
-            query=query,
-            driver=driver,
-            database=database,
-            embedder=embedder,
-            entity_retriever=entity_retriever,
-            community_retriever=community_retriever,
-            chunk_retriever=chunk_retriever,
-            repository_id=target_repo_id,
-            # Conversational retrieval always uses the vector results directly.
-            reranker=None,
-            settings=retrieval_settings,
-        )
+        if barrier is None:
+            raise RuntimeError("Graph retrieval requires a readiness barrier")
+        async with barrier.read(target_repo_id):
+            result: HybridRetrievalResult = await hybrid_retrieve(
+                query=query,
+                driver=driver,
+                database=database,
+                embedder=embedder,
+                entity_retriever=entity_retriever,
+                community_retriever=community_retriever,
+                chunk_retriever=chunk_retriever,
+                repository_id=target_repo_id,
+                # Conversational retrieval always uses the vector results directly.
+                reranker=None,
+                settings=retrieval_settings,
+            )
 
         return Command(
             update={

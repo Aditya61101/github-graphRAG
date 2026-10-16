@@ -56,5 +56,9 @@ async def query_authorized(request, user, repository_id, payload):
     agent = getattr(request.app.state, 'rag_agent', None)
     if agent is None:
         raise HTTPException(503, 'RAG query agent is not initialized')
-    return await agent.query(conversation_id=payload.conversation_id, query=payload.query,
-                             repository_id=repo.id, user_id=user.id)
+    barrier = getattr(request.app.state, 'graph_barrier', None)
+    if barrier is None:
+        raise HTTPException(503, 'Graph readiness service is not initialized')
+    async with barrier.read(repo.id):
+        return await agent.query(conversation_id=payload.conversation_id, query=payload.query,
+                                 repository_id=repo.id, user_id=user.id)

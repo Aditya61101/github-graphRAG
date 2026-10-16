@@ -75,7 +75,7 @@ class Neo4jCommunityStore(CommunityStore):
             validate_query = f"""
             UNWIND $entity_ids AS eid
             OPTIONAL MATCH (e:{e_label})
-            WHERE elementId(e) = eid
+            WHERE e.id = eid AND ($repository_id IS NULL OR e.repository=$repository_id)
             WITH eid, count(e) AS matches
             WITH collect(CASE WHEN matches = 0 THEN eid END) AS missing_ids,
                  collect(CASE WHEN matches > 1 THEN eid END) AS duplicate_ids
@@ -89,6 +89,7 @@ class Neo4jCommunityStore(CommunityStore):
                     validate_query,
                     database=db,
                     entity_ids=expected_entity_ids,
+                    repository_id=self.config.repository_id,
                 )
                 records = getattr(validation_result, "records", validation_result)
                 record = records[0] if records else None
@@ -138,7 +139,7 @@ class Neo4jCommunityStore(CommunityStore):
                 MATCH (c:{c_label} {{communityId: item.community_id}})
                 UNWIND item.entity_ids AS eid
                 MATCH (e:{e_label})
-                WHERE elementId(e) = eid
+                WHERE e.id = eid AND ($repository_id IS NULL OR e.repository=$repository_id)
                 SET e.communityId = item.community_id
                 MERGE (e)-[:{rel_type}]->(c)
                 RETURN count(DISTINCT e) AS persisted_entities
@@ -167,7 +168,7 @@ class Neo4jCommunityStore(CommunityStore):
                 MATCH (c:{c_label} {{communityId: item.community_id}})
                 UNWIND item.entity_ids AS eid
                 MATCH (e:{e_label})
-                WHERE elementId(e) = eid
+                WHERE e.id = eid AND ($repository_id IS NULL OR e.repository=$repository_id)
                 SET e.communityId = item.community_id
                 OPTIONAL MATCH (e)-[old_rel:{rel_type}]->(old_c:{c_label})
                 WHERE old_c.communityId <> item.community_id
@@ -205,7 +206,7 @@ class Neo4jCommunityStore(CommunityStore):
             # Validate exactly one membership per entity after the transaction.
             duplicate_check_query = f"""
             MATCH (e:{e_label})
-            WHERE elementId(e) IN $entity_ids
+            WHERE e.id IN $entity_ids AND ($repository_id IS NULL OR e.repository=$repository_id)
             OPTIONAL MATCH (e)-[:{rel_type}]->(c:{c_label})
             WITH e, count(c) AS community_count
             WHERE community_count <> 1
@@ -217,6 +218,7 @@ class Neo4jCommunityStore(CommunityStore):
                 database=db,
                 is_full_sync=is_full_sync,
                 entity_ids=expected_entity_ids,
+                    repository_id=self.config.repository_id,
             )
             duplicate_records = getattr(duplicate_result, "records", duplicate_result)
             invalid_entities = (
@@ -336,12 +338,12 @@ class Neo4jCommunityStore(CommunityStore):
         WHERE e <> neighbor AND type(r) <> $rel_type
         RETURN
             c.communityId AS community_id,
-            toString(elementId(e)) AS entity_id,
-            coalesce(e.name, toString(elementId(e))) AS entity_name,
+            e.id AS entity_id,
+            coalesce(e.name, e.id) AS entity_name,
             labels(e) AS entity_labels,
             type(r) AS relationship_type,
-            toString(elementId(neighbor)) AS target_id,
-            coalesce(neighbor.name, toString(elementId(neighbor))) AS target_name
+            neighbor.id AS target_id,
+            coalesce(neighbor.name, neighbor.id) AS target_name
         ORDER BY c.communityId, entity_name, target_name
         """
         try:
