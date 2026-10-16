@@ -1,7 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
-type InsightsPlaceholderProps = {};
-
-export function InsightsPlaceholder({}: InsightsPlaceholderProps) {
+export function InsightsPlaceholder() {
   return <Skeleton className="h-full animate-none" />;
 }

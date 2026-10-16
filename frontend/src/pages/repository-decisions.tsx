@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KnowledgeDetailModal } from "@/components/repositories/knowledge-detail-modal";
 import type { ADRUploadResult, KnowledgeItem } from "@/types/knowledge";
+import { DecisionRisks } from "@/components/repositories/decision-risks";
 
 const queryOptions = {
   retry: false,
@@ -77,6 +78,27 @@ export default function RepositoryDecisionsPage() {
           Extracted architectural decisions, constraints, and their ADR
           evidence.
         </p>
+      </section>
+      <section
+        className="space-y-3 rounded-xl border bg-card p-5"
+        aria-label="Current PR decision risks"
+      >
+        <h2 className="font-semibold">Current PR decision risks</h2>
+        <p className="text-sm text-muted-foreground">
+          Confirmed conflicts and potential risks are based on currently
+          observed open PR evidence. A decision with no association has no
+          currently observed PR risk; this does not certify safety. ADR
+          documents, requirements and distinct decisions are different counts.
+        </p>
+        <DecisionRisks
+          risks={overview.decisions_needing_attention.items ?? []}
+          total={overview.decisions_needing_attention.total ?? 0}
+          repositoryId={id}
+          available={
+            overview.decisions_needing_attention.availability.status ===
+            "available"
+          }
+        />
       </section>
       <div
         role="tablist"
@@ -259,6 +281,30 @@ export default function RepositoryDecisionsPage() {
                       {item.type && (
                         <span className="rounded-full border px-2 py-1">
                           {item.type.replaceAll("_", " ")}
+                        </span>
+                      )}
+                      {item.kind === "decision" && (
+                        <span className="rounded-full border px-2 py-1">
+                          {overview.decisions_needing_attention.availability
+                            .status !== "available"
+                            ? "PR risk unavailable"
+                            : overview.decisions_needing_attention.items?.find(
+                                  (risk) =>
+                                    risk.kind === "DECISION" &&
+                                    risk.identity === item.id
+                                )?.classification === "CONFIRMED"
+                              ? "Confirmed conflict"
+                              : overview.decisions_needing_attention.items?.some(
+                                    (risk) =>
+                                      risk.kind === "DECISION" &&
+                                      risk.identity === item.id
+                                  )
+                                ? "Potential risk"
+                                : overview.decisions_needing_attention.total >
+                                    (overview.decisions_needing_attention.items
+                                      ?.length ?? 0)
+                                  ? "No association in displayed risk subset"
+                                  : "No currently observed PR risk"}
                         </span>
                       )}
                     </div>

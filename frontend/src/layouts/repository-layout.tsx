@@ -106,7 +106,10 @@ function RepositorySidebar({
                 }
                 isActive={
                   pathname ===
-                  `/projects/${encodeURIComponent(repositoryId)}/${path}`
+                    `/projects/${encodeURIComponent(repositoryId)}/${path}` ||
+                  pathname.startsWith(
+                    `/projects/${encodeURIComponent(repositoryId)}/${path}/`
+                  )
                 }
                 tooltip={label}
                 aria-label={label}

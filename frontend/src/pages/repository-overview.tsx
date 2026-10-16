@@ -1,6 +1,5 @@
 import { Link } from "react-router";
 import {
-  Activity,
   FileText,
   GitPullRequest,
   ShieldAlert,
@@ -8,6 +7,41 @@ import {
 } from "lucide-react";
 import { useRepositoryOverview } from "@/layouts/repository-layout";
 import type { Availability, OverviewMetric } from "@/types/overview";
+import type { RecentReview } from "@/types/reviews";
+import { dateLabel, label, prPath } from "@/lib/review-presentation";
+import { DecisionRisks } from "@/components/repositories/decision-risks";
+
+function Reviews({
+  items,
+  repositoryId,
+}: {
+  items: RecentReview[];
+  repositoryId: string;
+}) {
+  return (
+    <div className="divide-y">
+      {items.map((review) => (
+        <article key={review.job_id} className="space-y-2 p-5">
+          <Link
+            className="font-medium text-primary underline dark:text-sidebar-primary"
+            to={prPath(repositoryId, review.pr_number)}
+          >
+            PR #{review.pr_number}: {label(review.outcome)}
+          </Link>
+          <p className="text-sm">
+            {review.confirmed_conflicts} supported governing-rule findings ·{" "}
+            {review.review_required_findings} requiring review ·{" "}
+            {review.rejected_findings} rejected records
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {dateLabel(review.evaluated_at)} · {label(review.freshness)} ·
+            Coverage: {label(review.coverage?.scope)}
+          </p>
+        </article>
+      ))}
+    </div>
+  );
+}
 
 function metricValue(metric: OverviewMetric, fallback: string) {
   if (metric.availability.status === "available") return metric.value;
@@ -37,21 +71,22 @@ export default function RepositoryOverviewPage() {
       title: "Decisions at Risk",
       metric: kpis.decisions_at_risk,
       fallback: "Not evaluated yet",
-      description: "Decision risk assessment is not available yet",
+      description: `${overview.risk_breakdown?.confirmed_decisions ?? 0} confirmed · ${overview.risk_breakdown?.potential_decisions ?? 0} potential, from current observed open PRs. Unmapped requirements are counted separately.`,
       Icon: ShieldAlert,
     },
     {
       title: "PRs Analyzed",
       metric: kpis.prs_analyzed,
       fallback: "Analysis not available yet",
-      description: "Completed architectural PR evaluations",
+      description:
+        "Distinct PRs with a persisted evaluation, across all revisions; not the number of runs",
       Icon: GitPullRequest,
     },
     {
       title: "Architectural Warnings",
       metric: kpis.architectural_warnings,
       fallback: "Analysis not available yet",
-      description: "Findings from architectural evaluations",
+      description: `${overview.risk_breakdown?.confirmed_warnings ?? 0} supported governing-rule findings · ${overview.risk_breakdown?.potential_warnings ?? 0} unresolved or rejected records. These are not necessarily separate bugs.`,
       Icon: TriangleAlert,
     },
   ];
@@ -88,7 +123,9 @@ export default function RepositoryOverviewPage() {
             </p>
             <p className="mt-2 text-xs text-muted-foreground">
               {metric.availability.status === "error"
-                ? "The graph query failed. A decision count could not be retrieved."
+                ? title === "Architecture Decisions"
+                  ? "The graph query failed. A decision count could not be retrieved."
+                  : "This metric could not be retrieved."
                 : description}
             </p>
           </article>
@@ -106,15 +143,24 @@ export default function RepositoryOverviewPage() {
             Last {overview.review_activity.window_days} days
           </span>
         </div>
-        <div className="flex min-h-52 flex-col items-center justify-center gap-3 p-6 text-center text-muted-foreground">
-          <Activity aria-hidden="true" className="size-7" />
-          <p className="text-sm">
-            {sectionMessage(
-              overview.review_activity.availability,
-              "Architectural review activity will appear once PR analysis is enabled."
-            )}
-          </p>
-        </div>
+        {overview.review_activity.availability.status === "available" &&
+        overview.review_activity.items?.length ? (
+          <Reviews
+            items={overview.review_activity.items}
+            repositoryId={repository.id}
+          />
+        ) : (
+          <div className="p-6 text-muted-foreground">
+            <p className="text-sm">
+              {sectionMessage(
+                overview.review_activity.availability,
+                overview.review_activity.availability.status === "available"
+                  ? "No architectural reviews in this period."
+                  : "Architectural review activity is unavailable."
+              )}
+            </p>
+          </div>
+        )}
       </section>
       <section
         className="rounded-xl border bg-card"
@@ -126,17 +172,38 @@ export default function RepositoryOverviewPage() {
           </h2>
           <Link
             to={`${base}/decisions`}
-            className="text-sm text-primary hover:underline"
+            className="text-sm text-primary hover:underline dark:text-sidebar-primary"
           >
             View all decisions
           </Link>
         </div>
-        <p className="p-5 text-sm text-muted-foreground">
-          {sectionMessage(
-            overview.decisions_needing_attention.availability,
-            "Not evaluated yet. Decisions needing attention will appear once risk assessment is available."
-          )}
-        </p>
+        <div className="p-5">
+          <DecisionRisks
+            repositoryId={repository.id}
+            risks={overview.decisions_needing_attention.items ?? []}
+            total={overview.decisions_needing_attention.total ?? 0}
+            available={
+              overview.decisions_needing_attention.availability.status ===
+              "available"
+            }
+          />
+          <p className="mt-3 text-xs text-muted-foreground">
+            {overview.risk_breakdown?.unmapped_requirements ?? 0} requirements
+            without an explicit decision mapping ·{" "}
+            {overview.risk_breakdown?.uncertain_units ?? 0} uncertain units.
+            Risk associations are based on the latest persisted GitHub
+            observation.
+          </p>
+        </div>
+        {overview.decisions_needing_attention.availability.status !==
+          "available" && (
+          <p className="p-5 text-sm text-muted-foreground">
+            {sectionMessage(
+              overview.decisions_needing_attention.availability,
+              "Decision risk assessment is unavailable."
+            )}
+          </p>
+        )}
       </section>
       <section
         className="rounded-xl border bg-card"
@@ -148,17 +215,27 @@ export default function RepositoryOverviewPage() {
           </h2>
           <Link
             to={`${base}/pull-requests`}
-            className="text-sm text-primary hover:underline"
+            className="text-sm text-primary hover:underline dark:text-sidebar-primary"
           >
             View all PRs
           </Link>
         </div>
-        <p className="p-5 text-sm text-muted-foreground">
-          {sectionMessage(
-            overview.recent_pr_reviews.availability,
-            "Analysis not available yet. Completed architectural reviews will appear once PR analysis is enabled."
-          )}
-        </p>
+        {overview.recent_pr_reviews.availability.status === "available" &&
+        overview.recent_pr_reviews.items?.length ? (
+          <Reviews
+            items={overview.recent_pr_reviews.items}
+            repositoryId={repository.id}
+          />
+        ) : (
+          <p className="p-5 text-sm text-muted-foreground">
+            {sectionMessage(
+              overview.recent_pr_reviews.availability,
+              overview.recent_pr_reviews.availability.status === "available"
+                ? "No architectural PR reviews yet."
+                : "Architectural PR reviews are unavailable."
+            )}
+          </p>
+        )}
       </section>
       <footer
         className="flex flex-wrap gap-x-6 gap-y-2 border-t pt-4 text-xs text-muted-foreground"

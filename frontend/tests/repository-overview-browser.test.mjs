@@ -98,6 +98,8 @@ before(async () => {
                 );
               return json(current.overview);
             }
+            if (request.url.startsWith("/repositories/repo_101/pull-requests"))
+              return json({ items: [], total: 0, limit: 20, offset: 0 });
             if (request.url === "/repositories")
               return json([
                 {
@@ -305,7 +307,7 @@ test("sidebar collapse, keyboard tooltip, active route and nested placeholders p
   await browser.waitFor(
     at("/projects/repo_101/pull-requests") +
       " && " +
-      contains("Coming later") +
+      contains("No observed pull requests") +
       " && document.querySelector('main h1')?.textContent === 'Pull Requests'"
   );
   await clickLink("Settings");

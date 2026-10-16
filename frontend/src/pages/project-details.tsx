@@ -24,18 +24,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function ProjectDetailsPage() {
   const { projectId } = useParams();
 
-  if (!projectId) {
-    return <ErrorState />;
-  }
-
   const {
     data: project,
     isLoading,
     isError,
   } = useQuery({
     queryKey: ["projects", projectId],
-    queryFn: () => projectService.getProjectById(projectId),
+    queryFn: () => projectService.getProjectById(projectId!),
+    enabled: Boolean(projectId),
   });
+
+  if (!projectId) return <ErrorState />;
 
   const headerCrumbs = [
     { label: "Projects", pathname: "/projects" },

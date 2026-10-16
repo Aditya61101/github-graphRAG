@@ -10,6 +10,8 @@ import RepositoryLayout from "@/layouts/repository-layout";
 import RepositoryOverviewPage from "@/pages/repository-overview";
 import RepositoryComingLater from "@/pages/repository-coming-later";
 import RepositoryDecisionsPage from "@/pages/repository-decisions";
+import RepositoryPullRequestsPage from "@/pages/repository-pull-requests";
+import RepositoryPullRequestDetailPage from "@/pages/repository-pull-request-detail";
 const ExplorePage = lazy(() => import("@/pages/explore"));
 import SettingsPage from "@/pages/settings";
 import InstallPage from "@/pages/install";
@@ -45,10 +47,12 @@ export const appRouter = createBrowserRouter([
               </Suspense>
             ),
           },
-          ...["pull-requests", "settings"].map((path) => ({
-            path,
-            element: <RepositoryComingLater />,
-          })),
+          { path: "pull-requests", element: <RepositoryPullRequestsPage /> },
+          {
+            path: "pull-requests/:prNumber",
+            element: <RepositoryPullRequestDetailPage />,
+          },
+          { path: "settings", element: <RepositoryComingLater /> },
         ],
       },
       {

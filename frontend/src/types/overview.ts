@@ -1,3 +1,4 @@
+import type { DecisionRisk, RecentReview, RiskBreakdown } from "./reviews";
 export type Availability =
   | { status: "available"; reason: null }
   | { status: "unavailable"; reason: "engine_not_implemented" }
@@ -19,7 +20,10 @@ export type RepositoryOverview = {
     indexed_commit_sha: string | null;
     status: string;
   };
-  permissions: { can_view_settings: boolean; can_manage_source_documents: boolean };
+  permissions: {
+    can_view_settings: boolean;
+    can_manage_source_documents: boolean;
+  };
   decision_count_basis: "distinct_persisted_nodes";
   kpis: {
     architecture_decisions: OverviewMetric;
@@ -27,7 +31,16 @@ export type RepositoryOverview = {
     prs_analyzed: OverviewMetric;
     architectural_warnings: OverviewMetric;
   };
-  review_activity: { availability: Availability; window_days: 7 };
-  decisions_needing_attention: { availability: Availability };
-  recent_pr_reviews: { availability: Availability };
+  review_activity: {
+    availability: Availability;
+    window_days: 7;
+    items: RecentReview[];
+  };
+  decisions_needing_attention: {
+    availability: Availability;
+    items: DecisionRisk[];
+    total: number;
+  };
+  recent_pr_reviews: { availability: Availability; items: RecentReview[] };
+  risk_breakdown: RiskBreakdown;
 };
