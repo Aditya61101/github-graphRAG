@@ -9,7 +9,7 @@ import { GithubIcon } from "@/components/icons";
 
 const PROVIDERS = [
   {
-    label: "GitHub Cloud",
+    label: "Login with Github",
     icon: GithubIcon,
     onClick: () => authService.loginWithGithub(),
   },
@@ -26,7 +26,7 @@ export default function LoginPage() {
 
   return (
     <div className="relative min-h-svh overflow-hidden bg-[#09070f] text-white">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,color-mix(in_oklab,var(--primary)_40%,transparent)_0%,#09070f_55%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,color-mix(in_oklab,var(--primary)_90%,transparent)_0%,#09070f_55%)]" />
       <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.04)_1px,transparent_1px)] bg-size-[28px_100%] opacity-30" />
 
       <div className="relative z-10 grid min-h-svh lg:grid-cols-[1fr_440px]">
@@ -64,7 +64,7 @@ export default function LoginPage() {
           </div>
         </section>
 
-        <section className="flex items-center justify-center px-6 py-12 sm:px-10">
+        <section className="flex items-center justify-center bg-black/5 px-6 py-12 backdrop-blur-md sm:px-10">
           <div className="w-full max-w-md space-y-8">
             <div className="space-y-3 text-center lg:text-left">
               <div className="flex justify-center lg:hidden">
