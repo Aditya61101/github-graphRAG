@@ -90,7 +90,8 @@ class RolloutTests(unittest.TestCase):
         if action == "update":
             if name == self.failure:
                 raise RuntimeError("deployment failed")
-            self.assertEqual(flags, ["--image", NEW])
+            self.assertEqual(flags, ["--image", NEW, "--no-traffic"] if kind == "services"
+                             else ["--image", NEW])
             deploy.single_container(value, kind)["image"] = NEW
             if self.drift:
                 deploy.single_container(value, kind)["env"] = []
@@ -273,18 +274,37 @@ class RolloutTests(unittest.TestCase):
         self.assertEqual(record["state"], "verified")
         self.assertFalse(any("execute" in call for call in self.calls))
 
-    def test_nonce_exception_does_not_hide_service_concurrency_or_labels(self):
+    def test_service_client_nonce_is_ignored_but_runtime_drift_is_not(self):
         before = resource(deploy.WORKER)
-        for field in ("concurrency", "nonce"):
-            with self.subTest(field=field):
-                after = copy.deepcopy(before)
-                if field == "concurrency":
-                    after["spec"]["template"]["spec"]["containerConcurrency"] = 20
-                else:
-                    after["spec"]["template"]["metadata"]["labels"] = {
-                        "client.knative.dev/nonce": "service-label"}
-                self.assertNotEqual(deploy.runtime_config(before, "services"),
-                                    deploy.runtime_config(after, "services"))
+        after = copy.deepcopy(before)
+        after["spec"]["template"]["metadata"]["labels"] = {
+            "client.knative.dev/nonce": "generated-nonce"}
+        self.assertEqual(deploy.runtime_config(before, "services"),
+                         deploy.runtime_config(after, "services"))
+        after["spec"]["template"]["metadata"]["labels"]["owner"] = "changed"
+        self.assertNotEqual(deploy.runtime_config(before, "services"),
+                            deploy.runtime_config(after, "services"))
+        after = copy.deepcopy(before)
+        after["spec"]["template"]["spec"]["containerConcurrency"] = 20
+        self.assertNotEqual(deploy.runtime_config(before, "services"),
+                            deploy.runtime_config(after, "services"))
+
+    def test_safe_drift_diagnostics_only_expose_paths(self):
+        before = resource(deploy.API)
+        after = copy.deepcopy(before)
+        after["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = "top-secret-value"
+        with self.assertRaisesRegex(RuntimeError, "spec.template.spec.containers\\[0\\].env\\[0\\].value") as cm:
+            deploy.assert_runtime_unchanged(before, after, "services", deploy.API)
+        self.assertNotIn("top-secret-value", str(cm.exception))
+
+    def test_services_stage_without_traffic_then_promote(self):
+        self.targets = [("services", RECOVERY)]
+        with patch.object(deploy, "gcloud", side_effect=self.fake_gcloud):
+            deploy.rollout(NEW, self.targets, self.manifest)
+        self.assertEqual([call for call in self.mutations() if call[2] == "update"],
+                         [("run", "services", "update", RECOVERY, "--image", NEW, "--no-traffic")])
+        self.assertIn(("run", "services", "update-traffic", RECOVERY, "--to-latest"),
+                      self.mutations())
 
     def test_wrong_branch_rejected_before_external_operations(self):
         with patch.dict(deploy.os.environ, {"GITHUB_REF": "refs/heads/feature/backend-cicd"}), \

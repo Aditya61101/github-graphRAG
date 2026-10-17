@@ -53,14 +53,14 @@ def runtime_config(resource, kind):
     target = result["template"]
     if kind == "jobs":
         target = target["spec"]["template"]
-        # gcloud's JobNonceChange rotates this execution-template label to
-        # force an image pull, including for an image-only update. It is CLI
-        # bookkeeping, not task configuration. Preserve every other label.
-        metadata = result["template"].get("metadata", {})
-        labels = metadata.get("labels", {})
-        labels.pop("client.knative.dev/nonce", None)
-        if not labels:
-            metadata.pop("labels", None)
+    # gcloud may rotate its client nonce when producing a fresh Job execution
+    # template or a Service revision. This is not user runtime configuration.
+    # Only normalize this exact label; keep all other labels strict.
+    metadata = result["template"].get("metadata", {})
+    labels = metadata.get("labels", {})
+    labels.pop("client.knative.dev/nonce", None)
+    if not labels:
+        metadata.pop("labels", None)
     target["spec"]["containers"][0].pop("image", None)
 
     def clean(value):
@@ -87,6 +87,47 @@ def runtime_config(resource, kind):
         }:
             del annotations[key]
     return result, annotations
+
+
+def differing_paths(before, after, prefix=""):
+    """Return changed JSON paths only. Never print values (env may contain secrets)."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        result = []
+        for key in sorted(before.keys() | after.keys()):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in before or key not in after:
+                result.append(path)
+            else:
+                result.extend(differing_paths(before[key], after[key], path))
+        return result
+    if isinstance(before, list) and isinstance(after, list):
+        result = []
+        for index in range(max(len(before), len(after))):
+            path = f"{prefix}[{index}]"
+            if index >= len(before) or index >= len(after):
+                result.append(path)
+            else:
+                result.extend(differing_paths(before[index], after[index], path))
+        return result
+    return [] if before == after else [prefix]
+
+
+def assert_runtime_unchanged(before, after, kind, name):
+    old_config = runtime_config(before, kind)
+    new_config = runtime_config(after, kind)
+    if old_config != new_config:
+        paths = []
+        for section, old_section, new_section in zip(
+            ("spec", "annotations"), old_config, new_config
+        ):
+            paths.extend(differing_paths(old_section, new_section, section))
+        # A path may contain environment NAME keys only as list indices; never
+        # log values or serialized resource details.
+        raise RuntimeError(
+            f"{name} configuration changed unexpectedly; changed paths: "
+            + ", ".join(paths[:25])
+            + (f" (+{len(paths)-25} more)" if len(paths) > 25 else "")
+        )
 
 
 def ready(resource):
@@ -168,11 +209,13 @@ def rollout(image, targets, manifest_path):
                 f"{name} changed during preflight; rerun after reconciling changes")
         record["state"] = "updating"
         save()
-        gcloud("run", kind, "update", name, "--image", image)
+        if kind == "services":
+            gcloud("run", kind, "update", name, "--image", image, "--no-traffic")
+        else:
+            gcloud("run", kind, "update", name, "--image", image)
         current = gcloud("run", kind, "describe", name)
         require(ready(current), f"{name} is not ready after update")
-        require(runtime_config(current, kind) == runtime_config(baseline[name], kind),
-                f"{name} configuration changed unexpectedly; stop and inspect")
+        assert_runtime_unchanged(baseline[name], current, kind, name)
         require(single_container(current, kind)["image"] == image, f"{name} image mismatch")
         if name == API:
             validate_profile(profile_from_container(single_container(current, kind)), image)
