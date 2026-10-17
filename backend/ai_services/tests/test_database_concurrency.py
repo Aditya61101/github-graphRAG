@@ -29,8 +29,14 @@ from ai_services.ingestion.sources.interface import (
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv('GITHUB_TOKEN_ENCRYPTION_KEY', Fernet.generate_key().decode())
+def github_settings(monkeypatch):
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv('GITHUB_TOKEN_ENCRYPTION_KEY', key)
+    return SimpleNamespace(app_id='1', encryption_key=key)
+
+
+@pytest.fixture
+def store(tmp_path, github_settings):
     engine = create_engine(f'sqlite:///{tmp_path / "concurrency.db"}', connect_args={'check_same_thread': False, 'timeout': 10})
     @event.listens_for(engine, 'connect')
     def foreign_keys(dbapi_conn, record):
@@ -130,8 +136,8 @@ def test_concurrent_repository_creation_and_ownership_conflict(store):
     assert store.get_repository('repo_101').user_id == 'owner'
 
 
-def test_concurrent_conversation_binding_preserves_scope(store):
-    service = GitHubAppService(store, MagicMock(), MagicMock())
+def test_concurrent_conversation_binding_preserves_scope(store, github_settings):
+    service = GitHubAppService(store, github_settings, MagicMock())
     parallel(lambda: service.bind_conversation('owner', 'repo_101', 'thread'))
     alternate = replace(metadata(), github_repository_id='102', name='alternate', full_name='owner/alternate')
     store.save_repository(alternate, user_id='owner')
@@ -160,8 +166,8 @@ def test_integrity_error_rolls_back_and_releases_write_lock(store):
     assert store.upsert_user('after-rollback').username == 'after-rollback'
 
 
-def test_concurrent_installation_inventory_and_repository_binding(store):
-    service = GitHubAppService(store, SimpleNamespace(app_id='1'), MagicMock())
+def test_concurrent_installation_inventory_and_repository_binding(store, github_settings):
+    service = GitHubAppService(store, github_settings, MagicMock())
     installation = {'id': 10, 'account': {'id': 20, 'login': 'owner', 'type': 'User'}, 'repository_selection': 'selected'}
     repositories = [{'id': 101, 'full_name': 'owner/repo', 'private': False}]
     parallel(lambda: service.persist_inventory(installation, repositories, 'ACTIVE'))
@@ -189,8 +195,8 @@ def test_stale_oauth_rotation_cannot_overwrite_new_credentials(store):
     assert store.decrypt_token(current.refresh_token) == 'refresh-second'
 
 
-def test_binding_cannot_reactivate_removed_inventory(store):
-    service = GitHubAppService(store, SimpleNamespace(app_id='1'), MagicMock())
+def test_binding_cannot_reactivate_removed_inventory(store, github_settings):
+    service = GitHubAppService(store, github_settings, MagicMock())
     installation = {'id': 10, 'account': {'id': 20, 'login': 'owner', 'type': 'User'}, 'repository_selection': 'selected'}
     service.persist_inventory(installation, [], 'ACTIVE')
     store.upsert_github_connection('owner', '100', 'token')
