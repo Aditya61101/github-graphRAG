@@ -178,7 +178,7 @@ class ADRNeo4jWriter:
             adr.repository_id = $repo,
             adr.title = $title,
             adr.description = $description,
-            adr.status = 'COMPLETED',
+            adr.status = 'GRAPH_PERSISTED',
             adr.source_type = $source_type,
             adr.source_id = $source_id,
             adr.source_name = $source_name,

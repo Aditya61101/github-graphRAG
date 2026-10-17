@@ -55,12 +55,12 @@ def test_batch_upload_mixed_formats_infers_titles_without_metadata(test_env):
         ('three.pdf', _create_minimal_pdf_bytes(), 'application/pdf'),
         ('four.docx', _create_minimal_docx_bytes(), 'application/octet-stream'),
     ])
-    assert response.status_code == 201
+    assert response.status_code == 202
     data = response.json()
-    assert (data['total'], data['completed'], data['duplicates'], data['failed']) == (4, 4, 0, 0)
+    assert (data['total'], data['accepted'], data['duplicates'], data['failed']) == (4, 4, 0, 0)
     assert [item['index'] for item in data['results']] == [0, 1, 2, 3]
     records = [item['adr'] for item in data['results']]
-    assert [record['title'] for record in records] == ['One', 'Two', 'ADR 003: Architecture Decision', 'ADR 004: Event Bus Selection']
+    assert [record['title'] for record in records] == ['one', 'two', 'three', 'four']
     assert all(record['description'] is None for record in records)
     assert len({record['id'] for record in records}) == 4
     for record in records:
@@ -79,8 +79,8 @@ def test_batch_duplicate_and_invalid_item_do_not_stop_later_files(test_env):
     ])
     assert response.status_code == 207
     data = response.json()
-    assert (data['completed'], data['duplicates'], data['failed']) == (2, 1, 1)
-    assert [item['status_code'] for item in data['results']] == [201, 409, 400, 201]
+    assert (data['accepted'], data['duplicates'], data['failed']) == (2, 1, 1)
+    assert [item['status_code'] for item in data['results']] == [202, 409, 400, 202]
     assert data['results'][0]['adr']['id'] == data['results'][1]['adr']['id']
     assert len(test_env['store'].list_adrs(test_env['repo_alice_id'])) == 2
 
@@ -94,8 +94,9 @@ def test_batch_size_parse_and_empty_errors_are_per_file(test_env):
         ('good.md', b'# Good\nChoose SQLite.', 'text/markdown'),
     ])
     assert response.status_code == 207
-    assert [item['status_code'] for item in response.json()['results']] == [413, 422, 400, 201]
-    assert response.json()['completed'] == 1
+    # Format parsing is deferred to the worker; extension/size/empty checks are inline.
+    assert [item['status_code'] for item in response.json()['results']] == [413, 202, 400, 202]
+    assert response.json()['accepted'] == 2
 
 
 def test_batch_count_limit_is_rejected_before_ingestion(test_env):
@@ -125,9 +126,9 @@ def test_batch_repository_authorization(test_env, repo, token, code):
 
 def test_single_file_uses_files_field_and_batch_response(test_env):
     response = post_adr_batch(test_env, [('one.md', b'# One', 'text/markdown')])
-    assert response.status_code == 201
-    assert response.json()['total'] == response.json()['completed'] == 1
-    assert response.json()['results'][0]['adr']['title'] == 'One'
+    assert response.status_code == 202
+    assert response.json()['total'] == response.json()['accepted'] == 1
+    assert response.json()['results'][0]['adr']['title'] == 'one'
 
 
 def test_legacy_file_field_is_not_supported(test_env):
@@ -145,17 +146,17 @@ def test_removed_metadata_cannot_override_inferred_title_or_description(test_env
     response = post_adr_batch(test_env, [('inferred.md', b'# Inferred title', 'text/markdown')],
                              data={'title': 'Override', 'description': 'Not stored',
                                    'titles': ['Override'], 'descriptions': ['Not stored']})
-    assert response.status_code == 201
+    assert response.status_code == 202
     record = response.json()['results'][0]['adr']
-    assert record['title'] == 'Inferred title' and record['description'] is None
+    assert record['title'] == 'inferred' and record['description'] is None
     stored = test_env['store'].get_adr(record['id'])
-    assert stored.title == 'Inferred title' and stored.description is None
+    assert stored.title == 'inferred' and stored.description is None
 
 
 def test_upload_service_has_no_title_or_description_override_parameters():
     from inspect import signature
     assert set(signature(ADRService.process_adr_uploads).parameters) == {
-        'self', 'repository_id', 'user_id', 'files',
+        'self', 'repository_id', 'user_id', 'files', 'asynchronous',
     }
     assert set(signature(ADRService.process_adr_upload).parameters) == {
         'self', 'repository_id', 'user_id', 'filename', 'file_bytes',
@@ -184,7 +185,7 @@ def test_batch_api_schema_documents_file_array_and_multi_status(test_env):
     assert schema['components']['schemas'][body_ref.rsplit('/', 1)[1]]['required'] == ['files']
 
 
-def test_batch_processor_failure_is_sanitized_and_later_item_completes(test_env):
+def test_batch_never_invokes_processor_in_http_request(test_env):
     from unittest.mock import AsyncMock
     processor = AsyncMock()
     processor.process_adr.side_effect = [RuntimeError('private-secret-detail'), None]
@@ -193,11 +194,11 @@ def test_batch_processor_failure_is_sanitized_and_later_item_completes(test_env)
         ('failed.md', b'# Failed\nChoose SQLite.', 'text/markdown'),
         ('success.md', b'# Success\nChoose Kafka.', 'text/markdown'),
     ])
-    assert response.status_code == 207
-    assert [item['status_code'] for item in response.json()['results']] == [500, 201]
+    assert response.status_code == 202
+    assert [item['status_code'] for item in response.json()['results']] == [202, 202]
     assert 'private-secret-detail' not in response.text
-    assert processor.process_adr.await_count == 2
-    assert sorted(record.status for record in test_env['store'].list_adrs(test_env['repo_alice_id'])) == ['COMPLETED', 'FAILED']
+    processor.process_adr.assert_not_awaited()
+    assert sorted(record.status for record in test_env['store'].list_adrs(test_env['repo_alice_id'])) == ['PENDING', 'PENDING']
 
 
 @pytest.mark.asyncio
@@ -280,8 +281,11 @@ def _create_minimal_docx_bytes(title: str = "ADR 004: Event Bus Selection") -> b
 
 
 @pytest.fixture
-def test_env():
+def test_env(monkeypatch):
     """Create isolated SQLite database, storage directory, test users and repositories."""
+    monkeypatch.delenv('ADR_GCS_BUCKET', raising=False)
+    monkeypatch.setenv('ENABLE_BACKGROUND_PROCESSING', 'true')
+    monkeypatch.setattr('api_services.app.routers.repositories._dispatch_adrs', AsyncMock())
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         storage_path = temp_path / "adrs"
@@ -330,6 +334,7 @@ def test_env():
                 user_id="usr_alice",
                 github_connection_id="conn_alice",
                 status="COMPLETED",
+                indexed_commit_sha='a' * 40, installation_id='10',
             )
             repo_bob = RepositoryModel(
                 id="repo_2001",
@@ -343,6 +348,7 @@ def test_env():
                 user_id="usr_bob",
                 github_connection_id="conn_bob",
                 status="COMPLETED",
+                indexed_commit_sha='b' * 40, installation_id='20',
             )
             session.add_all([repo_alice, repo_bob])
             session.commit()
@@ -491,10 +497,10 @@ def test_upload_adr_valid_markdown(test_env):
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()["results"][0]["adr"]
-    assert data["status"] == "COMPLETED"
-    assert data["title"] == "ADR 001: Use SQLite for Prototype"
+    assert data["status"] == "PENDING"
+    assert data["title"] == "001-sqlite"
     assert data["source_type"] == "MANUAL_UPLOAD"
     assert data["source_name"] == "001-sqlite.md"
     assert data["file_extension"] == ".md"
@@ -504,8 +510,8 @@ def test_upload_adr_valid_markdown(test_env):
     store = test_env["store"]
     db_adr = store.get_adr(data["id"])
     assert db_adr is not None
-    assert db_adr.status == "COMPLETED"
-    assert db_adr.title == "ADR 001: Use SQLite for Prototype"
+    assert db_adr.status == "PENDING"
+    assert db_adr.title == "001-sqlite"
 
     saved_file = Path(db_adr.file_path)
     assert saved_file.exists()
@@ -525,10 +531,10 @@ def test_upload_adr_valid_txt(test_env):
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()["results"][0]["adr"]
-    assert data["status"] == "COMPLETED"
-    assert data["title"] == "ADR 002: Service Communication"
+    assert data["status"] == "PENDING"
+    assert data["title"] == "decision-grpc"
     assert data["file_extension"] == ".txt"
 
 
@@ -545,10 +551,10 @@ def test_upload_adr_valid_pdf(test_env):
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()["results"][0]["adr"]
-    assert data["status"] == "COMPLETED"
-    assert "ADR 003: Architecture Decision" in data["title"]
+    assert data["status"] == "PENDING"
+    assert data["title"] == "adr-003"
     assert data["mime_type"] == "application/pdf"
 
 
@@ -571,10 +577,10 @@ def test_upload_adr_valid_docx(test_env):
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()["results"][0]["adr"]
-    assert data["status"] == "COMPLETED"
-    assert data["title"] == "ADR 004: Event Bus Selection"
+    assert data["status"] == "PENDING"
+    assert data["title"] == "adr-004"
     assert data["file_extension"] == ".docx"
 
 
@@ -593,7 +599,7 @@ def test_upload_adr_content_hash_verified(test_env):
         files=files,
         headers=headers,
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()["results"][0]["adr"]
     assert data["content_hash"] == expected_hash
 
@@ -612,7 +618,7 @@ def test_upload_adr_duplicate_detection(test_env):
         files=files1,
         headers=headers,
     )
-    assert resp1.status_code == 201
+    assert resp1.status_code == 202
 
     # Second upload with identical content to the same repository
     files2 = {"files": ("adr-005-copy.md", content, "text/markdown")}
@@ -621,7 +627,7 @@ def test_upload_adr_duplicate_detection(test_env):
         files=files2,
         headers=headers,
     )
-    assert resp2.status_code == 207
+    assert resp2.status_code == 202
     assert resp2.json()["results"][0]["status_code"] == 409
     assert "identical adr already exists" in resp2.json()["results"][0]["error"].lower()
 
@@ -633,7 +639,7 @@ def test_upload_adr_duplicate_detection(test_env):
         files=files_bob,
         headers=headers_bob,
     )
-    assert resp_bob.status_code == 201
+    assert resp_bob.status_code == 202
 
 
 # =========================================================================
@@ -656,7 +662,7 @@ def test_upload_adr_path_traversal_prevention(test_env):
             files=files,
             headers=headers,
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 202
         data = resp.json()["results"][0]["adr"]
         assert "file_path" not in data
 
@@ -674,41 +680,13 @@ def test_upload_adr_path_traversal_prevention(test_env):
 # =========================================================================
 # 14. Parsing Failure -> ADR Marked FAILED (422)
 # =========================================================================
-def test_upload_adr_parsing_failure_handling(test_env):
-    client = test_env["client"]
-    store = test_env["store"]
-    headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
+def test_upload_defers_parsing_failure_to_worker(test_env):
+    with patch('ai_services.ingestion.adr.service.parse_adr_content', side_effect=AssertionError('must not parse')) as parser:
+        response = post_adr_batch(test_env, [('bad-doc.md', b'# Malformed Document', 'text/markdown')])
+    assert response.status_code == 202
+    assert response.json()['results'][0]['adr']['status'] == 'PENDING'
+    parser.assert_not_called()
 
-    # Simulate parser raising ADRParseError
-    with patch(
-        "ai_services.ingestion.adr.service.parse_adr_content",
-        side_effect=ADRParseError("Malformed document syntax"),
-    ):
-        files = {"files": ("bad-doc.md", b"# Malformed Document", "text/markdown")}
-        resp = client.post(
-            f"/repositories/{test_env['repo_alice_id']}/adrs",
-            files=files,
-            headers=headers,
-        )
-        assert resp.status_code == 207
-        assert resp.json()["results"][0]["status_code"] == 422
-        detail = resp.json()["results"][0]["error"].lower()
-        assert "parse" in detail and "failed" in detail
-
-    # Verify ADR was recorded in DB and marked FAILED
-    adrs = store.list_adrs(test_env["repo_alice_id"])
-    failed_adr = next((a for a in adrs if a.source_name == "bad-doc.md"), None)
-    assert failed_adr is not None
-    assert failed_adr.status == "FAILED"
-    assert "Malformed document syntax" in failed_adr.error
-
-    # Verify file is retained on disk for debugging
-    assert Path(failed_adr.file_path).exists()
-
-
-# =========================================================================
-# 15. Repository Isolation -> Strict User Access Verification
-# =========================================================================
 def test_upload_adr_repository_isolation(test_env):
     client = test_env["client"]
     headers_alice = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
@@ -720,7 +698,7 @@ def test_upload_adr_repository_isolation(test_env):
         files={"files": ("alice-secret.md", b"# Alice Secret ADR", "text/markdown")},
         headers=headers_alice,
     )
-    assert resp_alice.status_code == 201
+    assert resp_alice.status_code == 202
 
     # Bob cannot upload to Alice's repo
     resp_bob_upload = client.post(
@@ -744,7 +722,7 @@ def test_upload_adr_repository_isolation(test_env):
     )
     assert resp_alice_list.status_code == 200
     assert len(resp_alice_list.json()) >= 1
-    assert resp_alice_list.json()[0]["title"] == "Alice Secret ADR"
+    assert resp_alice_list.json()[0]["title"] == "alice-secret"
 
 
 # =========================================================================
@@ -779,47 +757,13 @@ def test_upload_adr_file_cleanup_on_write_failure(test_env):
 # 17. Failed Upload is Retryable (Not Blocked as Duplicate)
 # =========================================================================
 def test_upload_adr_retry_failed_upload(test_env):
-    """If an upload previously failed, uploading the same content again should succeed rather than conflict."""
-    client = test_env["client"]
-    store = test_env["store"]
-    headers = {"Authorization": f"Bearer {test_env['alice_jwt']}"}
-    content = b"# Retried ADR\n\n## Context\nTest retry on failure.\n\n## Decision\nIt works."
-
-    # 1. First attempt fails due to temporary parser error
-    with patch(
-        "ai_services.ingestion.adr.service.parse_adr_content",
-        side_effect=ADRParseError("Temporary parsing failure"),
-    ):
-        resp1 = client.post(
-            f"/repositories/{test_env['repo_alice_id']}/adrs",
-            files={"files": ("retried-adr.md", content, "text/markdown")},
-            headers=headers,
-        )
-        assert resp1.status_code == 207
-        assert resp1.json()["results"][0]["status_code"] == 422
-
-    # Verify status in database is FAILED
-    content_hash = hashlib.sha256(content).hexdigest()
-    failed_adr = store.get_adr_by_hash(test_env["repo_alice_id"], content_hash)
-    assert failed_adr is not None
-    assert failed_adr.status == "FAILED"
-    first_adr_id = failed_adr.id
-
-    # 2. Second attempt with exact same content should NOT return 409 Duplicate
-    # It should reclaim/retry the record and transition to COMPLETED
-    resp2 = client.post(
-        f"/repositories/{test_env['repo_alice_id']}/adrs",
-        files={"files": ("retried-adr.md", content, "text/markdown")},
-        headers=headers,
-    )
-    assert resp2.status_code == 201
-    data2 = resp2.json()["results"][0]["adr"]
-    assert data2["status"] == "COMPLETED"
-    assert data2["title"] == "Retried ADR"
-    assert data2["id"] == first_adr_id  # Reclaimed existing record
-
-    # Verify updated DB state
-    updated_adr = store.get_adr(first_adr_id)
-    assert updated_adr is not None
-    assert updated_adr.status == "COMPLETED"
-    assert updated_adr.error is None
+    service, store = test_env['adr_service'], test_env['store']
+    content = b'# Retried ADR'
+    with patch.object(service.originals, 'write', side_effect=OSError('private detail')):
+        response = post_adr_batch(test_env, [('retry.md', content, 'text/markdown')])
+    assert response.status_code == 207
+    first = store.list_adrs(test_env['repo_alice_id'])[0]
+    response = post_adr_batch(test_env, [('retry.md', content, 'text/markdown')])
+    assert response.status_code == 202
+    assert response.json()['results'][0]['adr']['id'] == first.id
+    assert store.get_adr(first.id).status == 'PENDING'

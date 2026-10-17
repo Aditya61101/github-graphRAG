@@ -61,6 +61,22 @@ before(async () => {
       {
         name: "onboarding-test-api",
         configureServer(vite) {
+          vite.middlewares.use((request, response, next) => {
+            if (request.url === "/__auth_test_reset") {
+              response.setHeader("Content-Type", "text/html");
+              return response.end("<p>Reset authentication fixture</p>");
+            }
+            if (request.url !== "/auth/github/login") return next();
+            response.setHeader("Content-Type", "text/html");
+            response.end(
+              `<script>window.opener.postMessage(${JSON.stringify({
+                type: "decisionguard.auth",
+                token,
+                next: "/projects",
+                installation_outcome: fixture.loginOutcome ?? null,
+              })}, ${JSON.stringify(base)}); window.close();</script>`
+            );
+          });
           vite.middlewares.use(
             "/__onboarding_api",
             async (request, response) => {
@@ -157,7 +173,7 @@ before(async () => {
   base = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await openBrowser();
   await browser.call("Page.addScriptToEvaluateOnNewDocument", {
-    source: `localStorage.setItem('token', ${JSON.stringify(token)}); localStorage.setItem('theme', 'light');`,
+    source: `localStorage.setItem('theme', 'light');`,
   });
   screenshots = await mkdtemp(
     path.join(tmpdir(), "decisionguard-onboarding-qa-")
@@ -181,15 +197,12 @@ const bodyContains = (text) =>
 const pathIs = (value) =>
   `window.location.pathname === ${JSON.stringify(value)}`;
 async function login(outcome = null) {
-  await browser.navigate(
-    base +
-      "/auth/success?" +
-      new URLSearchParams({
-        token,
-        next: "/projects",
-        ...(outcome ? { installation_outcome: outcome } : {}),
-      })
-  );
+  fixture.loginOutcome = outcome;
+  await browser.navigate(base + "/__auth_test_reset");
+  await browser.evaluate("localStorage.removeItem('token')");
+  await browser.navigate(base + "/auth/login");
+  await browser.waitFor(bodyContains("Login with Github"));
+  await browser.click("Login with Github");
 }
 
 test("first-time login ignores next hint and loads B1 only after confirmed empty discovery", async () => {
@@ -336,7 +349,7 @@ test("a forged success hint cannot complete onboarding", async () => {
   );
 });
 
-test("cancellation with existing grants stays recoverable and connect-more uses the backend URL", async () => {
+test("cancellation with existing grants stays recoverable and obsolete handoff is rejected", async () => {
   fixture.outcome = "cancelled";
   await login("cancelled");
   await browser.waitFor(bodyContains("GitHub installation was cancelled"));
@@ -350,11 +363,8 @@ test("cancellation with existing grants stays recoverable and connect-more uses 
     false
   );
   await browser.click("Connect more repositories");
-  await browser.waitFor(pathIs("/__github_install"));
-  assert.equal(
-    await browser.evaluate("new URLSearchParams(location.search).get('state')"),
-    "backend-bound-state"
-  );
+  await browser.waitFor(bodyContains("Invalid URL"));
+  assert.equal(await browser.evaluate(pathIs("/install")), true);
 });
 
 test("pending approval and no eligible repositories expose accurate recovery", async () => {
@@ -459,11 +469,8 @@ test("completed users can connect repositories from the repository dashboard", a
   );
   assert.equal(fixture.completion.onboarding_completed, true);
   await browser.click("Manage access on GitHub");
-  await browser.waitFor(pathIs("/__github_install"));
-  assert.equal(
-    await browser.evaluate("new URLSearchParams(location.search).get('state')"),
-    "backend-bound-state"
-  );
+  await browser.waitFor(bodyContains("Invalid URL"));
+  assert.equal(await browser.evaluate(pathIs("/install")), true);
   assert.equal(
     fixture.calls.some((c) => c[1] === "/auth/onboarding/complete"),
     false
@@ -491,6 +498,8 @@ test("completed users can recover from missing access and failed discovery witho
   fixture.completion = completed;
   fixture.eligible = false;
   fixture.discoveryFailure = true;
+  await login();
+  await browser.waitFor(pathIs("/projects"));
   await browser.navigate(base + "/install");
   await browser.waitFor(bodyContains("Unable to discover repositories"));
   assert.equal(
@@ -518,7 +527,7 @@ test("completed users can recover from missing access and failed discovery witho
   );
 });
 
-test("B1 install and B2 connect-more enter projects after a confirmed successful return", async () => {
+test("B1 and B2 enter projects after login confirms a recovered installation", async () => {
   for (const eligible of [false, true]) {
     fixture = setup();
     fixture.eligible = eligible;
@@ -526,7 +535,7 @@ test("B1 install and B2 connect-more enter projects after a confirmed successful
     await browser.click(
       eligible ? "Connect more repositories" : "Install DecisionGuard on GitHub"
     );
-    await browser.waitFor(pathIs("/__github_install"));
+    await browser.waitFor(bodyContains("Invalid URL"));
     fixture.completion = completed;
     fixture.outcome = "success";
     const discoveriesBeforeReturn = fixture.calls.filter(
@@ -565,4 +574,15 @@ test("completed status alone cannot make a failed verification successful", asyn
       .length,
     2
   );
+});
+
+test("legacy callback credentials in a URL are discarded and never authenticated", async () => {
+  await browser.navigate(base + "/__auth_test_reset");
+  await browser.evaluate("localStorage.removeItem('token')");
+  await browser.navigate(
+    base + "/auth/success?token=untrusted-legacy-token&next=/projects"
+  );
+  await browser.waitFor(pathIs("/auth/login"));
+  assert.equal(await browser.evaluate("localStorage.getItem('token')"), null);
+  assert.equal(await browser.evaluate("location.search"), "");
 });

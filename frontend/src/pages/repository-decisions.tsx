@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Loader, Search, Upload } from "lucide-react";
+import { Loader, Search, Upload } from "lucide-react";
+import { ADRDocumentEntry } from "@/components/repositories/adr-document";
 import { knowledgeService } from "@/api/knowledge-service";
 import { useRepositoryOverview } from "@/layouts/repository-layout";
 import { useAuth } from "@/contexts/auth-context";
@@ -10,7 +11,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KnowledgeDetailModal } from "@/components/repositories/knowledge-detail-modal";
-import type { ADRUploadResult, KnowledgeItem } from "@/types/knowledge";
+import type {
+  ADRDocument,
+  ADRUploadResult,
+  KnowledgeItem,
+} from "@/types/knowledge";
 import { currentDecisionRiskIndicators } from "@/lib/decision-risk-indicators";
 
 const queryOptions = {
@@ -155,6 +160,7 @@ export default function RepositoryDecisionsPage() {
       </div>
       {activeTab === "sources" ? (
         <SourceDocuments
+          key={scope.join(":")}
           repositoryId={id}
           scope={scope}
           onProcessingChange={setUploading}
@@ -368,6 +374,7 @@ function SourceDocuments({
   const queryClient = useQueryClient();
   const documents = useQuery({
     ...queryOptions,
+    staleTime: 0,
     queryKey: ["adr-documents", ...scope],
     queryFn: ({ signal }) => knowledgeService.documents(repositoryId, signal),
   });
@@ -395,6 +402,22 @@ function SourceDocuments({
         controller.signal
       );
       if (!controller.signal.aborted) {
+        await queryClient.cancelQueries({
+          queryKey: ["adr-documents", ...scope],
+        });
+        if (controller.signal.aborted) return;
+        queryClient.setQueryData<ADRDocument[]>(
+          ["adr-documents", ...scope],
+          (current) => {
+            const entries = new Map(
+              (current ?? []).map((entry) => [entry.id, entry])
+            );
+            response.results.forEach((item) => {
+              if (item.adr) entries.set(item.adr.id, item.adr);
+            });
+            return [...entries.values()];
+          }
+        );
         setResult(response);
         setFiles([]);
         if (input.current) input.current.value = "";
@@ -438,8 +461,8 @@ function SourceDocuments({
       <div className="space-y-4 rounded-xl border bg-card p-5">
         <h2 className="font-semibold">Upload ADR source documents</h2>
         <p className="text-sm text-muted-foreground">
-          Upload Markdown, text, PDF, or Word documents. Processing completes
-          within this request.
+          Upload Markdown, text, PDF, or Word documents. Accepted documents are
+          processed in the background. Use Check Status to see progress.
         </p>
         <Label htmlFor="adr-files">ADR files</Label>
         <Input
@@ -460,7 +483,7 @@ function SourceDocuments({
           ) : (
             <Upload aria-hidden="true" />
           )}
-          {processing ? "Processing documents..." : "Upload documents"}
+          {processing ? "Uploading documents..." : "Upload documents"}
         </Button>
         {processing && (
           <p
@@ -468,8 +491,8 @@ function SourceDocuments({
             aria-busy="true"
             className="text-sm text-muted-foreground"
           >
-            Extracting architectural knowledge. Keep this page open until
-            processing finishes.
+            Saving documents for background processing. Ingestion continues
+            after the upload is accepted.
           </p>
         )}
         {error && (
@@ -487,8 +510,8 @@ function SourceDocuments({
             className="space-y-2 text-sm"
           >
             <p>
-              {result.completed} processed · {result.duplicates} duplicate ·{" "}
-              {result.failed} failed
+              {result.accepted ?? 0} accepted · {result.completed} processed ·{" "}
+              {result.duplicates} duplicate · {result.failed} failed
             </p>
             {result.results.map((item) => (
               <p key={item.index}>
@@ -523,29 +546,12 @@ function SourceDocuments({
       ) : (
         <div className="space-y-3">
           {documents.data.map((document) => (
-            <article
+            <ADRDocumentEntry
               key={document.id}
-              className="space-y-2 rounded-xl border bg-card p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <h3 className="font-medium break-all">
-                  <FileText aria-hidden="true" className="mr-2 inline size-4" />
-                  {document.source_name}
-                </h3>
-                <span className="rounded-full border px-2 py-1 text-xs">
-                  {document.status}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {document.source_type} · Uploaded{" "}
-                {document.created_at
-                  ? new Date(document.created_at).toLocaleString()
-                  : "date unavailable"}
-              </p>
-              {document.error && (
-                <p className="text-sm text-destructive">{document.error}</p>
-              )}
-            </article>
+              document={document}
+              repositoryId={repositoryId}
+              scope={scope}
+            />
           ))}
         </div>
       )}

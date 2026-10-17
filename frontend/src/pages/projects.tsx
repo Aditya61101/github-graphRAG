@@ -8,7 +8,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { authService } from "@/api/auth-service";
+import { useGitHubAuth } from "@/hooks/use-github-auth";
 import { repositoryService } from "@/api/repository-service";
 import { RepositoryHeader } from "@/components/repositories/repository-header";
 import { RepositoryCardActions } from "@/components/repositories/repository-card-actions";
@@ -30,6 +30,7 @@ import {
 } from "@/lib/repository-dashboard";
 
 export default function ProjectsPage() {
+  const github = useGitHubAuth();
   const { token, user, status } = useAuth();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RepositoryFilter>("all");
@@ -131,11 +132,16 @@ export default function ProjectsPage() {
               Reconnect your GitHub account to refresh repository access. Your
               completed onboarding is preserved.
             </p>
-            <Button variant="outline" onClick={authService.loginWithGithub}>
+            <Button
+              variant="outline"
+              disabled={github.pending}
+              onClick={() => github.start()}
+            >
               Reconnect GitHub
             </Button>
           </div>
         )}
+        {github.error && <p role="alert">{github.error}</p>}
         {discovery.isPending ? (
           <section
             aria-label="Loading repositories"

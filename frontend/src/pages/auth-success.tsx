@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
-
+import { useEffect } from "react";
+import { useLocation, useNavigate } from "react-router";
 import { useAuth } from "@/contexts/auth-context";
 import { getAuthDestination } from "@/lib/auth-flow";
 import { parseInstallationOutcome } from "@/lib/onboarding-flow";
@@ -9,49 +8,40 @@ import { AuthStatusError } from "@/components/core/auth-status-error";
 
 export default function AuthSuccess() {
   const navigate = useNavigate();
-  const { login, logout, token, status, isLoading, statusError } = useAuth();
-  const [callback] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return {
-      token: params.get("token"),
-      installationOutcome: parseInstallationOutcome(
-        params.get("installation_outcome")
-      ),
-    };
-  });
-
+  const location = useLocation();
+  const { token, status, isLoading, isRefreshing, statusError } = useAuth();
+  const outcome = parseInstallationOutcome(location.state?.installationOutcome);
   useEffect(() => {
-    // Consume the callback once; do not leave the bearer token in history.
+    // Legacy token URLs are discarded without reading or accepting credentials.
     window.history.replaceState(
       window.history.state,
       "",
       window.location.pathname
     );
-    if (!callback.token || !login(callback.token)) {
-      logout();
+    if (!token || location.state?.popupCompletion !== true) {
       navigate("/auth/login", { replace: true });
+      return;
     }
-  }, [callback, login, logout, navigate]);
-
-  useEffect(() => {
-    if (token !== callback.token || isLoading || statusError || !status) return;
-    // An unsuccessful installation attempt needs a recoverable access screen,
-    // including for completed users. This hint never changes completion.
-    const needsRecovery =
-      callback.installationOutcome !== null &&
-      callback.installationOutcome !== "success";
-    const destination = needsRecovery ? "/install" : getAuthDestination(status);
-    // Persisted completion from /auth/me is authoritative. Callback parameters
-    // cannot complete onboarding or choose an arbitrary destination.
+    if (isLoading || isRefreshing || statusError || !status) return;
+    const destination =
+      outcome && outcome !== "success"
+        ? "/install"
+        : getAuthDestination(status);
     navigate(destination, {
       replace: true,
       state:
-        destination === "/install"
-          ? { installationOutcome: callback.installationOutcome }
-          : null,
+        destination === "/install" ? { installationOutcome: outcome } : null,
     });
-  }, [callback, token, status, isLoading, statusError, navigate]);
-
-  if (token === callback.token && statusError) return <AuthStatusError />;
+  }, [
+    token,
+    status,
+    isLoading,
+    isRefreshing,
+    statusError,
+    outcome,
+    location.state,
+    navigate,
+  ]);
+  if (token && statusError) return <AuthStatusError />;
   return <LoadingScreen loadingText="Verifying your GitHub access..." />;
 }

@@ -22,6 +22,19 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class GitHubAuthState(Base):
+    """Short-lived encrypted OAuth/handoff records shared by every API instance."""
+    __tablename__ = 'github_auth_state'
+    key = Column(String(64), primary_key=True)
+    purpose = Column(String(32), nullable=False)
+    user_id = Column(String(64), ForeignKey('users.id'), nullable=True)
+    github_user_id = Column(String(64), nullable=True)
+    browser_hash = Column(String(64), nullable=True)
+    payload = Column(Text, nullable=False)
+    expires_at = Column(Integer, nullable=False, index=True)
+    consumed_at = Column(Integer, nullable=True)
+
+
 class UserModel(Base):
     """Represents an authenticated application user."""
 
@@ -238,6 +251,13 @@ class IngestionRunModel(Base):
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
         }
+
+
+class ADRIngestionRun(Base):
+    """One durable execution identity per immutable ADR, using repository leases."""
+    __tablename__ = "adr_ingestion_runs"
+    adr_id = Column(String(64), ForeignKey("adrs.id"), primary_key=True)
+    run_id = Column(String(64), ForeignKey("ingestion_runs.id"), nullable=False, unique=True)
 
 
 class RepositoryIngestionState(Base):

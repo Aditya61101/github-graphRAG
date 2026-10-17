@@ -139,7 +139,8 @@ def test_disabled_processing_preserves_auth_metadata_dashboard_and_queries(disab
         json={'query': 'question', 'conversation_id': 'thread', 'repository_id': disabled.repo.id})
     assert response.status_code == 200
     assert response.json()['answer'] == 'grounded'
-    assert env.client.post('/auth/github/install', headers=env.headers).status_code == 200
+    assert env.client.post('/auth/github/install', headers={**env.headers,
+        'X-DecisionGuard-Auth-Flow': 'post-handoff-v1'}).status_code == 200
     response = env.client.post('/repositories/' + disabled.repo.id + '/query', headers=env.headers,
         json={'query': 'question', 'conversation_id': 'repo-thread'})
     assert response.status_code == 200 and response.json()['answer'] == 'grounded'

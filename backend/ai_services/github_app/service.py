@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
@@ -25,6 +27,7 @@ from ai_services.ingestion.sources.credentials import GitHubCredential
 from ai_services.ingestion.sources.interface import RepositoryMetadata
 
 from .settings import GitHubAppSettings
+from .auth_state import AuthStateStore, InvalidAuthState
 
 
 class GitHubAppError(Exception):
@@ -59,7 +62,7 @@ def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, date
 
 
 class GitHubAppService:
-    """Single-worker service. User access and installation indexing are distinct."""
+    """User access and installation indexing are distinct; rotations are shared."""
     def __init__(self, store, settings: GitHubAppSettings, client: httpx.AsyncClient):
         self.store, self.settings, self.client = store, settings, client
         self.tokens: dict[tuple, tuple[str, datetime]] = {}
@@ -69,6 +72,7 @@ class GitHubAppService:
         # Keep a completed rotation until its transaction succeeds. A database
         # outage must not make the next request spend the old refresh token again.
         self.pending_rotations: dict[str, tuple] = {}
+        self.auth_states = AuthStateStore(store.session_factory, settings.encryption_key)
 
     def app_jwt(self) -> str:
         now = int(time.time())
@@ -131,24 +135,52 @@ class GitHubAppService:
         raise GitHubAppError(401, 'GitHub reconnect required', reconnect_required=True)
 
     async def user_token(self, user_id: str, rejected_token: str | None = None) -> str:
-        # Supported runtime is one worker (OAuth state and jobs are process-local).
-        # Always re-read under the per-user lock before spending a rotating token.
-        async with self.user_locks.setdefault(user_id, asyncio.Lock()):
-            return await self._user_token_locked(user_id, rejected_token)
+        async with self.credential_lock(user_id) as owner:
+            try:
+                return await self._user_token_locked(user_id, rejected_token, owner)
+            except InvalidAuthState:
+                raise GitHubAppError(503, 'GitHub credential ownership changed; reconnect or retry shortly') from None
 
-    async def _user_token_locked(self, user_id: str, rejected_token: str | None) -> str:
+    @asynccontextmanager
+    async def credential_lock(self, user_id):
+        async with self.user_locks.setdefault(user_id, asyncio.Lock()):
+            try:
+                owner = self.auth_states.acquire_credentials(user_id)
+            except InvalidAuthState:
+                raise GitHubAppError(503, 'GitHub credentials are being updated; retry shortly') from None
+            try:
+                # Bound network work below the shared 120-second lease. No
+                # transaction or database connection is held during provider IO.
+                try:
+                    async with asyncio.timeout(90):
+                        yield owner
+                except TimeoutError:
+                    raise GitHubAppError(503, 'GitHub credentials update timed out; reconnect or retry shortly') from None
+            finally:
+                self.auth_states.release_credentials(user_id, owner)
+
+    async def _user_token_locked(self, user_id: str, rejected_token: str | None, owner=None) -> str:
         connection = self.store.get_user_github_connection(user_id)
         pending = self.pending_rotations.get(user_id)
+        shared = self.auth_states.get('rotation', user_id)
+        if shared:
+            payload = shared[1]
+            pending = (SimpleNamespace(id=payload['connection_id'], user_id=user_id,
+                access_token=payload['previous_access'], refresh_token=payload['previous_refresh']),
+                (payload['access'], payload['refresh'], datetime.fromisoformat(payload['expiry']),
+                 datetime.fromisoformat(payload['refresh_expiry'])))
+            self.pending_rotations[user_id] = pending
         if pending:
             previous, credentials = pending
             if (connection and connection.access_status == 'ACTIVE' and
                     connection.access_token == previous.access_token and
                     connection.refresh_token == previous.refresh_token):
-                self._persist_rotation(user_id, previous, credentials)
+                self._persist_rotation(user_id, previous, credentials, owner)
                 connection = self.store.get_user_github_connection(user_id)
             else:
                 # A new login or revocation supersedes any pending rotation.
-                del self.pending_rotations[user_id]
+                self.pending_rotations.pop(user_id, None)
+                self.auth_states.remove('rotation', user_id)
         if not connection or connection.credential_kind != 'github_app' or connection.access_status != 'ACTIVE':
             self._reconnect(connection)
         try:
@@ -191,16 +223,25 @@ class GitHubAppService:
             # Client configuration errors and unknown responses do not revoke users.
             raise GitHubAppError(503, 'GitHub token refresh failed; retry later')
         credentials = oauth_credentials(result, now)
+        # Persist provider success before replacing stored credentials, so another
+        # instance can finish a failed SQL publication without spending the old
+        # rotating refresh token again. Payload is encrypted with the existing key.
+        self.auth_states.put('rotation', user_id, {
+            'connection_id': connection.id, 'previous_access': connection.access_token,
+            'previous_refresh': connection.refresh_token, 'access': credentials[0],
+            'refresh': credentials[1], 'expiry': credentials[2].isoformat(),
+            'refresh_expiry': credentials[3].isoformat()}, ttl=600, user_id=user_id, credential_owner=owner)
         self.pending_rotations[user_id] = (connection, credentials)
-        self._persist_rotation(user_id, connection, credentials)
+        self._persist_rotation(user_id, connection, credentials, owner)
         return credentials[0]
 
-    def _persist_rotation(self, user_id, connection, credentials):
+    def _persist_rotation(self, user_id, connection, credentials, owner=None):
         try:
-            self.store.rotate_github_tokens(connection, *credentials)
+            self.store.rotate_github_tokens(connection, *credentials, owner)
         except Exception:  # noqa: BLE001 - sanitize storage errors and retain pending rotation
             raise GitHubAppError(503, 'Unable to persist GitHub token refresh; retry later') from None
-        del self.pending_rotations[user_id]
+        self.auth_states.remove('rotation', user_id)
+        self.pending_rotations.pop(user_id, None)
 
     async def user_request_pages(self, user_id: str, path: str, field: str) -> list[dict]:
         token = await self.user_token(user_id)

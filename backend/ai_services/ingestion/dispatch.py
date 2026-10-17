@@ -4,6 +4,12 @@ from ai_services.decision_guard.orchestration.dispatch import CloudRunJobsDispat
 
 
 class IngestionJobsDispatcher(CloudRunJobsDispatcher):
+    async def dispatch_adr(self, run_id):
+        resource = os.getenv('ADR_INGESTION_JOB_RESOURCE')
+        if not resource:
+            raise RuntimeError('ADR_INGESTION_JOB_RESOURCE is required')
+        await ADRJobsDispatcher(self.client, self.access_token, resource).dispatch(run_id)
+
     @staticmethod
     def payload(run_id):
         return {"overrides": {"containerOverrides": [{
@@ -12,6 +18,15 @@ class IngestionJobsDispatcher(CloudRunJobsDispatcher):
             # The Job is configured with command `python`, so omit the binary
             # here to produce `python -m ai_services.runs.run_repository_ingestion`.
             "args": ["-m", "ai_services.runs.run_repository_ingestion"],
+            "env": [{"name": "INGESTION_RUN_ID", "value": run_id}],
+        }]}}
+
+
+class ADRJobsDispatcher(CloudRunJobsDispatcher):
+    @staticmethod
+    def payload(run_id):
+        return {"overrides": {"containerOverrides": [{
+            "args": ["-m", "ai_services.runs.run_adr_ingestion"],
             "env": [{"name": "INGESTION_RUN_ID", "value": run_id}],
         }]}}
 
@@ -39,7 +54,11 @@ async def reconcile(jobs, dispatcher):
     require_background_processing()
     for run_id in jobs.due():
         try:
-            await dispatcher.dispatch(run_id)
+            run = jobs.get(run_id)
+            if run.trigger == 'adr':
+                await dispatcher.dispatch_adr(run_id)
+            else:
+                await dispatcher.dispatch(run_id)
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("Ingestion dispatch deferred run=%s type=%s",

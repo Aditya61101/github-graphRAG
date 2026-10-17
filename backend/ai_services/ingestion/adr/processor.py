@@ -157,7 +157,7 @@ class ADRProcessingService:
             decision_nodes: list[ArchitecturalDecisionNode] = []
             for idx, chunk_id, dec, chunk in unmapped_decisions:
                 dec_id = sha256(
-                    f"{adr_id}:decision:{idx}:{dec.title}".encode()
+                    f"{adr_id}:decision:v2:{chunk_id}:{idx}:{dec.title}".encode()
                 ).hexdigest()
                 aff_cids = [
                     lookup_entity(name, "Component")

@@ -1,6 +1,6 @@
 import { Navigate } from "react-router";
 
-import { authService } from "@/api/auth-service";
+import { useGitHubAuth } from "@/hooks/use-github-auth";
 import { LoadingScreen } from "@/components/core/loading-screen";
 import { Logo } from "@/components/core/logo";
 import { Button } from "@/components/ui/button";
@@ -11,11 +11,11 @@ const PROVIDERS = [
   {
     label: "Login with Github",
     icon: GithubIcon,
-    onClick: () => authService.loginWithGithub(),
   },
 ] as const;
 
 export default function LoginPage() {
+  const github = useGitHubAuth();
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) return <LoadingScreen />;
@@ -90,16 +90,25 @@ export default function LoginPage() {
                     key={provider.label}
                     type="button"
                     variant="outline"
-                    onClick={provider.onClick}
+                    onClick={() => github.start()}
+                    disabled={github.pending}
                     className="justify-CENTER mx-auto flex w-full max-w-xs items-center rounded-lg border border-white/10 bg-white/3 p-5 text-sm text-white transition-all hover:border-violet-400/50 hover:bg-violet-500/10 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <span className="flex items-center gap-3">
                       <Icon className="size-5" />
-                      {provider.label}
+                      {github.pending
+                        ? "Waiting for GitHub..."
+                        : provider.label}
                     </span>
                   </Button>
                 );
               })}
+              {github.error && <p role="alert">{github.error}</p>}
+              {github.pending && (
+                <Button variant="ghost" onClick={github.cancel}>
+                  Cancel GitHub connection
+                </Button>
+              )}
             </div>
 
             <p className="pt-12 text-center text-xs leading-relaxed text-zinc-600">

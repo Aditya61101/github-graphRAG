@@ -131,6 +131,16 @@ class MockNeo4jDriver:
     def _execute_cypher(self, query: str, params: dict[str, Any]) -> tuple[list[Any], Any, Any]:
         self.calls.append((query, params))
 
+        if "MATCH (a:ADR {id:$adr, repository:$repo" in query:
+            node = self.nodes.get(f"ADR:{params['adr']}")
+            if not node or node.get('repository') != params['repo']:
+                return [], None, None
+            if "status:'GRAPH_PERSISTED'" in query:
+                return ([{'id': node['id']}] if node.get('status') == 'GRAPH_PERSISTED' else []), None, None
+            if "SET a.status='FAILED'" in query:
+                node['status'] = 'FAILED'
+            return [], None, None
+
         # 1. Loading existing entities: MATCH (e:Entity {repository: $repo})
         if "MATCH (e:Entity {repository: $repo})" in query and "RETURN e.id" in query:
             repo = params.get("repo")
@@ -176,6 +186,7 @@ class MockNeo4jDriver:
                 "content_hash": params.get("content_hash"),
                 "source_type": params.get("source_type"),
                 "source_name": params.get("source_name"),
+                "status": 'GRAPH_PERSISTED',
             }
             return [], None, None
 
@@ -646,7 +657,9 @@ async def test_basic_adr_ingestion_pipeline(adr_env):
 
     # Verify ArchitecturalDecision node
     dec_nodes = [n for k, n in driver.nodes.items() if n.get("_label") == "ArchitecturalDecision"]
-    assert len(dec_nodes) == 1
+    # The fixture emits the same decision for each chunk. Those must now retain
+    # independent identities instead of merging by title/per-chunk index.
+    assert len(dec_nodes) == len(chunk_nodes)
     assert dec_nodes[0]["title"] == "Use PostgreSQL for Transactional Storage"
 
     # Verify Relationships: DEFINES, AFFECTS, CONSTRAINS

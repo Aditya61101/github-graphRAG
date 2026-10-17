@@ -17,6 +17,10 @@ from sqlalchemy import (
 from sqlalchemy.exc import SQLAlchemyError
 
 from .models import Base
+from .migrate_adr_ingestion import version_table as adr_version, upgrade as upgrade_adr
+from .models import ADRIngestionRun
+from .migrate_github_auth_state import version_table as auth_version, upgrade as upgrade_auth
+from .models import GitHubAuthState
 from .migrate_ingestion import version_table as ingestion_version, upgrade as upgrade_ingestion, EXTRA_COLUMNS
 from .migrate_pr_orchestration import version_table as orchestration_version, upgrade as upgrade_orchestration
 from .migrate_frontend_checks import version_table as frontend_version, upgrade as upgrade_frontend
@@ -28,8 +32,8 @@ SCHEMA_VERSION = 3
 LOCK_KEY = 4920260302
 VERSION_TABLE = Table("app_schema_version", MetaData(), Column("version", Integer, nullable=False), schema=SCHEMA)
 COMMAND = "python -m ai_services.ingestion.persistence.postgres_schema"
-COMPONENT_TABLES = [*ORCHESTRATION_TABLES, *FRONTEND_TABLES]
-VERSION_TABLES = [(VERSION_TABLE, 3), (orchestration_version, 1), (frontend_version, 1), (ingestion_version, 1)]
+COMPONENT_TABLES = [*ORCHESTRATION_TABLES, *FRONTEND_TABLES, ADRIngestionRun.__table__, GitHubAuthState.__table__]
+VERSION_TABLES = [(VERSION_TABLE, 3), (orchestration_version, 1), (frontend_version, 1), (ingestion_version, 1), (adr_version, 1), (auth_version, 1)]
 
 
 class PostgreSQLSchemaError(RuntimeError):
@@ -108,7 +112,7 @@ def _validate_table(conn, inspector, table, *, legacy_ingestion=False):
 def _validate(conn, *, allow_missing_components=False):
     expected = set(Base.metadata.tables) | {t.name for t, _ in VERSION_TABLES}
     component_names = {t.name for t in COMPONENT_TABLES} | {orchestration_version.name, frontend_version.name,
-        ingestion_version.name, "repository_ingestion_state", "ingestion_deliveries"}
+        ingestion_version.name, adr_version.name, auth_version.name, "repository_ingestion_state", "ingestion_deliveries"}
     actual = _tables(conn)
     if not actual:
         raise PostgreSQLSchemaError(f"PostgreSQL schema is not initialized; run {COMMAND} explicitly.")
@@ -154,6 +158,8 @@ def initialize_postgresql_schema(engine):
             upgrade_orchestration(conn)
             upgrade_frontend(conn)
             upgrade_ingestion(conn)
+            upgrade_adr(conn)
+            upgrade_auth(conn)
             # New Inspector instances avoid reusing pre-DDL reflection caches.
             _validate(conn)
         return True
@@ -175,6 +181,8 @@ def upgrade_postgresql_schema(engine):
             upgrade_orchestration(conn)
             upgrade_frontend(conn)
             upgrade_ingestion(conn)
+            upgrade_adr(conn)
+            upgrade_auth(conn)
             _validate(conn)
     except SQLAlchemyError:
         raise PostgreSQLSchemaError("Unable to upgrade PostgreSQL schema; transaction rolled back. Check connectivity and privileges.") from None
@@ -186,7 +194,7 @@ def main():
     from .database import get_engine
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--upgrade", action="store_true", help="Explicitly add Stage 4.3/4.4 tables to core schema v3")
+    parser.add_argument("--upgrade", action="store_true", help="Explicitly add processing and ADR execution tables to core schema v3")
     parser.add_argument("--validate", action="store_true", help="Validate only; never perform DDL")
     if not os.getenv("DATABASE_URL"):
         print("DATABASE_URL must be explicitly configured for PostgreSQL initialization.", file=sys.stderr)
@@ -203,7 +211,7 @@ def main():
             validate_postgresql_schema(engine)
         else:
             initialize_postgresql_schema(engine)
-        print("PostgreSQL core v3 and Stage 4.3/4.4 schemas validated.")
+        print("PostgreSQL core v3, processing, and ADR execution schemas validated.")
         return 0
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)

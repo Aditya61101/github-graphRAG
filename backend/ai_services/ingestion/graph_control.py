@@ -77,6 +77,16 @@ class GraphControl:
             list(tx.run("MATCH (g:RepositoryGraphState {repository_id:$repo}) "
                         "SET g.state='COMPLETE'", repo=run.repository_id))
 
+    def seal_adr(self, run, adr_id):
+        """Graph publication only; SQL ADR COMPLETED is committed with run completion."""
+        with self.transaction(run) as tx:
+            rows = list(tx.run("MATCH (a:ADR {id:$adr, repository:$repo}) "
+                "SET a.status='PUBLISHED' RETURN a.id", adr=adr_id, repo=run.repository_id))
+            if len(rows) != 1:
+                raise RuntimeError('ADR graph missing at publication')
+            list(tx.run("MATCH (g:RepositoryGraphState {repository_id:$repo}) "
+                        "SET g.state='COMPLETE'", repo=run.repository_id))
+
     def snapshot(self, repo):
         rows = self.driver.execute_query(
             "MATCH (g:RepositoryGraphState {repository_id:$repo}) "

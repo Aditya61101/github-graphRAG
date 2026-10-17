@@ -105,6 +105,10 @@ class IngestionJobs:
                 active = s.get(IngestionRunModel, state.active_run_id)
                 if active and active.lease_until and active.lease_until > now:
                     return None
+                # ADR publication must be recovered by its own worker before
+                # another writer can supersede a potentially sealed graph.
+                if active and active.id != run_id and active.trigger == "adr" and active.status == "INDEXING":
+                    return None
                 if active and active.id != run_id and active.status == "INDEXING":
                     active.status, active.completed_at = "FAILED", utc_now()
                     active.error = "Ownership expired; subsequent ingestion must reconcile"
@@ -169,6 +173,17 @@ class IngestionJobs:
             repo.status, repo.indexed_commit_sha = "COMPLETED", target
             state.state, state.active_run_id = "READY", None
             state.published_run_id, state.published_token = run.id, run.token
+            self._complete_adr(s, run)
+
+    @staticmethod
+    def _complete_adr(s, run):
+        if run.trigger != "adr":
+            return
+        from .models import ADRIngestionRun, ADRModel
+        mapping = s.scalar(select(ADRIngestionRun).where(ADRIngestionRun.run_id == run.id))
+        if mapping:
+            adr = s.get(ADRModel, mapping.adr_id)
+            adr.status, adr.error, adr.updated_at = "COMPLETED", None, utc_now()
 
     def recover_sealed(self, run_id, seal):
         """A COMPLETE graph cannot mutate under this token; SQL publication is retryable."""
@@ -191,6 +206,7 @@ class IngestionJobs:
             repo.status, repo.indexed_commit_sha = "COMPLETED", run.target_commit_sha
             state.state, state.active_run_id = "READY", None
             state.published_run_id, state.published_token = run_id, run.token
+            self._complete_adr(s, run)
             return True
 
     def fail(self, run_id, owner, error_type="ProcessingFailure", *, superseded=False):

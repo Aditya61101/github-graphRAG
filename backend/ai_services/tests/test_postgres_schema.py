@@ -141,6 +141,32 @@ def test_existing_core_v3_requires_explicit_additive_upgrade(pg):
     pg.marker.assert_not_called()
 
 
+def test_existing_four_marker_schema_adds_only_adr_component(pg):
+    pg.state.tables.remove('adr_ingestion_runs')
+    pg.state.tables.remove('adr_ingestion_schema_version')
+    with pytest.raises(schema.PostgreSQLSchemaError, match='--upgrade'):
+        schema.validate_postgresql_schema(pg.engine)
+    schema.upgrade_postgresql_schema(pg.engine)
+    schema.validate_postgresql_schema(pg.engine)
+    assert pg.state.versions == [3]
+    assert pg.state.component_versions['adr_ingestion_schema_version'] == [1]
+    pg.create.assert_not_called()
+
+
+def test_phase1_schema_upgrades_auth_without_rewriting_adr_objects(pg):
+    pg.state.tables -= {'github_auth_state', 'github_auth_schema_version'}
+    with pytest.raises(schema.PostgreSQLSchemaError, match='--upgrade'):
+        schema.validate_postgresql_schema(pg.engine)
+    schema.upgrade_postgresql_schema(pg.engine)
+    schema.validate_postgresql_schema(pg.engine)
+    assert pg.state.versions == [3]
+    assert pg.state.component_versions['adr_ingestion_schema_version'] == [1]
+    assert pg.state.component_versions['github_auth_schema_version'] == [1]
+    assert 'adr_ingestion_runs' in pg.state.tables
+    statements = [str(call.args[0]).upper() for call in pg.conn.execute.call_args_list]
+    assert not any(sql.startswith(('DROP ', 'DELETE ', 'TRUNCATE ')) for sql in statements)
+
+
 @pytest.mark.parametrize('versions', [[], [2], [1, 1]])
 def test_component_marker_is_strictly_validated_without_ddl(pg, versions):
     pg.state.component_versions[schema.frontend_version.name] = versions

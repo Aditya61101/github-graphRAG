@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import re
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock
@@ -108,7 +109,7 @@ def env(monkeypatch):
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
     service = GitHubAppService(store, settings, http)
-    oauth = GitHubOAuth(settings)
+    oauth = GitHubOAuth(settings, store.session_factory)
     oauth.client.fetch_access_token = AsyncMock(return_value={'access_token': 'opaque-user-token', 'expires_in': 3600,
         'refresh_token': 'login-refresh-token', 'refresh_token_expires_in': 15897600})
     app = FastAPI()
@@ -150,6 +151,39 @@ def callback(env, state, **params):
     return env.client.get('/auth/github/callback', params={'state': state, 'code': 'code', **params})
 
 
+def start_installation(env):
+    response = env.client.post('/auth/github/install', headers={**env.headers,
+        'X-DecisionGuard-Auth-Flow': 'post-handoff-v1'})
+    assert response.status_code == 200
+    contract = response.json()
+    response = env.client.post('/auth/github/install/continue', data=contract['fields'],
+                               headers={'Origin': env.settings.frontend_url})
+    assert response.status_code == 303
+    return parse_qs(urlparse(response.headers['location']).query)['state'][0]
+
+
+def auth_result(response):
+    assert response.status_code == 200
+    assert 'location' not in response.headers
+    return json.loads(re.search(r'const result = (.*);', response.text).group(1))
+
+
+def expire_auth_state(env, purpose, value):
+    from ai_services.ingestion.persistence.models import GitHubAuthState
+    with env.store.session_factory.begin() as s:
+        s.get(GitHubAuthState, env.oauth.states.key(purpose, value)).expires_at = 0
+
+
+def finish_installation_callback(env, params):
+    response = env.client.get('/auth/github/callback', params=params)
+    if response.status_code == 302:
+        # A setup return without code must now prove the current GitHub account
+        # through a new PKCE OAuth round trip before completing onboarding.
+        state = parse_qs(urlparse(response.headers['location']).query)['state'][0]
+        return callback(env, state)
+    return response
+
+
 def webhook(env, event, payload, signature=True):
     raw = json.dumps(payload).encode()
     digest = hmac.new(env.settings.webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
@@ -181,8 +215,8 @@ def test_login_pkce_fixed_callback_and_existing_installation(env):
     assert params['code_challenge_method'] == ['S256'] and params['code_challenge']
     assert 'scope' not in params
     response = callback(env, params['state'][0])
-    assert response.status_code == 307
-    assert parse_qs(urlparse(response.headers['location']).query)['next'] == ['/install']
+    assert response.status_code == 200
+    assert auth_result(response)['next'] == '/install'
     me = env.client.get('/auth/me', headers=env.headers).json()
     assert me['installation_onboarding_required'] and not me['reconnect_required']
     assert 'access_token' not in json.dumps(me)
@@ -192,7 +226,7 @@ def test_invalid_state_never_exchanges_code_and_replay_is_rejected(env):
     assert callback(env, 'unknown').status_code == 400
     env.oauth.client.fetch_access_token.assert_not_awaited()
     state = begin_login(env)['state'][0]
-    assert callback(env, state).status_code == 307
+    assert callback(env, state).status_code == 200
     assert callback(env, state).status_code == 400
     assert callback(env, state, installation_id=10).status_code == 400
     assert env.oauth.client.fetch_access_token.await_count == 1
@@ -218,22 +252,19 @@ def test_state_browser_binding_and_cancellation(env):
 def test_installation_completion_before_or_after_webhook(env, webhook_first):
     if webhook_first:
         assert webhook(env, 'installation', {'action': 'created', 'installation': {'id': 10}}).status_code == 200
-    response = env.client.post('/auth/github/install', headers=env.headers)
-    state = parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
-    assert callback(env, state, installation_id='10', setup_action='install').status_code == 307
+    state = start_installation(env)
+    assert callback(env, state, installation_id='10', setup_action='install').status_code == 200
     if not webhook_first:
         assert webhook(env, 'installation', {'action': 'created', 'installation': {'id': 10}}).status_code == 200
     assert env.store.list_repositories(env.user.id) == []  # Never assign ownership from sender.
 
 
 def test_installation_hint_and_account_switch_cannot_grant_access(env):
-    response = env.client.post('/auth/github/install', headers=env.headers)
-    state = parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
+    state = start_installation(env)
     response = callback(env, state, installation_id='999', setup_action='install')
-    assert parse_qs(urlparse(response.headers['location']).query)['installation_outcome'] == ['access_denied']
+    assert auth_result(response)['installation_outcome'] == 'access_denied'
     assert env.store.get_user(env.user.id).onboarding_completed_at is None
-    response = env.client.post('/auth/github/install', headers=env.headers)
-    state = parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
+    state = start_installation(env)
     env.state['identity'] = {'id': 2, 'login': 'bob'}
     assert callback(env, state, installation_id='10', setup_action='install').status_code == 403
     assert env.store.get_user_github_connection(env.user.id).github_user_id == '1'
@@ -411,7 +442,7 @@ def test_settings_validate_required_values_and_rsa_key(env, monkeypatch, tmp_pat
 def test_expired_state_and_provider_authorization_failure(env):
     from dataclasses import replace
     state = begin_login(env)['state'][0]
-    env.oauth.transactions[state] = replace(env.oauth.transactions[state], expires_at=0)
+    expire_auth_state(env, 'oauth', state)
     assert callback(env, state).status_code == 400
     env.oauth.client.fetch_access_token.assert_not_awaited()
     state = begin_login(env)['state'][0]
@@ -422,10 +453,9 @@ def test_expired_state_and_provider_authorization_failure(env):
 
 def test_pending_installation_does_not_become_active(env):
     env.state['user_installations'] = []
-    started = env.client.post('/auth/github/install', headers=env.headers)
-    state = parse_qs(urlparse(started.json()['installation_url']).query)['state'][0]
+    state = start_installation(env)
     response = callback(env, state, installation_id='20', setup_action='request')
-    assert parse_qs(urlparse(response.headers['location']).query)['installation_outcome'] == ['pending_approval']
+    assert auth_result(response)['installation_outcome'] == 'pending_approval'
     assert env.store.get_user(env.user.id).onboarding_completed_at is None
     with env.store.session_factory() as session:
         assert session.get(GitHubInstallationModel, '20') is None

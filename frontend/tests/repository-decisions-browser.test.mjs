@@ -43,6 +43,11 @@ function setup() {
     denied: false,
     calls: [],
     uploaded: false,
+    documents: null,
+    statusDelay: 0,
+    retryError: 0,
+    sequential: false,
+    duplicate: false,
     uploadError: false,
     partial: false,
     release: null,
@@ -206,11 +211,84 @@ before(async () => {
                 evidence_truncated: false,
                 relationship_basis: "documented_ADR_knowledge",
               });
+            const adrAction = url.pathname.match(
+              /\/adrs\/([^/]+)\/(status|retry)$/
+            );
+            if (adrAction) {
+              const entry = f.documents?.find(
+                (item) => item.id === adrAction[1]
+              );
+              if (!entry) return json({ detail: "ADR not found" }, 404);
+              if (adrAction[2] === "retry") {
+                if (f.retryError)
+                  return json(
+                    {
+                      detail:
+                        f.retryError === 403
+                          ? "Repository access denied"
+                          : "ADR already completed",
+                    },
+                    f.retryError
+                  );
+                entry.status = "PENDING";
+                entry.error = null;
+              }
+              if (f.statusDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, f.statusDelay)
+                );
+              return json(
+                {
+                  adr_id: entry.id,
+                  status: entry.status,
+                  error: entry.error,
+                  updated_at: "2026-10-17T07:00:00Z",
+                },
+                adrAction[2] === "retry" ? 202 : 200
+              );
+            }
             if (url.pathname.endsWith("/adrs")) {
               if (!f.owner) return json({ detail: "Owner only" }, 403);
-              if (req.method === "GET") return json(f.uploaded ? [doc] : []);
+              if (req.method === "GET")
+                return json(
+                  f.documents ??
+                    (f.uploaded ? [{ ...doc, status: "PENDING" }] : [])
+                );
               for await (const chunk of req) {
                 assert.ok(chunk.length);
+              }
+              if (f.sequential || f.duplicate) {
+                f.documents ??= [];
+                const entry = f.duplicate
+                  ? f.documents[0]
+                  : {
+                      ...doc,
+                      id: `adr_${f.documents.length + 1}`,
+                      source_name: `adr-${f.documents.length + 1}.md`,
+                      status: "PENDING",
+                    };
+                if (!f.duplicate) f.documents.push(entry);
+                return json(
+                  {
+                    repository_id: "repo_a",
+                    total: 1,
+                    completed: 0,
+                    accepted: f.duplicate ? 0 : 1,
+                    duplicates: f.duplicate ? 1 : 0,
+                    failed: 0,
+                    results: [
+                      {
+                        index: 0,
+                        filename: "storage.md",
+                        status: f.duplicate ? "duplicate" : "accepted",
+                        status_code: f.duplicate ? 409 : 202,
+                        adr: entry,
+                        error: null,
+                      },
+                    ],
+                  },
+                  202
+                );
               }
               await new Promise((resolve) => {
                 f.release = resolve;
@@ -226,16 +304,17 @@ before(async () => {
                   {
                     repository_id: "repo_a",
                     total: 2,
-                    completed: 1,
+                    completed: 0,
+                    accepted: 1,
                     duplicates: 0,
                     failed: 1,
                     results: [
                       {
                         index: 0,
                         filename: "storage.md",
-                        status: "completed",
-                        status_code: 201,
-                        adr: doc,
+                        status: "accepted",
+                        status_code: 202,
+                        adr: { ...doc, status: "PENDING" },
                         error: null,
                       },
                       {
@@ -254,21 +333,22 @@ before(async () => {
                 {
                   repository_id: "repo_a",
                   total: 1,
-                  completed: 1,
+                  completed: 0,
+                  accepted: 1,
                   duplicates: 0,
                   failed: 0,
                   results: [
                     {
                       index: 0,
                       filename: "storage.md",
-                      status: "completed",
-                      status_code: 201,
-                      adr: doc,
+                      status: "accepted",
+                      status_code: 202,
+                      adr: { ...doc, status: "PENDING" },
                       error: null,
                     },
                   ],
                 },
-                201
+                202
               );
             }
             return json({ detail: "Not found" }, 404);
@@ -323,6 +403,99 @@ async function selectFile() {
     `(() => { const input=document.querySelector('#adr-files'); const dt=new DataTransfer(); dt.items.add(new File(['# Storage'], 'storage.md', {type:'text/markdown'})); input.files=dt.files; input.dispatchEvent(new Event('change',{bubbles:true})); })()`
   );
 }
+
+const row = (id) => `document.querySelector('article[aria-label="${id}.md"]')`;
+const rowText = (id, text) =>
+  `${row(id)}?.innerText.includes(${JSON.stringify(text)})`;
+const rowAction = (id, action) =>
+  `Array.from(${row(id)}.querySelectorAll('button')).find(b => b.textContent.trim() === '${action}').click()`;
+test("three ADR identities persist independently across manual status, completion, retry and reload without polling", async () => {
+  fixture.documents = ["001", "002", "003"].map((id) => ({
+    ...doc,
+    id,
+    source_name: `${id}.md`,
+    status: "PENDING",
+  }));
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("003", "PENDING"));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(
+    fixture.calls.some((call) => call.url.endsWith("/status")),
+    false
+  );
+  fixture.documents[0].status = "PROCESSING";
+  fixture.statusDelay = 400;
+  await browser.evaluate(rowAction("001", "Check Status"));
+  await browser.waitFor(rowText("001", "Checking..."));
+  assert.equal(
+    await browser.evaluate(`${row("002")}.querySelector('button').disabled`),
+    false
+  );
+  await browser.waitFor(rowText("001", "PROCESSING"));
+  assert.equal(await browser.evaluate(rowText("002", "PENDING")), true);
+  fixture.statusDelay = 0;
+  fixture.documents[0].status = "COMPLETED";
+  const before = fixture.calls.filter((c) =>
+    c.url.includes("/knowledge?")
+  ).length;
+  await browser.evaluate(rowAction("001", "Check Status"));
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("Use PostgreSQL"));
+  assert.ok(
+    fixture.calls.filter((c) => c.url.includes("/knowledge?")).length > before
+  );
+  await click("Source Documents");
+  fixture.documents[1].status = "FAILED";
+  fixture.documents[1].error = "Document processing failed. Please retry.";
+  await browser.evaluate(rowAction("002", "Check Status"));
+  await browser.waitFor(rowText("002", "Document processing failed"));
+  assert.equal(
+    await browser.evaluate(`${row("001")}.innerText.includes('Retry')`),
+    false
+  );
+  await browser.evaluate(rowAction("002", "Retry"));
+  await browser.waitFor(rowText("002", "PENDING"));
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/002/retry")).length,
+    1
+  );
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(await browser.evaluate(rowText("002", "PENDING")), true);
+  assert.equal(await browser.evaluate(rowText("003", "PENDING")), true);
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/status")).length,
+    3
+  );
+});
+for (const code of [403, 404, 409])
+  test(`ADR retry ${code} stays scoped and preserves existing status`, async () => {
+    fixture.documents = [
+      {
+        ...doc,
+        id: "001",
+        source_name: "001.md",
+        status: "FAILED",
+        error: "Document failed",
+      },
+    ];
+    fixture.retryError = code;
+    await visit();
+    await click("Source Documents");
+    await browser.waitFor(rowText("001", "FAILED"));
+    await browser.evaluate(rowAction("001", "Retry"));
+    await browser.waitFor(
+      `${row("001")}.querySelector('[role=alert]') !== null`
+    );
+    assert.equal(await browser.evaluate(rowText("001", "FAILED")), true);
+    assert.equal(
+      fixture.calls.filter((c) => c.url.endsWith("/001/retry")).length,
+      1
+    );
+  });
 
 async function closeDrawer() {
   await browser.call("Input.dispatchKeyEvent", {
@@ -565,7 +738,7 @@ test("collaborator can open a constraint modal with its actual statement and rel
   await closeDrawer();
 });
 
-test("responses are cached across filters, drawers, tabs and client navigation; refresh fetches again", async () => {
+test("knowledge stays cached across navigation while ADR list remount reads persisted status", async () => {
   await visit();
   assert.equal(knowledgeCalls(), 1);
   await click("Decisions");
@@ -612,7 +785,10 @@ test("responses are cached across filters, drawers, tabs and client navigation; 
   await browser.waitFor(
     contains("No ADR source documents have been uploaded.")
   );
-  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/adrs")).length, 1);
+  await browser.waitFor(
+    "!Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Refresh documents').disabled"
+  );
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/adrs")).length, 2);
   await browser.evaluate(
     "document.querySelector('a[href=\"/projects/repo_a/overview\"]').click()"
   );
@@ -894,7 +1070,7 @@ test("collaborator source tab is hidden and revocation hides repository content"
 });
 
 for (const error of [false, true, "partial"])
-  test(`synchronous upload locks submissions and refreshes both inventories (${error ? "failure" : "success"})`, async () => {
+  test(`asynchronous upload locks submissions and refreshes both inventories (${error ? "failure" : "success"})`, async () => {
     fixture.uploadError = error === true;
     fixture.partial = error === "partial";
     await visit();
@@ -904,7 +1080,7 @@ for (const error of [false, true, "partial"])
     );
     await selectFile();
     await click("Upload documents");
-    await browser.waitFor(contains("Processing documents..."));
+    await browser.waitFor(contains("Uploading documents..."));
     assert.equal(
       await browser.evaluate("document.querySelector('#adr-files').disabled"),
       true
@@ -917,12 +1093,12 @@ for (const error of [false, true, "partial"])
     );
     assert.equal(
       await browser.evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Processing documents')).disabled"
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Uploading documents')).disabled"
       ),
       true
     );
     await browser.evaluate(
-      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Processing documents')).click()"
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Uploading documents')).click()"
     );
     assert.equal(fixture.calls.filter((c) => c.method === "POST").length, 1);
     assert.match(
@@ -935,7 +1111,7 @@ for (const error of [false, true, "partial"])
     fixture.release();
     await browser.waitFor(
       contains(
-        error === true ? "Some data may have been persisted" : "1 processed"
+        error === true ? "Some data may have been persisted" : "1 accepted"
       )
     );
     await browser.waitFor(contains("storage.md"));
@@ -955,3 +1131,39 @@ for (const error of [false, true, "partial"])
         knowledgeCalls
     );
   });
+
+test("three sequential accepted uploads preserve individual ADR IDs and duplicate response adds no row", async () => {
+  fixture.sequential = true;
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(contains("No ADR source documents have been uploaded"));
+  for (let index = 1; index <= 3; index++) {
+    await selectFile();
+    await click("Upload documents");
+    await browser.waitFor(
+      `document.querySelector('article[aria-label="adr-${index}.md"]') !== null`
+    );
+    await browser.waitFor("!document.querySelector('#adr-files').disabled");
+    assert.equal(
+      await browser.evaluate("document.querySelectorAll('article').length"),
+      index
+    );
+    assert.equal(await browser.evaluate(contains("1 accepted")), true);
+  }
+  fixture.duplicate = true;
+  await selectFile();
+  await click("Upload documents");
+  await browser.waitFor(contains("1 duplicate"));
+  assert.equal(
+    await browser.evaluate("document.querySelectorAll('article').length"),
+    3
+  );
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/status")).length,
+    0
+  );
+  assert.deepEqual(
+    fixture.documents.map((d) => d.id),
+    ["adr_1", "adr_2", "adr_3"]
+  );
+});

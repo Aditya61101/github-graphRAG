@@ -49,6 +49,9 @@ from api_services.app.routers.webhook import router as webhook_router
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
 from api_services.app import config
+from api_services.app.utils.auth_logging import configure_auth_logging
+
+configure_auth_logging()
 
 
 @asynccontextmanager
@@ -58,7 +61,7 @@ async def lifespan(app: FastAPI):
     github_client = httpx.AsyncClient(timeout=30)
     github_app = GitHubAppService(sqlite_store, github_settings, github_client)
     app.state.github_app = github_app
-    app.state.github_oauth = GitHubOAuth(github_settings)
+    app.state.github_oauth = GitHubOAuth(github_settings, sqlite_store.session_factory)
     database = require_env("NEO4J_DATABASE") or None
     reranker = None
     app.state.reranker = reranker

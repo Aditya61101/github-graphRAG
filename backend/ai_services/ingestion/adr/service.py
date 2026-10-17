@@ -123,6 +123,7 @@ class ADRService:
         repository_id: str,
         user_id: str,
         files: Sequence[ADRUploadFile],
+        *, asynchronous: bool = False,
     ) -> list[ADRUploadResult]:
         """Process a bounded batch independently, preserving each ADR's provenance.
 
@@ -151,12 +152,16 @@ class ADRService:
                     parts.append(chunk)
                 payload = b"".join(parts)
                 del parts
-                record, parsed_doc = await self.process_adr_upload(
-                    repository_id=repository_id, user_id=user_id,
-                    filename=filename, file_bytes=payload,
-                )
-                del parsed_doc
-                results.append(ADRUploadResult(index, filename, "completed", 201, adr=record))
+                if asynchronous:
+                    record = await self.accept_upload(repository_id, user_id, filename, payload)
+                    results.append(ADRUploadResult(index, filename, "accepted", 202, adr=record))
+                else:
+                    record, parsed_doc = await self.process_adr_upload(
+                        repository_id=repository_id, user_id=user_id,
+                        filename=filename, file_bytes=payload,
+                    )
+                    del parsed_doc
+                    results.append(ADRUploadResult(index, filename, "completed", 201, adr=record))
             except DuplicateADRError as exc:
                 results.append(ADRUploadResult(index, filename, "duplicate", 409,
                                                adr=exc.existing_adr, error=str(exc)))
@@ -182,6 +187,46 @@ class ADRService:
         logger.info("ADR batch completed repository=%s total=%s completed=%s", repository_id,
                     len(results), sum(item.status == "completed" for item in results))
         return results
+
+    async def accept_upload(self, repository_id, user_id, filename, file_bytes):
+        """Store immutable source and durable intent; no parsing, LLM or graph work."""
+        import asyncio
+        from .jobs import ADRJobs
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
+        repo = self.validate_repository_access(repository_id, user_id)
+        if (os.getenv('K_SERVICE') or os.getenv('APP_ENV', '').lower() == 'production') and not self.originals.bucket:
+            raise ADRServiceError('Production ADR uploads require ADR_GCS_BUCKET')
+        if not repo.indexed_commit_sha or not repo.installation_id:
+            raise ValueError("Repository baseline ingestion must complete first")
+        if not filename or not filename.strip() or not file_bytes:
+            raise InvalidFileTypeError("A nonempty ADR file is required")
+        clean_name = sanitize_filename(filename)
+        ext = Path(clean_name).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise InvalidFileTypeError("Unsupported file type for ADR upload")
+        if len(file_bytes) > self.max_file_size_bytes:
+            raise FileSizeExceededError("ADR file exceeds the configured size limit")
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
+        adr_id = f"adr_{uuid.uuid4().hex[:12]}"
+        mime = detect_mime_type(ext)
+        record, duplicate = self.sqlite_store.claim_or_create_adr(
+            repository_id=repo.id, content_hash=content_hash, title=Path(clean_name).stem,
+            source_name=clean_name, file_path=self.originals.location(repo.id, adr_id, ext),
+            file_size=len(file_bytes), mime_type=mime, file_extension=ext, adr_id=adr_id)
+        jobs = ADRJobs(self.sqlite_store.session_factory)
+        if duplicate and (record.status == "COMPLETED" or jobs.for_adr(record.id)):
+            raise DuplicateADRError("An identical ADR already exists for this repository", record)
+        # A PENDING record without intent may be an interrupted acceptance. Its
+        # immutable original can be safely retried before committing the intent.
+        try:
+            await asyncio.to_thread(self.originals.write, record.file_path, file_bytes,
+                                    record.mime_type, repo.id, record.id)
+        except Exception:
+            # Do not overwrite a concurrent accepted worker's status.
+            raise ADRServiceError("Failed to persist ADR original") from None
+        jobs.enqueue_adr(record.id, retry=True)
+        return self.sqlite_store.get_adr(record.id)
 
     def validate_repository_access(self, repository_id: str, user_id: str) -> Any:
         """Verify repository exists and belongs to the authenticated user.

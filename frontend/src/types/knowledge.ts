@@ -48,12 +48,14 @@ export type ADRDocument = {
   source_type: string;
   created_at: string | null;
   status: string;
+  updated_at?: string | null;
   error: string | null;
 };
 export type ADRUploadResult = {
   repository_id: string;
   total: number;
   completed: number;
+  accepted: number;
   duplicates: number;
   failed: number;
   results: {
@@ -64,4 +66,10 @@ export type ADRUploadResult = {
     error: string | null;
     adr: ADRDocument | null;
   }[];
+};
+export type ADRStatus = {
+  adr_id: string;
+  status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
+  updated_at: string | null;
+  error: string | null;
 };

@@ -28,6 +28,7 @@ from api_services.app.models.adr import (
     ADRBatchUploadResponse,
     ADRResponse,
     ADRUploadItemResponse,
+    ADRStatusResponse,
 )
 from api_services.app.models.graph import RepositoryGraphResponse
 from api_services.app.models.knowledge import KnowledgeDetail, KnowledgePage
@@ -303,7 +304,7 @@ async def sync_repository(owner: str, name: str, request: Request, background_ta
                               payload.force_full, payload.sync, 'manual_sync')
 
 
-@router.post('/{repo_id}/adrs', response_model=ADRBatchUploadResponse, status_code=201,
+@router.post('/{repo_id}/adrs', response_model=ADRBatchUploadResponse, status_code=202,
              responses={207: {'model': ADRBatchUploadResponse, 'description': 'Per-file failures or duplicates'}})
 async def upload_adr(repo_id: str, request: Request,
                      files: list[UploadFile] = File(..., description='One or more ADR documents (.md, .txt, .pdf, .docx)'),
@@ -311,12 +312,14 @@ async def upload_adr(repo_id: str, request: Request,
     require_processing_enabled()
     repo = await authorize_repository(request, current_user.id, repo_id)
     try:
-        items = await resource(request, 'adr_service').process_adr_uploads(repo.id, current_user.id, files)
+        items = await resource(request, 'adr_service').process_adr_uploads(
+            repo.id, current_user.id, files, asynchronous=True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     result = ADRBatchUploadResponse(
         repository_id=repo.id, total=len(items),
         completed=sum(item.status == 'completed' for item in items),
+        accepted=sum(item.status == 'accepted' for item in items),
         duplicates=sum(item.status == 'duplicate' for item in items),
         failed=sum(item.status == 'failed' for item in items),
         results=[ADRUploadItemResponse(
@@ -324,5 +327,64 @@ async def upload_adr(repo_id: str, request: Request,
             error=item.error, adr=ADRResponse(**item.adr.to_dict()) if item.adr else None,
         ) for item in items],
     )
-    return JSONResponse(status_code=201 if result.completed == result.total else 207,
+    await _dispatch_adrs(request, [item.adr.id for item in items if item.adr and item.adr.status != 'COMPLETED'])
+    return JSONResponse(status_code=202 if not result.failed else 207,
                         content=result.model_dump(mode='json'))
+
+
+def _adr_status(record):
+    return ADRStatusResponse(adr_id=record.id, status=record.status,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
+        error='ADR ingestion failed; check status or retry.' if record.error else None)
+
+
+async def _dispatch_adrs(request, adr_ids):
+    import asyncio
+    import httpx
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    from ai_services.ingestion.dispatch import configured_dispatcher
+    jobs = ADRJobs(resource(request, 'sqlite_store').session_factory)
+    try:
+        async with asyncio.timeout(5), httpx.AsyncClient(timeout=5) as client:
+            dispatcher = configured_dispatcher(client)
+            runs = [jobs.for_adr(adr_id) for adr_id in set(adr_ids)]
+            await asyncio.gather(*(dispatcher.dispatch_adr(run.id) for run in runs
+                                   if run and run.status in {'QUEUED', 'RETRY', 'INDEXING'}))
+    except Exception as exc:
+        # Intent committed before this bounded best-effort launch. Recovery
+        # repeats dispatch; critical work never depends on the HTTP process.
+        logger.warning('ADR dispatch deferred type=%s', type(exc).__name__)
+
+
+async def _authorized_adr(request, current_user, repo_id, adr_id):
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    record = resource(request, 'sqlite_store').get_adr(adr_id)
+    if not record or record.repository_id != repo.id:
+        raise HTTPException(404, 'ADR not found')
+    return record
+
+
+@router.get('/{repo_id}/adrs/{adr_id}/status', response_model=ADRStatusResponse)
+async def adr_status(repo_id: str, adr_id: str, request: Request,
+                     current_user: UserModel = Depends(get_current_user)):
+    return _adr_status(await _authorized_adr(request, current_user, repo_id, adr_id))
+
+
+@router.post('/{repo_id}/adrs/{adr_id}/retry', response_model=ADRStatusResponse, status_code=202)
+async def retry_adr(repo_id: str, adr_id: str, request: Request,
+                    current_user: UserModel = Depends(get_current_user)):
+    require_processing_enabled()
+    repo = await authorize_repository(request, current_user.id, repo_id)
+    resource(request, 'adr_service').validate_repository_access(repo.id, current_user.id)
+    record = resource(request, 'sqlite_store').get_adr(adr_id)
+    if not record or record.repository_id != repo.id:
+        raise HTTPException(404, 'ADR not found')
+    if record.status == 'COMPLETED':
+        raise HTTPException(409, 'ADR already completed')
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    try:
+        ADRJobs(resource(request, 'sqlite_store').session_factory).enqueue_adr(adr_id, retry=True)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    await _dispatch_adrs(request, [adr_id])
+    return _adr_status(resource(request, 'sqlite_store').get_adr(adr_id))

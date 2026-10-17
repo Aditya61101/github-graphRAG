@@ -109,3 +109,7 @@ def init_db() -> None:
         from .migrate_frontend_checks import upgrade as upgrade_frontend_checks
 
         upgrade_frontend_checks(conn)
+        from .migrate_adr_ingestion import upgrade as upgrade_adr
+        upgrade_adr(conn)
+        from .migrate_github_auth_state import upgrade as upgrade_auth
+        upgrade_auth(conn)

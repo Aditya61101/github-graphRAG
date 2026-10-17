@@ -145,6 +145,7 @@ class SqliteApplicationStore:
         expires_at: datetime | None = None,
         refresh_token: str | None = None,
         refresh_expires_at: datetime | None = None,
+        lease_owner: str | None = None,
     ) -> tuple[UserModel, GitHubConnectionModel]:
         """Upsert application user and GitHub connection from GitHub OAuth callback.
 
@@ -164,6 +165,11 @@ class SqliteApplicationStore:
                 GitHubConnectionModel.github_user_id == str(github_user_id)
             )
             conn = session.scalars(stmt).first()
+            if lease_owner:
+                from ai_services.github_app.auth_state import AuthStateStore, InvalidAuthState
+                if conn is None:
+                    raise InvalidAuthState('GitHub account binding changed; restart authentication')
+                AuthStateStore.require_credentials(session, conn.user_id, lease_owner, self.token_cipher)
             collision = session.scalars(select(UserModel).where(UserModel.username == username)).first()
             if collision and (not conn or collision.id != conn.user_id):
                 # A renamed GitHub login is not proof of account identity.
@@ -214,10 +220,13 @@ class SqliteApplicationStore:
             session.refresh(conn)
             return user, conn
 
-    def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at):
+    def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at, lease_owner=None):
         """Commit the entire encrypted rotation, only if authorization is unchanged."""
         with self.session_factory() as session:
             serialize_metadata_write(session)
+            if lease_owner:
+                from ai_services.github_app.auth_state import AuthStateStore
+                AuthStateStore.require_credentials(session, connection.user_id, lease_owner, self.token_cipher)
             result = session.execute(update(GitHubConnectionModel).where(
                 GitHubConnectionModel.id == connection.id,
                 GitHubConnectionModel.access_status == 'ACTIVE',
