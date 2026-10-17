@@ -164,6 +164,7 @@ export default function RepositoryDecisionsPage() {
           repositoryId={id}
           scope={scope}
           onProcessingChange={setUploading}
+          canManage={canManage}
         />
       ) : (
         <section
@@ -366,10 +367,12 @@ function SourceDocuments({
   repositoryId,
   scope,
   onProcessingChange,
+  canManage,
 }: {
   repositoryId: string;
   scope: (string | null | undefined)[];
   onProcessingChange: (processing: boolean) => void;
+  canManage: boolean;
 }) {
   const queryClient = useQueryClient();
   const documents = useQuery({
@@ -382,6 +385,7 @@ function SourceDocuments({
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<ADRUploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleted, setDeleted] = useState<string | null>(null);
   const locked = useRef(false);
   const request = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -532,6 +536,11 @@ function SourceDocuments({
           Refresh documents
         </Button>
       </div>
+      {deleted && (
+        <p role="status" className="text-sm">
+          Deleted {deleted}.
+        </p>
+      )}
       {documents.isError ? (
         <Failure
           error={documents.error}
@@ -551,6 +560,8 @@ function SourceDocuments({
               document={document}
               repositoryId={repositoryId}
               scope={scope}
+              canManage={canManage}
+              onDeleted={setDeleted}
             />
           ))}
         </div>

@@ -71,6 +71,9 @@ class DatabaseReadiness:
         # commits COMPLETED/indexed SHA after graph publication. Failed or
         # abandoned runs remain fail-closed; never infer readiness from SHA alone.
         with self.sessions() as session:
+            from ai_services.ingestion.readiness import pending_adr_deletion
+            if pending_adr_deletion(session, repository_id):
+                raise ContextConstructionError('ADR deletion cleanup is pending')
             repo = session.get(RepositoryModel, repository_id)
             runs = list(
                 session.scalars(

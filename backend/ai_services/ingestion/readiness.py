@@ -4,7 +4,18 @@ from contextvars import ContextVar
 from functools import wraps
 import inspect
 from fastapi import HTTPException
-from .persistence.models import RepositoryModel, RepositoryIngestionState
+from .persistence.models import RepositoryModel, RepositoryIngestionState, ADRModel, IngestionRunModel
+from sqlalchemy import select, exists
+
+
+def pending_adr_deletion(session, repo_id):
+    """Authoritative SQL barrier: stale graph/vector/community bytes cannot escape."""
+    return session.scalar(select(ADRModel.id).where(
+        ADRModel.repository_id == repo_id, ADRModel.status == 'DELETED',
+        ~exists().where(IngestionRunModel.id == ADRModel.id,
+                        IngestionRunModel.trigger == 'adr_delete',
+                        IngestionRunModel.status == 'COMPLETED'),
+    ).limit(1)) is not None
 
 
 class GraphUnavailable(HTTPException):
@@ -47,8 +58,10 @@ class GraphReadBarrier:
     def __init__(self, sessions, control):
         self.sessions, self.control = sessions, control
 
-    def snapshot(self, repo_id):
+    def snapshot(self, repo_id, *, allow_pending_deletion=False):
         with self.sessions() as s:
+            if not allow_pending_deletion and pending_adr_deletion(s, repo_id):
+                raise GraphUnavailable()
             repo, state = s.get(RepositoryModel, repo_id), s.get(RepositoryIngestionState, repo_id)
             if (not repo or not state or state.state != "READY" or repo.status != "COMPLETED"
                     or not repo.indexed_commit_sha or not state.published_run_id):

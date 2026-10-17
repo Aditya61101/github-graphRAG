@@ -22,6 +22,9 @@ class UploadAuthority:
         self.max_document_bytes = max_document_bytes
 
     def receipts(self, context):
+        validate = getattr(self.store, 'assert_adrs_active', None)
+        if validate:
+            validate(context.revision.repository_id, (d.adr_id for d in context.adr_snapshot))
         repo = self.store.get_repository(context.revision.repository_id)
         result = []
         for doc in context.adr_snapshot:

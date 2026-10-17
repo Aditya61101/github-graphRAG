@@ -31,7 +31,7 @@ class ADRWorker:
         require_background_processing()
         mapping = self.jobs.mapping(run_id)
         existing = self.jobs.get(run_id)
-        if not mapping or not existing or existing.trigger != 'adr':
+        if not mapping or not existing or existing.trigger not in {'adr', 'adr_delete'}:
             raise ValueError('Unknown ADR execution mapping')
         seal = await asyncio.to_thread(self.control.snapshot, existing.repository_id)
         if self.jobs.recover_sealed(run_id, seal):
@@ -42,7 +42,8 @@ class ADRWorker:
             ready = state is not None and state.state == 'READY'
         if ready:
             from ai_services.ingestion.readiness import GraphReadBarrier
-            GraphReadBarrier(self.jobs.sessions, self.control).snapshot(existing.repository_id)
+            GraphReadBarrier(self.jobs.sessions, self.control).snapshot(
+                existing.repository_id, allow_pending_deletion=True)
         run = self.jobs.claim(run_id)
         if run is None:
             return  # A duplicate launch/another repository owner is harmless.
@@ -78,7 +79,25 @@ class ADRWorker:
                 await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _execute(self, run, adr_id):
-        record = self.store.get_adr(adr_id)
+        record = self.store.get_adr(adr_id, include_deleted=True)
+        if record.status == 'DELETED':
+            # Also handles an expired old ingestion after deletion: it must
+            # drain its repository fence without ever resurrecting the ADR.
+            from .neo4j_writer import ADRNeo4jWriter
+            driver = FencedDriver(self.control, run)
+            await asyncio.to_thread(ADRNeo4jWriter(driver, self.control.database).delete_adr,
+                                    adr_id, run.repository_id)
+            with tempfile.TemporaryDirectory(prefix='decisionguard-adr-delete-') as scratch:
+                service = RepositoryIngestionService(None, self.store, driver,
+                    database=self.control.database, state_dir=scratch,
+                    llm=self.llm, embedder=self.embedder)
+                await service._run_community_pipeline(run.repository_id, reuse_unchanged=True)
+            await asyncio.to_thread(self.originals.delete, record.file_path,
+                                    record.repository_id, record.id)
+            self.jobs.heartbeat(run.id, run.owner)
+            self.control.seal(run)
+            self.jobs.finish(run.id, run.owner, run.target_commit_sha)
+            return
         # Revalidate access using the persisted user/installation before reading
         # and again before publication. Never infer ownership from the upload.
         await self.github.indexing_credential(run.repository_id, run.installation_id)

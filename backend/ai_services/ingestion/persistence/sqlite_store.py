@@ -622,8 +622,10 @@ class SqliteApplicationStore:
                 .where(
                     ADRModel.repository_id == repository_id,
                     ADRModel.content_hash == content_hash,
+                    ADRModel.status != 'DELETED',
                 )
                 .order_by(ADRModel.created_at.desc())
+                .with_for_update()
             )
             existing = session.scalars(stmt).first()
 
@@ -717,10 +719,11 @@ class SqliteApplicationStore:
             return adr
 
 
-    def get_adr(self, adr_id: str) -> ADRModel | None:
-        """Fetch ADR by primary key."""
+    def get_adr(self, adr_id: str, *, include_deleted: bool = False) -> ADRModel | None:
+        """Fetch an active ADR; internal cleanup can explicitly include tombstones."""
         with self.session_factory() as session:
-            return session.get(ADRModel, adr_id)
+            record = session.get(ADRModel, adr_id)
+            return record if record and (include_deleted or record.status != 'DELETED') else None
 
     def get_adr_by_hash(self, repository_id: str, content_hash: str) -> ADRModel | None:
         """Fetch ADR by repository ID and content hash for duplicate detection."""
@@ -728,8 +731,16 @@ class SqliteApplicationStore:
             stmt = select(ADRModel).where(
                 ADRModel.repository_id == repository_id,
                 ADRModel.content_hash == content_hash,
+                ADRModel.status != 'DELETED',
             )
             return session.scalars(stmt).first()
+
+    def assert_adrs_active(self, repository_id, adr_ids):
+        with self.session_factory() as session:
+            if session.scalar(select(ADRModel.id).where(
+                ADRModel.repository_id == repository_id,
+                ADRModel.id.in_(tuple(adr_ids)), ADRModel.status == 'DELETED').limit(1)):
+                raise ValueError('Evaluation context contains a deleted ADR; rebuild context')
 
     def update_adr_status(
         self,
@@ -740,14 +751,17 @@ class SqliteApplicationStore:
     ) -> ADRModel | None:
         """Update ADR processing status, optional title, and error message."""
         with self.session_factory() as session:
+            # Atomic predicate prevents a stale ingestion result from reviving
+            # a tombstone after waiting on the deletion transaction's row lock.
+            from sqlalchemy import update
+            values = dict(status=status, error=error, updated_at=utc_now())
+            if title:
+                values['title'] = title
+            session.execute(update(ADRModel).where(
+                ADRModel.id == adr_id, ADRModel.status != 'DELETED').values(**values))
+            session.commit()
             adr = session.get(ADRModel, adr_id)
             if adr:
-                adr.status = status
-                if title:
-                    adr.title = title
-                adr.error = error
-                adr.updated_at = utc_now()
-                session.commit()
                 session.refresh(adr)
             return adr
 
@@ -756,20 +770,19 @@ class SqliteApplicationStore:
         with self.session_factory() as session:
             stmt = (
                 select(ADRModel)
-                .where(ADRModel.repository_id == repository_id)
+                .where(ADRModel.repository_id == repository_id, ADRModel.status != 'DELETED')
                 .order_by(ADRModel.created_at.desc())
             )
             return list(session.scalars(stmt).all())
 
     def delete_adr(self, adr_id: str) -> bool:
-        """Delete an ADR record."""
-        with self.session_factory() as session:
-            adr = session.get(ADRModel, adr_id)
-            if adr:
-                session.delete(adr)
-                session.commit()
-                return True
+        """Logical deletion, preserving provenance and a durable cleanup intent."""
+        from ai_services.ingestion.adr.jobs import ADRJobs
+        record = self.get_adr(adr_id, include_deleted=True)
+        if record is None:
             return False
+        ADRJobs(self.session_factory).delete_adr(record.repository_id, adr_id)
+        return True
 
 
 class SqliteCredentialProvider(CredentialProvider):

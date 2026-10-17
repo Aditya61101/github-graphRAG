@@ -370,6 +370,22 @@ async def adr_status(repo_id: str, adr_id: str, request: Request,
     return _adr_status(await _authorized_adr(request, current_user, repo_id, adr_id))
 
 
+@router.delete('/{repo_id}/adrs/{adr_id}', status_code=202)
+async def delete_adr(repo_id: str, adr_id: str, request: Request,
+                     background_tasks: BackgroundTasks,
+                     current_user: UserModel = Depends(get_current_user)):
+    repo = await authorize_repository(request, current_user.id, repo_id, require_admin=True)
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    jobs = ADRJobs(resource(request, 'sqlite_store').session_factory)
+    try:
+        jobs.delete_adr(repo.id, adr_id)
+    except ValueError:
+        raise HTTPException(404, 'ADR not found') from None
+    # Recovery dispatches the committed intent even if this response/process is lost.
+    background_tasks.add_task(_dispatch_adrs, request, [adr_id])
+    return {'adr_id': adr_id, 'status': 'DELETED'}
+
+
 @router.post('/{repo_id}/adrs/{adr_id}/retry', response_model=ADRStatusResponse, status_code=202)
 async def retry_adr(repo_id: str, adr_id: str, request: Request,
                     current_user: UserModel = Depends(get_current_user)):

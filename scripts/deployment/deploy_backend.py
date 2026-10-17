@@ -190,14 +190,15 @@ def rollout(image, targets, manifest_path):
 def main():
     require(os.environ.get("GITHUB_REF") == "refs/heads/integration/production",
             "Only integration/production may deploy")
-    targets = [("services", WORKER), ("services", API)]
+    targets = []
     for flag, kind, name in (
-        ("DEPLOY_RECOVERY", "services", "decisionguard-processing-recovery"),
-        ("DEPLOY_REPOSITORY_INGESTION", "jobs", "decisionguard-repository-ingestion"),
         ("DEPLOY_ADR_INGESTION", "jobs", "decisionguard-adr-ingestion"),
+        ("DEPLOY_REPOSITORY_INGESTION", "jobs", "decisionguard-repository-ingestion"),
+        ("DEPLOY_RECOVERY", "services", "decisionguard-processing-recovery"),
     ):
         if os.environ.get(flag) == "true":
             targets.append((kind, name))
+    targets.extend([("services", WORKER), ("services", API)])
     rollout(os.environ["DEPLOY_IMAGE"], targets, Path("backend-release.json"))
 
 

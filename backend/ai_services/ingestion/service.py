@@ -481,7 +481,7 @@ class RepositoryIngestionService:
             self.metadata_store.record_ingestion_failure(repo_id, run.id, str(exc))
             raise
 
-    async def _run_community_pipeline(self, repository_id: str):
+    async def _run_community_pipeline(self, repository_id: str, *, reuse_unchanged: bool = False):
         """Run community detection and summarization scoped strictly to the specified repository."""
         if not self.llm or not self.embedder:
             raise RuntimeError("Required community LLM and embedder are not configured")
@@ -501,6 +501,40 @@ class RepositoryIngestionService:
                 embedder=self.embedder,
                 config=config,
             )
+            if reuse_unchanged:
+                # ADR cleanup removes assertion/document nodes and isolated
+                # entities, never direct Entity->Entity edges. Existing memberships
+                # can therefore be reused if their persisted contexts are current.
+                # Recheck after every retry: a prior refresh may have failed after
+                # committing memberships or summaries, before embedding publication.
+                from ai_services.ingestion.community.embedder import compute_embedding_version_hash
+                result = await asyncio.to_thread(self.neo4j_driver.execute_query, """
+                    MATCH (c:Community {repository:$repo})
+                    RETURN c.communityId AS community_id
+                    UNION
+                    MATCH (e:Entity {repository:$repo})
+                    WHERE EXISTS {
+                        MATCH (e)-[r]-(other:Entity {repository:$repo})
+                        WHERE type(r) <> 'MEMBER_OF'
+                    } AND NOT EXISTS {
+                        MATCH (e)-[:MEMBER_OF]->(:Community {repository:$repo})
+                    }
+                    RETURN null AS community_id
+                    """, repo=repository_id, database_=self.database)
+                rows = result.records if hasattr(result, 'records') else result[0]
+                ids = [row['community_id'] for row in rows]
+                if None not in ids:
+                    contexts = await community_pipeline.store.load_community_contexts(ids)
+                    states = await community_pipeline.store.get_processing_states(ids)
+                    if ({ctx.community_id for ctx in contexts} == set(ids)
+                        and all((state := states.get(ctx.community_id)) is not None
+                            and state.has_summary and state.summary is not None
+                            and state.architectural_role is not None and state.summary_hash is not None
+                            and state.context_hash == ctx.context_hash() and state.has_embedding
+                            and state.embedded_summary_hash == compute_embedding_version_hash(
+                                state.summary_hash, config.include_key_entities_in_embedding)
+                            for ctx in contexts)):
+                        return None
             return await community_pipeline.run(force_refresh=False)
         except Exception:
             logger.exception("Required community pipeline failed")

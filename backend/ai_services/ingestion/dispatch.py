@@ -55,7 +55,7 @@ async def reconcile(jobs, dispatcher):
     for run_id in jobs.due():
         try:
             run = jobs.get(run_id)
-            if run.trigger == 'adr':
+            if run.trigger in {'adr', 'adr_delete'}:
                 await dispatcher.dispatch_adr(run_id)
             else:
                 await dispatcher.dispatch(run_id)

@@ -539,15 +539,34 @@ class EvaluationStore:
 
     def cached_packet(self, job_id, token, key):
         with self.sessions.begin() as session:
+            job = session.get(EvaluationJob, job_id)
+            self._repository_lock(session, job.repository_id)
             self._fence(session, job_id, token)
+            self._active_adr_sources(session, job)
             packet = session.get(ModelPacket, (job_id, key))
             return packet.reply_json if packet and packet.state == "COMPLETED" else None
+
+    @staticmethod
+    def _active_adr_sources(session, job, request_json=None):
+        from ai_services.ingestion.persistence.models import ADRModel
+        context = json.loads(job.context_json) if job.context_json else {}
+        ids = {d['adr_id'] for d in context.get('adr_snapshot', [])}
+        if request_json:
+            request = json.loads(request_json)
+            request = request.get('assessment', request)
+            ids.update(e['adr_id'] for e in request.get('evidence', []) if e.get('adr_id'))
+        if session.scalar(select(ADRModel.id).where(
+            ADRModel.repository_id == job.repository_id, ADRModel.id.in_(ids),
+            ADRModel.status == 'DELETED').limit(1)):
+            raise ValueError('Evaluation context contains a deleted ADR; rebuild context')
 
     def reserve_packet(self, job_id, token, key, phase, request_json, tokens, cost):
         """Reserve before dispatch. Uncertain calls remain charged at their ceiling."""
         with self.sessions.begin() as session:
-            self._fence(session, job_id, token)
             job = session.get(EvaluationJob, job_id)
+            self._repository_lock(session, job.repository_id)
+            self._fence(session, job_id, token)
+            self._active_adr_sources(session, job, request_json)
             settings = EvaluationSettings.model_validate_json(job.settings_json)
             packet = session.get(ModelPacket, (job_id, key))
             if packet and packet.state == "IN_FLIGHT":

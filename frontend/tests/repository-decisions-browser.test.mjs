@@ -46,6 +46,8 @@ function setup() {
     documents: null,
     statusDelay: 0,
     retryError: 0,
+    deleteError: false,
+    deleteDelay: 0,
     sequential: false,
     duplicate: false,
     uploadError: false,
@@ -211,6 +213,20 @@ before(async () => {
                 evidence_truncated: false,
                 relationship_basis: "documented_ADR_knowledge",
               });
+            const deleteAdr = url.pathname.match(/\/adrs\/([^/]+)$/);
+            if (deleteAdr && req.method === "DELETE") {
+              if (!f.owner) return json({ detail: "Owner only" }, 403);
+              if (f.deleteDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, f.deleteDelay)
+                );
+              if (f.deleteError)
+                return json({ detail: "Deletion unavailable" }, 503);
+              f.documents = (f.documents ?? []).filter(
+                (item) => item.id !== deleteAdr[1]
+              );
+              return json({ adr_id: deleteAdr[1], status: "DELETED" }, 202);
+            }
             const adrAction = url.pathname.match(
               /\/adrs\/([^/]+)\/(status|retry)$/
             );
@@ -409,6 +425,60 @@ const rowText = (id, text) =>
   `${row(id)}?.innerText.includes(${JSON.stringify(text)})`;
 const rowAction = (id, action) =>
   `Array.from(${row(id)}.querySelectorAll('button')).find(b => b.textContent.trim() === '${action}').click()`;
+test("delete requires confirmation, prevents duplicate submissions and removes only the confirmed document", async () => {
+  fixture.documents = ["001", "002"].map((id) => ({
+    ...doc,
+    id,
+    source_name: `${id}.md`,
+  }));
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelector('[role=dialog]').innerText.includes('001.md')"
+    ),
+    true
+  );
+  assert.equal(fixture.calls.filter((c) => c.method === "DELETE").length, 0);
+  await click("Cancel");
+  await browser.waitFor("!document.querySelector('[role=dialog]')");
+  assert.equal(await browser.evaluate(`!!${row("001")}`), true);
+  await browser.evaluate(rowAction("001", "Delete"));
+  fixture.deleteDelay = 300;
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await browser.evaluate(
+    `(() => {const button=Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Delete ADR'); button.click(); button.click();})()`
+  );
+  await browser.waitFor(contains("Deleting..."));
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('[role=dialog] button')).every(b => b.disabled)"
+    ),
+    true
+  );
+  await browser.waitFor(contains("Deleted 001.md."));
+  assert.equal(await browser.evaluate(`!!${row("001")}`), false);
+  assert.equal(await browser.evaluate(`!!${row("002")}`), true);
+  assert.equal(fixture.calls.filter((c) => c.method === "DELETE").length, 1);
+});
+
+test("failed deletion preserves the ADR and shows a useful error", async () => {
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  fixture.deleteError = true;
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await click("Delete ADR");
+  await browser.waitFor(rowText("001", "Deletion unavailable"));
+  assert.equal(await browser.evaluate(`!!${row("001")}`), true);
+  assert.equal(fixture.documents.length, 1);
+});
+
 test("three ADR identities persist independently across manual status, completion, retry and reload without polling", async () => {
   fixture.documents = ["001", "002", "003"].map((id) => ({
     ...doc,

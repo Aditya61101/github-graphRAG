@@ -15,6 +15,8 @@ class GuardedADRProcessor:
         self.llm, self.embedder = llm, embedder
 
     async def process_adr(self, doc):
+        if self.store.get_adr(doc.adr_id) is None:
+            raise ValueError('ADR is deleted or unavailable')
         repo = self.store.get_repository(doc.repository_id)
         self.barrier.snapshot(repo.id)
         run_id = self.jobs.enqueue(repo.id, repo.indexed_commit_sha,
@@ -32,6 +34,8 @@ class GuardedADRProcessor:
                     self.jobs.heartbeat(run.id, run.owner)
                     await asyncio.to_thread(self.control.renew, run, self.jobs.get(run.id).lease_until)
             async def execute():
+                if self.store.get_adr(doc.adr_id) is None:
+                    raise ValueError('ADR is deleted or unavailable')
                 processor = copy.copy(self.processor)
                 processor.writer = copy.copy(self.processor.writer)
                 processor.resolver = copy.copy(self.processor.resolver)

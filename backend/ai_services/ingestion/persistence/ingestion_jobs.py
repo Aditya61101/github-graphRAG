@@ -107,7 +107,7 @@ class IngestionJobs:
                     return None
                 # ADR publication must be recovered by its own worker before
                 # another writer can supersede a potentially sealed graph.
-                if active and active.id != run_id and active.trigger == "adr" and active.status == "INDEXING":
+                if active and active.id != run_id and active.trigger in {"adr", "adr_delete"} and active.status == "INDEXING":
                     return None
                 if active and active.id != run_id and active.status == "INDEXING":
                     active.status, active.completed_at = "FAILED", utc_now()
@@ -183,7 +183,8 @@ class IngestionJobs:
         mapping = s.scalar(select(ADRIngestionRun).where(ADRIngestionRun.run_id == run.id))
         if mapping:
             adr = s.get(ADRModel, mapping.adr_id)
-            adr.status, adr.error, adr.updated_at = "COMPLETED", None, utc_now()
+            if adr.status != 'DELETED':
+                adr.status, adr.error, adr.updated_at = "COMPLETED", None, utc_now()
 
     def recover_sealed(self, run_id, seal):
         """A COMPLETE graph cannot mutate under this token; SQL publication is retryable."""

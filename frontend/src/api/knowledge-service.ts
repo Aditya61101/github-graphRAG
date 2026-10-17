@@ -9,6 +9,15 @@ import type {
 
 const base = (id: string) => `/repositories/${encodeURIComponent(id)}`;
 export const knowledgeService = {
+  deleteDocument: async (
+    id: string,
+    adrId: string,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    await apiClient.delete(`${base(id)}/adrs/${encodeURIComponent(adrId)}`, {
+      signal,
+    });
+  },
   status: async (
     id: string,
     adrId: string,

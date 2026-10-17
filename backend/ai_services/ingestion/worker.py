@@ -68,7 +68,7 @@ class IngestionWorker:
         existing = self.jobs.get(run_id)
         if existing is None:
             return
-        if existing.trigger == 'adr':
+        if existing.trigger in {'adr', 'adr_delete'}:
             raise RuntimeError('ADR work requires the ADR ingestion worker')
         seal = await asyncio.to_thread(self.control.snapshot, existing.repository_id)
         if self.jobs.recover_sealed(run_id, seal):

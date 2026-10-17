@@ -89,6 +89,19 @@ class OriginalStorage:
         with self._local(location, repository_id, adr_id).open("rb") as stream:
             return stream.read(limit + 1)
 
+    def delete(self, location, repository_id, adr_id):
+        """Remove only this immutable original; retries of missing objects succeed."""
+        if location.startswith('gs://'):
+            key = self._key(location, repository_id, adr_id)
+            response = self.session.delete(
+                f"https://storage.googleapis.com/storage/v1/b/{quote(self.bucket, safe='')}/o/{quote(key, safe='')}",
+                timeout=60,
+            )
+            if response.status_code != 404:
+                response.raise_for_status()
+        else:
+            self._local(location, repository_id, adr_id).unlink(missing_ok=True)
+
 
 def original_storage(directory):
     return OriginalStorage(directory, bucket=os.getenv("ADR_GCS_BUCKET") or None)

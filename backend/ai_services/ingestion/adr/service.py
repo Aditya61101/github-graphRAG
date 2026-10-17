@@ -220,8 +220,20 @@ class ADRService:
         # A PENDING record without intent may be an interrupted acceptance. Its
         # immutable original can be safely retried before committing the intent.
         try:
-            await asyncio.to_thread(self.originals.write, record.file_path, file_bytes,
-                                    record.mime_type, repo.id, record.id)
+            # Serialize only this ADR's immutable write against logical deletion.
+            # Otherwise a slow upload could recreate an object after cleanup.
+            def store_original():
+                from sqlalchemy import select
+                with self.sqlite_store.session_factory.begin() as session:
+                    if session.get_bind().dialect.name == 'sqlite':
+                        session.connection().exec_driver_sql('BEGIN IMMEDIATE')
+                    current = session.scalar(select(ADRModel).where(
+                        ADRModel.id == record.id).with_for_update())
+                    if not current or current.status == 'DELETED':
+                        raise ValueError('ADR is deleted')
+                    self.originals.write(current.file_path, file_bytes,
+                                         current.mime_type, repo.id, current.id)
+            await asyncio.to_thread(store_original)
         except Exception:
             # Do not overwrite a concurrent accepted worker's status.
             raise ADRServiceError("Failed to persist ADR original") from None

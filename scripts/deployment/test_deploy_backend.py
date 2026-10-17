@@ -174,12 +174,23 @@ class RolloutTests(unittest.TestCase):
             "DEPLOY_ADR_INGESTION": "true",
         }), patch.object(deploy, "rollout") as rollout:
             deploy.main()
-        self.assertEqual(rollout.call_args.args[:2], (NEW, self.targets))
+        self.assertEqual(rollout.call_args.args[:2], (NEW, [
+            ("jobs", ADR_JOB), ("jobs", JOB), ("services", RECOVERY),
+            ("services", deploy.WORKER), ("services", deploy.API)]))
 
     def test_mutable_image_rejected_before_gcloud(self):
         with patch.object(deploy, "gcloud") as cloud, self.assertRaises(RuntimeError):
             deploy.rollout(deploy.IMAGE + ":latest", self.targets, self.manifest)
         cloud.assert_not_called()
+
+    def test_selected_adr_consumer_failure_prevents_api_update(self):
+        self.targets = [("jobs", ADR_JOB), ("jobs", JOB), ("services", RECOVERY),
+                        ("services", deploy.WORKER), ("services", deploy.API)]
+        self.failure = ADR_JOB
+        with self.assertRaisesRegex(RuntimeError, "deployment failed"):
+            self.run_rollout()
+        self.assertEqual([call[3] for call in self.mutations()], [ADR_JOB])
+        self.assertEqual(deploy.single_container(self.resources[deploy.API], "services")["image"], OLD)
 
     def test_wrong_branch_rejected_before_external_operations(self):
         with patch.dict(deploy.os.environ, {"GITHUB_REF": "refs/heads/feature/backend-cicd"}), \

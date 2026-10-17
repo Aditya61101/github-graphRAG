@@ -293,7 +293,7 @@ class ADRModel(Base):
     )
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(String(32), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED
+    status = Column(String(32), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED, DELETED
 
     # Source metadata (designed for MANUAL_UPLOAD, CONFLUENCE, etc.)
     source_type = Column(String(32), default="MANUAL_UPLOAD", nullable=False)
