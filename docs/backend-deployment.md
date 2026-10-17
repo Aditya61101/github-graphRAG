@@ -18,7 +18,7 @@ Firebase project spelling in the frontend workflows is different).
    Existing regression failures block deployment.
 2. Build the existing root Dockerfile **once** for linux/amd64, then obtain
    short-lived Google credentials through GitHub OIDC and a dedicated deployment
-   service account. The action mints a masked, one-hour account access token used
+   existing deployment service account. The action mints a masked, one-hour account access token used
    by gcloud and its Docker credential helper, so rollout does not depend on the
    initial GitHub OIDC token remaining valid. Authentication happens after the
    build. No JSON service-account key is needed.
@@ -31,6 +31,12 @@ Firebase project spelling in the frontend workflows is different).
    and (for services) one untagged revision with 100% traffic and no newer unserved
    or unready revision. Split traffic, sidecars, missing targets and pending rollouts
    fail before any Cloud Run update. Reconcile those layouts explicitly first.
+   The API must already have one literal `PR_EVALUATION_SETTINGS` value. It is
+   validated offline by the selected image's own `automatic_evaluation_settings`
+   production admission validator before the worker is updated, and again after
+   the API image update. Missing/invalid profiles, secret references, or images
+   missing the canonical validator fail closed. No profile/budget defaults are
+   copied into the deployment code. Complete the one-time transition below first.
 5. Update `decisionguard-pr-evaluation-worker`, verify its ready revision's resolved
    image digest, and move 100% traffic to it. Only then update/verify
    `decisionguard-api` and check its canonical Cloud Run URL at `/health` for
@@ -43,10 +49,12 @@ Firebase project spelling in the frontend workflows is different).
    templates. Jobs are **not executed**. Their configured image digests are checked;
    successful job execution is outside this release check.
 
-Only `gcloud run services update --image`, `services update-traffic --to-latest`,
-and `jobs update --image` mutate Cloud Run. No environment, secrets, Cloud SQL,
+Routine CI uses only `gcloud run services update --image`,
+`services update-traffic --to-latest`, and `jobs update --image` to mutate Cloud Run.
+No environment, secrets, Cloud SQL,
 runtime identity, resources, concurrency, HTTP/task timeout, command/args, budgets,
-queue, migration or IAM flags are passed. The helper also compares the runtime
+queue, migration or IAM flags are passed by the workflow. The separately approved
+one-time profile transition below is an operator action. The helper also compares the runtime
 specification and configuration annotations before/after, excluding the image,
 traffic and generated client/revision metadata. It does not print resource JSON.
 No migrations are explicitly run by CI; existing application startup behavior is
@@ -77,12 +85,13 @@ must not delete them.
   **`integration/production`** only; disallow tags. Configure required reviewers
   and prevent self-review if required by your production policy. Protect the
   production branch and require review of workflow/helper changes.
-- Add these environment variables (Settings → Environments → backend-production):
+- Reuse these **existing repository variables**. Environment-scoped overrides,
+  if any, must match; the workflow checks the expected identity before building:
 
   | Variable | Value |
   | --- | --- |
-  | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-backend/providers/github` |
-  | `GCP_DEPLOY_SERVICE_ACCOUNT` | `github-backend-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com` |
+  | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/542430141825/locations/global/workloadIdentityPools/github-actions/providers/decisionguard` |
+  | `GCP_DEPLOY_SERVICE_ACCOUNT` | `decisionguard-github-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com` |
 
 - No backend GitHub secrets are required. Do not copy runtime secrets or GCP keys
   into GitHub. Leave the Firebase service-account secret and frontend settings alone.
@@ -93,46 +102,28 @@ must not delete them.
   Dispatch using the production ref; a default-branch dispatch fails the guard
   unless the default branch itself is `integration/production`.
 
-## Workload Identity Federation setup (administrator, once)
+## Existing Workload Identity Federation configuration
 
-These are setup instructions, not commands run by the workflow. Review them with
-the GCP administrator. Do not run them as part of implementation or a deployment.
-Use existing approved pool/provider/account resources where appropriate.
+Reuse project number **542430141825**, pool **github-actions**, provider
+**decisionguard**, and account
+**decisionguard-github-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com**.
+They are already provisioned. Do not create a second pool, provider, deployment
+account or service-account key. The workflow does not provision or change WIF/IAM.
 
 Required APIs: IAM, IAM Service Account Credentials, Security Token Service,
 Cloud Resource Manager, Artifact Registry and Cloud Run. No Cloud Build API or
 Cloud Build account is required; Docker builds on the GitHub runner.
 
-Example in Bash/Cloud Shell; replace the GitHub identifiers with the actual values.
-Use numeric repository and owner IDs from GitHub to prevent name-reuse attacks.
-Project **number** is distinct from project ID.
-
-```bash
-PROJECT=decisionguard-ai-builder-cup
-PROJECT_NUMBER=REPLACE_WITH_GCP_PROJECT_NUMBER
-OWNER_REPO=REPLACE_OWNER/REPLACE_REPOSITORY
-REPOSITORY_ID=REPLACE_WITH_NUMERIC_REPOSITORY_ID
-OWNER_ID=REPLACE_WITH_NUMERIC_OWNER_ID
-DEPLOYER="github-backend-deployer@$PROJECT.iam.gserviceaccount.com"
-
-gcloud iam service-accounts create github-backend-deployer --project="$PROJECT"
-gcloud iam workload-identity-pools create github-backend \
-  --project="$PROJECT" --location=global --display-name='GitHub backend production'
-gcloud iam workload-identity-pools providers create-oidc github \
-  --project="$PROJECT" --location=global --workload-identity-pool=github-backend \
-  --issuer-uri=https://token.actions.githubusercontent.com \
-  --attribute-mapping='google.subject=assertion.sub,attribute.repository_id=assertion.repository_id,attribute.repository_owner_id=assertion.repository_owner_id' \
-  --attribute-condition="assertion.repository_id == '$REPOSITORY_ID' && assertion.repository_owner_id == '$OWNER_ID' && assertion.ref == 'refs/heads/integration/production' && assertion.event_name == 'workflow_dispatch' && assertion.environment == 'backend-production' && assertion.workflow_ref == '$OWNER_REPO/.github/workflows/deploy-backend.yml@refs/heads/integration/production'"
-
-gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER" \
-  --project="$PROJECT" --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-backend/attribute.repository_id/$REPOSITORY_ID"
-```
-
-Use a dedicated pool/provider so another provider with a weaker condition cannot
-reuse this principal set. Keep the provider's default audience; the auth action
-uses its full provider resource name. Wait for IAM propagation before the first
-manual run. Do not add broad owner/editor or service-account key permissions.
+Before release, have the administrator verify that this existing provider trusts
+the repository's numeric owner/repository IDs, the intended production branch,
+and this workflow's OIDC claims, including environment `backend-production`.
+If its existing condition restricts workflow paths/events, it must permit
+`.github/workflows/deploy-backend.yml`, `workflow_dispatch`, and
+`refs/heads/integration/production`. Confirm the repository principal already has
+`roles/iam.workloadIdentityUser` on the existing account. Audit compatibility with
+other consumers before any separately approved trust-policy change; do not
+replace or narrow the shared provider automatically. Keep the provider's existing
+audience configuration compatible with the auth action's provider-name audience.
 
 ## Deployment account permissions
 
@@ -140,7 +131,7 @@ Administrators provision these grants separately; the workflow never changes IAM
 
 | Principal | Grant and scope | Purpose |
 | --- | --- | --- |
-| Federated repository principal set above | `roles/iam.workloadIdentityUser` on deployment account | Exchange OIDC credentials for account impersonation |
+| Existing federated repository principal | `roles/iam.workloadIdentityUser` on existing deployment account | Exchange OIDC credentials for account impersonation |
 | Deployment account | `roles/artifactregistry.writer` on repository `decisionguard` in `asia-south1` | Push/read image and resolve digest |
 | Deployment account | `roles/run.developer` on each of the three existing services and two jobs | Read/update resources and read revisions; no IAM policy changes |
 | Deployment account | `roles/iam.serviceAccountUser` on each existing runtime service account used by selected targets | Act as the existing runtime account during an image update |
@@ -149,6 +140,8 @@ Administrators provision these grants separately; the workflow never changes IAM
 For example (administrator only), grant Artifact Registry writer with:
 
 ```bash
+PROJECT=decisionguard-ai-builder-cup
+DEPLOYER=decisionguard-github-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com
 gcloud artifacts repositories add-iam-policy-binding decisionguard \
   --project="$PROJECT" --location=asia-south1 \
   --member="serviceAccount:$DEPLOYER" --role=roles/artifactregistry.writer
@@ -168,19 +161,123 @@ need secret payload access, database credentials, queue administration or job
 execution permission. No Token Creator grant is required for normal WIF account
 impersonation used here.
 
+## One-time API profile transition (operator release prerequisite)
+
+Coordinate this transition with
+[the regression-fix runbook](../backend/PR_EVALUATION_REGRESSION_RUNBOOK.md),
+especially its **Exact evaluation settings** and **Deployment steps** sections.
+That runbook and `ai_services.decision_guard.orchestration.profiles` arrive with
+the separate regression fix; they must be integrated into the selected commit
+before release. This CI/CD branch deliberately does not copy its runtime changes.
+
+The new API rejects production evaluation webhooks with HTTP 503 when
+`PR_EVALUATION_SETTINGS` is missing or invalid. `/health` alone cannot detect this.
+Do not deploy the new API image first and add the profile in a later revision.
+Do not apply the profile alone to the old image to satisfy the CI guard. Stage
+the new API image **and** the approved JSON in a single revision, validate that
+actual revision, then promote it. The old API continues serving throughout staging.
+
+The canonical Azure profile explicitly includes `o200k_base`, `DEFAULT`, 43 model
+attempts, 1,075,000 tokens, 1500s evaluator deadline, concurrency 2, input/output
+limits 20,000/5,000, model window 32,768 and reserve 1,024. These are an explicit
+one-time operator approval of the regression runbook's policy, not defaults applied
+by CI. Preserve existing unrelated non-default read, retry and cost settings.
+Retain `PR_EVALUATION_DEPLOYMENT_REVISION` unless model configuration changes.
+Workers consume persisted job settings; recovery and ingestion need no API profile.
+
+Use **one already-built immutable combined-release digest** for worker and API.
+If the workflow first encounters an absent profile, it builds/pushes its image but
+fails preflight before changing any Cloud Run target. Its summary provides the
+digest for this approved transition; there is no need to rebuild it. Alternatively
+use the runbook's existing approved build process. Verify the image commit includes
+both fixes and this deployment tooling. No commands below were executed here.
+
+Example PowerShell, from the repository root after separate deployment approval:
+
+```powershell
+$project = 'decisionguard-ai-builder-cup'
+$region = 'asia-south1'
+$image = 'asia-south1-docker.pkg.dev/decisionguard-ai-builder-cup/decisionguard/backend@sha256:<APPROVED_NEW_DIGEST>'
+$release = '<UNIQUE_LOWERCASE_RELEASE_ID>'
+$profileFile = '<APPROVED_UTF8_PROFILE_JSON_FILE>'
+
+# Prepare/review the profile using azure_production_settings() in the combined
+# source, as in the regression runbook. Merge existing unrelated settings first.
+# This uses the selected image's actual production validator, with no network:
+python scripts/deployment/validate_api_profile.py --image=$image --profile-file=$profileFile
+if ($LASTEXITCODE -ne 0) { throw 'Profile validation failed; do not deploy' }
+$profileJson = (Get-Content -Raw -LiteralPath $profileFile | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 30)
+if ($profileJson.Contains('|')) { throw 'Choose a different gcloud delimiter before proceeding' }
+
+# Confirm no split/tag traffic or concurrent deployments. Capture the currently
+# serving revisions for rollback, without exporting environment/secret values.
+$oldWorkerRevision = gcloud run services describe decisionguard-pr-evaluation-worker --project=$project --region=$region --format='value(status.traffic[0].revisionName)'
+if ($LASTEXITCODE -ne 0 -or -not $oldWorkerRevision) { throw 'Cannot capture worker rollback revision' }
+$oldApiRevision = gcloud run services describe decisionguard-api --project=$project --region=$region --format='value(status.traffic[0].revisionName)'
+if ($LASTEXITCODE -ne 0 -or -not $oldApiRevision) { throw 'Cannot capture API rollback revision' }
+$workerTimeout = gcloud run services describe decisionguard-pr-evaluation-worker --project=$project --region=$region --format='value(spec.template.spec.timeoutSeconds)'
+if ($LASTEXITCODE -ne 0 -or $workerTimeout -ne '1800') { throw 'Reconcile worker timeout with regression runbook before release' }
+# Preserve this timeout and all other component configuration.
+gcloud run services update decisionguard-pr-evaluation-worker --project=$project --region=$region --image=$image --no-traffic --revision-suffix="$release-worker"
+if ($LASTEXITCODE -ne 0) { throw 'Worker staging failed' }
+$workerRevision = gcloud run services describe decisionguard-pr-evaluation-worker --project=$project --region=$region --format='value(status.latestCreatedRevisionName)'
+if ($LASTEXITCODE -ne 0) { throw 'Worker inspection failed' }
+$workerDigest = gcloud run revisions describe $workerRevision --project=$project --region=$region --format='value(status.imageDigest)'
+if ($LASTEXITCODE -ne 0 -or $workerDigest -ne $image) { throw 'Worker digest mismatch' }
+$workerReady = gcloud run services describe decisionguard-pr-evaluation-worker --project=$project --region=$region --format='value(status.latestReadyRevisionName)'
+if ($LASTEXITCODE -ne 0 -or $workerReady -ne $workerRevision) { throw 'Worker revision is not ready' }
+gcloud run services update-traffic decisionguard-pr-evaluation-worker --project=$project --region=$region --to-revisions="$workerRevision=100"
+if ($LASTEXITCODE -ne 0) { throw 'Worker promotion failed; stop' }
+
+# One update contains BOTH the new image and the validated profile. --update-env-vars
+# preserves all other env/Secret Manager references; never use --set-env-vars.
+gcloud run services update decisionguard-api --project=$project --region=$region --image=$image --update-env-vars="^|^PR_EVALUATION_SETTINGS=$profileJson" --no-traffic --revision-suffix="$release-api"
+if ($LASTEXITCODE -ne 0) { throw 'API staging failed; old API remains serving' }
+$apiRevision = gcloud run services describe decisionguard-api --project=$project --region=$region --format='value(status.latestCreatedRevisionName)'
+if ($LASTEXITCODE -ne 0) { throw 'API inspection failed' }
+# Inspect the actual staged revision privately, verify Ready/image/service, and
+# validate its actual env value with the image's admission contract. No secrets
+# or profile values are printed and no provider calls are made.
+python scripts/deployment/validate_api_profile.py --image=$image --revision=$apiRevision --expected-profile-file=$profileFile
+if ($LASTEXITCODE -ne 0) { throw 'Staged API validation failed; do not promote' }
+gcloud run services update-traffic decisionguard-api --project=$project --region=$region --to-revisions="$apiRevision=100"
+if ($LASTEXITCODE -ne 0) { throw 'API promotion failed; inspect traffic and rollback' }
+$apiUrl = gcloud run services describe decisionguard-api --project=$project --region=$region --format='value(status.url)'
+if ($LASTEXITCODE -ne 0) { throw 'API URL inspection failed' }
+$health = Invoke-RestMethod "$apiUrl/health"
+if ($health.status -ne 'ok') { throw 'API health failed; use revision rollback' }
+```
+
+Before routine CI resumes, confirm 100% traffic points at the validated revisions,
+they are the latest ready/created revisions, no tags remain, and all existing
+timeouts, runtime identities, secrets and other settings are intact. A failed staged
+revision leaves the old API serving; reconcile or roll back before retrying CI.
+Routine CI never sets or repairs the profile, budgets, queue settings or IAM.
+Its Docker check uses `--network=none`, sends JSON via stdin rather than process
+arguments, and suppresses container output; invalid/missing canonical validators
+block rollout. Profiles backed by Secret Manager references fail closed without
+resolving secret payloads; this non-secret policy JSON must be a literal env value.
+
+PR #3 continuation, evaluation/provider calls, and Check publication remain separate
+operator actions in the regression runbook. Deployment never performs them.
+
 ## Integration and manual release
 
 1. Review the `feature/backend-cicd` commit. Integrate the concurrent PR evaluation
    regression fix independently; this change does not contain that fix.
 2. In the normal integration checkout, bring the reviewed CI/CD commit onto
    `integration/production` with `git cherry-pick <backend-cicd-commit>` (or the
-   team's reviewed PR process). Resolve overlaps only in deployment files. Run the
+   team's reviewed PR process). Review deployment/fixture overlaps with the
+   regression fix without overwriting its runtime changes. Run the
    offline tests below on the final combined production commit. Push the reviewed
    branch through the normal branch protection process.
 3. Land the same deployment files on the repository default branch as described
-   above. Configure the GitHub environment, WIF provider and scoped deployer grants.
+   above. Verify the GitHub environment, existing WIF trust and scoped deployer grants.
    None of these integration/setup actions are performed by this implementation.
-4. Actions → **Deploy backend to production** → Run workflow → select
+4. Complete the one-time profile transition below using the combined image and
+   regression-fix runbook, then validate the live API revision. Routine dispatches
+   intentionally refuse to bootstrap or change evaluation profiles/budgets.
+5. Actions → **Deploy backend to production** → Run workflow → select
    **integration/production**. Optional switches default to false. Confirm the
    displayed branch SHA is the intended combined release, then approve the
    environment deployment if configured.
@@ -284,24 +381,25 @@ Safety tests mock every gcloud/health operation and exercise sequencing, digest
 verification, configuration preservation, failure stops, branch restriction,
 optional-target preflight and immutable image requirements. They deploy nothing.
 
-Implementation validation on 2026-10-17 (Windows, Python 3.13): locked dependency
-installation, all 10 deployment safety tests, Python syntax, actionlint 1.7.7
-(without ShellCheck), and Git whitespace checks passed. The full offline backend
-run completed with **1,154 passed, 24 skipped, 1 deselected and 3 failed**. All three
-failures are in the unchanged `ai_services/tests/test_database_concurrency.py`:
+Review validation on 2026-10-17 (Windows, Python 3.13): the full offline backend
+suite passed with **1,157 passed, 24 skipped, 1 deselected, zero failures**. All
+**18 deployment/profile safety tests** passed. Actionlint 1.7.7 (without ShellCheck),
+Python syntax, Git whitespace checks, and parsing the operator PowerShell block
+also passed. A read-only contract check against the regression integration source
+accepted the canonical profile with a custom read limit and rejected absent,
+incomplete and malformed profiles. Container/gcloud operations in safety tests
+are mocked; actual validation of the combined release image and staged production
+revision remains a release prerequisite, not a deployment performed here.
 
-- `test_concurrent_conversation_binding_preserves_scope`: the settings mock yields
-  a mock `encryption_key`, which Fernet cannot decode.
-- `test_concurrent_installation_inventory_and_repository_binding`: the settings
-  stub has no `encryption_key`.
-- `test_binding_cannot_reactivate_removed_inventory`: the settings stub has no
-  `encryption_key`.
-
-These fixture/application-contract issues require a separate change outside this
-deployment-only scope. The workflow includes these tests and will block rollout
-until they pass. Revalidate the combined production commit after integrating those
-fixes and the concurrent PR evaluation fix. No workflow, Docker push, Cloud Run
-update or production infrastructure change was executed during implementation.
+The previous three concurrency-test failures were incomplete settings fixtures:
+`GitHubAppService` constructs `AuthStateStore` with `settings.encryption_key`, but
+one test supplied an unrestricted mock and two supplied only `app_id`. The shared
+`github_settings` fixture now supplies a generated Fernet key to both the store's
+environment and each service instance. No runtime contract, concurrency assertion,
+ownership check, or test selection was weakened. These tests remain in the full
+offline CI gate. Revalidate the final combined production commit after integrating
+the separate PR evaluation fix. No workflow, Docker push, Cloud Run update or
+production infrastructure change was executed during implementation.
 
 References: [GitHub manual dispatch requirements](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow),
 [Google WIF for deployment pipelines](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines),

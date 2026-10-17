@@ -82,8 +82,8 @@ jobs:
           PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           DEPLOYER: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
         run: |
-          test -n "$PROVIDER"
-          test -n "$DEPLOYER"
+          test "$PROVIDER" = 'projects/542430141825/locations/global/workloadIdentityPools/github-actions/providers/decisionguard'
+          test "$DEPLOYER" = 'decisionguard-github-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com'
       - name: Build selected commit once
         env:
           COMMIT: ${{ github.sha }}
@@ -119,7 +119,7 @@ jobs:
           echo "DEPLOY_IMAGE=$IMAGE@$digest" >> "$GITHUB_ENV"
           echo "### Backend release: $COMMIT" >> "$GITHUB_STEP_SUMMARY"
           echo "Image: \`$IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
-      - name: Deploy worker, API, then selected optional targets
+      - name: Validate existing API profile, then deploy worker and API
         env:
           CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           DEPLOY_RECOVERY: ${{ inputs.deploy_recovery }}

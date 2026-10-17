@@ -9,6 +9,8 @@ import subprocess
 import time
 from urllib.request import urlopen
 
+from validate_api_profile import profile_from_container, validate_profile
+
 PROJECT = "decisionguard-ai-builder-cup"
 REGION = "asia-south1"
 IMAGE = f"{REGION}-docker.pkg.dev/{PROJECT}/decisionguard/backend"
@@ -125,6 +127,8 @@ def rollout(image, targets, manifest_path):
         resource = gcloud("run", kind, "describe", name)
         container = single_container(resource, kind)
         require(ready(resource), f"{name} is not ready before rollout")
+        if name == API:
+            validate_profile(profile_from_container(container), image)
         record = {"kind": kind, "name": name, "state": "pending"}
         if kind == "services":
             revision = serving_revision(resource)
@@ -162,6 +166,8 @@ def rollout(image, targets, manifest_path):
         require(runtime_config(current, kind) == runtime_config(baseline[name], kind),
                 f"{name} configuration changed unexpectedly; stop and inspect")
         require(single_container(current, kind)["image"] == image, f"{name} image mismatch")
+        if name == API:
+            validate_profile(profile_from_container(single_container(current, kind)), image)
         if kind == "services":
             revision = current["status"]["latestCreatedRevisionName"]
             require(current["status"].get("latestReadyRevisionName") == revision,

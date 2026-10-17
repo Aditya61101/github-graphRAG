@@ -14,6 +14,7 @@ NEW = deploy.IMAGE + "@sha256:" + "b" * 64
 RECOVERY = "decisionguard-processing-recovery"
 JOB = "decisionguard-repository-ingestion"
 ADR_JOB = "decisionguard-adr-ingestion"
+PROFILE = '{"token_encoding":"o200k_base"}'  # Opaque input; image owns schema validation.
 
 
 def resource(name, kind="services"):
@@ -31,6 +32,8 @@ def resource(name, kind="services"):
     if kind == "jobs":
         result["spec"]["template"] = {"spec": {"taskCount": 1, "template": task}}
     else:
+        if name == deploy.API:
+            task["spec"]["containers"][0]["env"].append({"name": "PR_EVALUATION_SETTINGS", "value": PROFILE})
         result["spec"]["traffic"] = [{"latestRevision": True, "percent": 100}]
         result["status"].update(latestCreatedRevisionName=name + "-old",
                                 latestReadyRevisionName=name + "-old",
@@ -74,10 +77,13 @@ class RolloutTests(unittest.TestCase):
             value["status"]["traffic"] = [{"revisionName": name + "-new", "percent": 100}]
         return copy.deepcopy(value)
 
-    def run_rollout(self, health=None):
+    def run_rollout(self, health=None, profile_error=None):
         with patch.object(deploy, "gcloud", side_effect=self.fake_gcloud), \
+             patch.object(deploy, "validate_profile", side_effect=profile_error) as validate, \
              patch.object(deploy, "check_health", side_effect=health) as check:
             deploy.rollout(NEW, self.targets, self.manifest)
+        self.assertEqual(validate.call_count, 2)
+        validate.assert_called_with(PROFILE, NEW)
         return check
 
     def mutations(self):
@@ -103,6 +109,18 @@ class RolloutTests(unittest.TestCase):
             self.run_rollout()
         self.assertEqual(len(self.mutations()), 1)
         self.assertEqual(deploy.single_container(self.resources[deploy.API], "services")["image"], OLD)
+
+    def test_missing_api_profile_stops_before_worker_update(self):
+        container = deploy.single_container(self.resources[deploy.API], "services")
+        container["env"] = [e for e in container["env"] if e["name"] != "PR_EVALUATION_SETTINGS"]
+        with self.assertRaisesRegex(RuntimeError, "PR_EVALUATION_SETTINGS"):
+            self.run_rollout()
+        self.assertEqual(self.mutations(), [])
+
+    def test_invalid_api_profile_stops_before_worker_update(self):
+        with self.assertRaisesRegex(RuntimeError, "profile rejected"):
+            self.run_rollout(profile_error=RuntimeError("profile rejected"))
+        self.assertEqual(self.mutations(), [])
 
     def test_preflight_checks_optional_targets_before_any_update(self):
         self.resources[JOB]["status"]["conditions"] = []
