@@ -42,6 +42,31 @@ def resource(name, kind="services"):
     return result
 
 
+def realistic_job():
+    """Sanitized v1 Job shape matching the audited production resource."""
+    value = resource(ADR_JOB, "jobs")
+    value.update(apiVersion="run.googleapis.com/v1", kind="Job")
+    value["metadata"].update(generation=4, resourceVersion="old-version")
+    execution = value["spec"]["template"]
+    execution["metadata"] = {
+        "annotations": {"run.googleapis.com/client-name": "gcloud",
+                        "run.googleapis.com/client-version": "589.0.0",
+                        "run.googleapis.com/cloudsql-instances": "project:region:db",
+                        "run.googleapis.com/execution-environment": "gen2"},
+        "labels": {"client.knative.dev/nonce": "kaz_fes_rog"}}
+    execution["spec"].update(parallelism=1, taskCount=1)
+    task = execution["spec"]["template"]["spec"]
+    task.pop("containerConcurrency")  # Jobs use task count and parallelism.
+    task.update(maxRetries=0, timeoutSeconds="3600", volumes=[{
+        "name": "github-key", "secret": {"secretName": "github-private-key",
+        "items": [{"key": "2", "path": "github-app.pem"}]}}])
+    container = task["containers"][0]
+    container.update(command=["python"], args=["-m", "ai_services.runs.run_adr_ingestion"],
+        volumeMounts=[{"name": "github-key", "mountPath": "/run/secrets"}])
+    container["resources"]["limits"] = {"cpu": "2", "memory": "4Gi"}
+    return value
+
+
 class RolloutTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -191,6 +216,75 @@ class RolloutTests(unittest.TestCase):
             self.run_rollout()
         self.assertEqual([call[3] for call in self.mutations()], [ADR_JOB])
         self.assertEqual(deploy.single_container(self.resources[deploy.API], "services")["image"], OLD)
+
+    def test_audited_job_nonce_rotation_preserves_runtime_config(self):
+        before = realistic_job()
+        after = copy.deepcopy(before)
+        deploy.single_container(after, "jobs")["image"] = NEW
+        after["spec"]["template"]["metadata"]["labels"]["client.knative.dev/nonce"] = "fov_rig_quk"
+        after["spec"]["template"]["metadata"]["annotations"]["run.googleapis.com/client-version"] = "568.0.0"
+        after["metadata"].update(generation=5, resourceVersion="new-version")
+        after["metadata"]["annotations"].update({
+            "run.googleapis.com/lastModifier": "deployer@example.iam.gserviceaccount.com",
+            "run.googleapis.com/operation-id": "new-operation"})
+        saved = copy.deepcopy((before, after))
+        self.assertEqual(deploy.runtime_config(before, "jobs"), deploy.runtime_config(after, "jobs"))
+        self.assertEqual((before, after), saved)  # Comparator must not mutate inputs.
+        del before["spec"]["template"]["metadata"]["labels"]
+        self.assertEqual(deploy.runtime_config(before, "jobs"), deploy.runtime_config(after, "jobs"))
+
+    def test_job_runtime_changes_remain_strict(self):
+        before = realistic_job()
+        paths = [
+            ("spec", "template", "spec", "parallelism"),
+            ("spec", "template", "spec", "taskCount"),
+            ("spec", "template", "metadata", "labels", "owner"),
+            ("spec", "template", "metadata", "annotations", "run.googleapis.com/cloudsql-instances"),
+            ("spec", "template", "metadata", "annotations", "run.googleapis.com/vpc-access-connector"),
+            ("spec", "template", "metadata", "annotations", "run.googleapis.com/vpc-access-egress"),
+        ]
+        task = ("spec", "template", "spec", "template", "spec")
+        paths += [task + (key,) for key in ("serviceAccountName", "maxRetries", "timeoutSeconds", "volumes")]
+        container = task + ("containers", 0)
+        paths += [container + (key,) for key in ("command", "args", "env", "resources", "volumeMounts")]
+        paths += [container + ("env", 1, "valueFrom", "secretKeyRef", "key")]
+        for path in paths:
+            with self.subTest(path=path):
+                after = copy.deepcopy(before)
+                cursor = after
+                for key in path[:-1]:
+                    cursor = cursor[key]
+                cursor[path[-1]] = "changed"
+                self.assertNotEqual(deploy.runtime_config(before, "jobs"), deploy.runtime_config(after, "jobs"))
+
+    def test_already_updated_job_can_be_redeployed_with_new_nonce(self):
+        self.targets = [("jobs", ADR_JOB)]
+        self.resources[ADR_JOB] = realistic_job()
+        deploy.single_container(self.resources[ADR_JOB], "jobs")["image"] = NEW
+        original = self.fake_gcloud
+        def cloud(*args):
+            if args[2] == "update":
+                self.resources[ADR_JOB]["spec"]["template"]["metadata"]["labels"]["client.knative.dev/nonce"] = "another_nonce"
+            return original(*args)
+        with patch.object(deploy, "gcloud", side_effect=cloud):
+            deploy.rollout(NEW, self.targets, self.manifest)
+        record = json.loads(self.manifest.read_text())["targets"][0]
+        self.assertEqual(record["previous_image"], NEW)
+        self.assertEqual(record["state"], "verified")
+        self.assertFalse(any("execute" in call for call in self.calls))
+
+    def test_nonce_exception_does_not_hide_service_concurrency_or_labels(self):
+        before = resource(deploy.WORKER)
+        for field in ("concurrency", "nonce"):
+            with self.subTest(field=field):
+                after = copy.deepcopy(before)
+                if field == "concurrency":
+                    after["spec"]["template"]["spec"]["containerConcurrency"] = 20
+                else:
+                    after["spec"]["template"]["metadata"]["labels"] = {
+                        "client.knative.dev/nonce": "service-label"}
+                self.assertNotEqual(deploy.runtime_config(before, "services"),
+                                    deploy.runtime_config(after, "services"))
 
     def test_wrong_branch_rejected_before_external_operations(self):
         with patch.dict(deploy.os.environ, {"GITHUB_REF": "refs/heads/feature/backend-cicd"}), \

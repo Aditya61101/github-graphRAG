@@ -53,6 +53,14 @@ def runtime_config(resource, kind):
     target = result["template"]
     if kind == "jobs":
         target = target["spec"]["template"]
+        # gcloud's JobNonceChange rotates this execution-template label to
+        # force an image pull, including for an image-only update. It is CLI
+        # bookkeeping, not task configuration. Preserve every other label.
+        metadata = result["template"].get("metadata", {})
+        labels = metadata.get("labels", {})
+        labels.pop("client.knative.dev/nonce", None)
+        if not labels:
+            metadata.pop("labels", None)
     target["spec"]["containers"][0].pop("image", None)
 
     def clean(value):
