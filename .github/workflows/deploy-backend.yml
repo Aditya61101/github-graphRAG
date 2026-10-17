@@ -1,0 +1,136 @@
+name: Deploy backend to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_recovery:
+        description: Update the processing recovery service
+        type: boolean
+        default: false
+      deploy_repository_ingestion:
+        description: Update the repository ingestion job (does not execute it)
+        type: boolean
+        default: false
+      deploy_adr_ingestion:
+        description: Update the ADR ingestion job (does not execute it)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decisionguard-backend-production
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: decisionguard-ai-builder-cup
+  GCP_REGION: asia-south1
+  IMAGE: asia-south1-docker.pkg.dev/decisionguard-ai-builder-cup/decisionguard/backend
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require production branch
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: test "$SELECTED_REF" = refs/heads/integration/production
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.5'
+          python-version: '3.13'
+      - name: Test deployment safety checks
+        run: python -m unittest discover -s scripts/deployment -p 'test_*.py' -v
+      - name: Install locked backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - name: Run offline backend regression suite
+        working-directory: backend
+        env:
+          PYTHON_DOTENV_DISABLED: '1'
+          JWT_SECRET: decisionguard-ci-only-signing-key-not-for-production
+        # These two legacy scripts contact live Neo4j/Gemini at import time.
+        # Other external-service tests are marked integration or opt-in/skipped.
+        run: >-
+          uv run --no-sync python -m pytest ai_services/tests -m 'not integration'
+          --ignore=ai_services/tests/test_neo4j.py
+          --ignore=ai_services/tests/test_gemini.py
+          -q
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/integration/production'
+    environment: backend-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check federation configuration
+        env:
+          PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOYER: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          test "$PROVIDER" = 'projects/542430141825/locations/global/workloadIdentityPools/github-actions/providers/decisionguard'
+          test "$DEPLOYER" = 'decisionguard-github-deployer@decisionguard-ai-builder-cup.iam.gserviceaccount.com'
+      - name: Build selected commit once
+        env:
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          tag="$IMAGE:git-$COMMIT-run-$RUN_ID-$ATTEMPT"
+          docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$COMMIT" --tag "$tag" .
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+      - uses: google-github-actions/auth@v3
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+          token_format: access_token
+          access_token_lifetime: 3600s
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Authenticate Docker to Artifact Registry
+        env:
+          CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+      - name: Push image and resolve immutable digest
+        env:
+          COMMIT: ${{ github.sha }}
+          CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_TAG"
+          digest="$(gcloud artifacts docker images describe "$IMAGE_TAG" --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "DEPLOY_IMAGE=$IMAGE@$digest" >> "$GITHUB_ENV"
+          echo "### Backend release: $COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`$IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Validate existing API profile, then deploy worker and API
+        env:
+          CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          DEPLOY_RECOVERY: ${{ inputs.deploy_recovery }}
+          DEPLOY_REPOSITORY_INGESTION: ${{ inputs.deploy_repository_ingestion }}
+          DEPLOY_ADR_INGESTION: ${{ inputs.deploy_adr_ingestion }}
+        run: python scripts/deployment/deploy_backend.py
+      - name: Save release and rollback references
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: backend-release.json
+          if-no-files-found: ignore
+          retention-days: 90
