@@ -16,6 +16,9 @@ REGION = "asia-south1"
 IMAGE = f"{REGION}-docker.pkg.dev/{PROJECT}/decisionguard/backend"
 API = "decisionguard-api"
 WORKER = "decisionguard-pr-evaluation-worker"
+REVISION_WAIT_SECONDS = 600
+TRAFFIC_WAIT_SECONDS = 120
+POLL_SECONDS = 5
 
 
 def require(condition, message):
@@ -148,6 +151,87 @@ def revision_digest(revision):
     return digest if "@" in digest else f"{IMAGE}@{digest}"
 
 
+def wait_for_new_revision(service_name, old_revision, image, baseline,
+                          timeout=REVISION_WAIT_SECONDS):
+    """Wait for Cloud Run Service status to expose the just-created staged revision."""
+    deadline = time.monotonic() + timeout
+    while True:
+        current = gcloud("run", "services", "describe", service_name)
+        revision = current.get("status", {}).get("latestCreatedRevisionName")
+        if revision and revision != old_revision:
+            assert_runtime_unchanged(baseline, current, "services", service_name)
+            require(single_container(current, "services")["image"] == image,
+                    f"{service_name} staged image mismatch")
+            return revision, current
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{service_name} no new revision observed within {timeout}s; "
+                "inspect Cloud Run revisions before retrying")
+        time.sleep(POLL_SECONDS)
+
+
+def wait_for_job_ready(job_name, image, baseline, timeout=REVISION_WAIT_SECONDS):
+    """Wait for job template propagation without executing the Cloud Run Job."""
+    deadline = time.monotonic() + timeout
+    while True:
+        current = gcloud("run", "jobs", "describe", job_name)
+        assert_runtime_unchanged(baseline, current, "jobs", job_name)
+        require(single_container(current, "jobs")["image"] == image,
+                f"{job_name} job template image mismatch")
+        if ready(current):
+            return current
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{job_name} template not Ready within {timeout}s")
+        time.sleep(POLL_SECONDS)
+
+
+def wait_for_staged_revision(service_name, revision, image, baseline, timeout=REVISION_WAIT_SECONDS):
+    """Verify the revision itself; latestReadyRevisionName may still be the serving revision.
+
+    --no-traffic deliberately keeps the old revision serving. A Service Ready
+    condition or latestReadyRevisionName alone is not evidence the new revision
+    is ready, and using --to-latest before inspecting the revision is unsafe.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        current = gcloud("run", "services", "describe", service_name)
+        require(current.get("status", {}).get("latestCreatedRevisionName") == revision,
+                f"{service_name} latest created revision changed during rollout")
+        assert_runtime_unchanged(baseline, current, "services", service_name)
+        require(single_container(current, "services")["image"] == image,
+                f"{service_name} staged image mismatch")
+        rev = gcloud("run", "revisions", "describe", revision)
+        if ready(rev):
+            require(rev.get("status", {}).get("imageDigest") in (image, image.split("@")[-1]),
+                    f"{service_name} staged revision digest mismatch")
+            return current
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{service_name} staged revision {revision} not Ready within {timeout}s; "
+                "inspect revision conditions; no traffic was promoted")
+        time.sleep(POLL_SECONDS)
+
+
+def wait_for_traffic(service_name, revision, timeout=TRAFFIC_WAIT_SECONDS):
+    """Wait for Route reconciliation; never count a staged revision as deployed."""
+    deadline = time.monotonic() + timeout
+    while True:
+        current = gcloud("run", "services", "describe", service_name)
+        require(current.get("status", {}).get("latestCreatedRevisionName") == revision,
+                f"{service_name} latest created revision changed during promotion")
+        traffic = current.get("status", {}).get("traffic", [])
+        if (ready(current) and len(traffic) == 1
+                and traffic[0].get("revisionName") == revision
+                and traffic[0].get("percent") == 100
+                and not traffic[0].get("tag")):
+            return current
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{service_name} traffic did not reach {revision}=100 within {timeout}s; "
+                "inspect traffic and reconcile manually")
+        time.sleep(POLL_SECONDS)
+
+
 def check_health(url):
     require(url.startswith("https://"), "API URL must use HTTPS")
     for attempt in range(6):
@@ -207,27 +291,54 @@ def rollout(image, targets, manifest_path):
         # Detect out-of-band configuration changes since preflight.
         require(gcloud("run", kind, "describe", name) == baseline[name],
                 f"{name} changed during preflight; rerun after reconciling changes")
+        # Do not churn Cloud Run templates/revisions that already use this digest.
+        # Preflight has established single ready, fully-served service revisions.
+        already_deployed = record["previous_image"] == image
+        if already_deployed:
+            record["state"] = "image-verified"
+            record["skipped_unchanged_image"] = True
+            if kind == "services":
+                record["revision"] = record["previous_revision"]
+            save()
+            if name == API:
+                check_health(baseline[name]["status"]["url"])
+                record["health"] = "ok"
+            record["state"] = "verified"
+            save()
+            print(f"Verified (unchanged image) {name}: {image}")
+            continue
         record["state"] = "updating"
         save()
         if kind == "services":
-            gcloud("run", kind, "update", name, "--image", image, "--no-traffic")
+            gcloud("run", "services", "update", name, "--image", image, "--no-traffic")
         else:
-            gcloud("run", kind, "update", name, "--image", image)
-        current = gcloud("run", kind, "describe", name)
-        require(ready(current), f"{name} is not ready after update")
-        assert_runtime_unchanged(baseline[name], current, kind, name)
-        require(single_container(current, kind)["image"] == image, f"{name} image mismatch")
-        if name == API:
-            validate_profile(profile_from_container(single_container(current, kind)), image)
+            gcloud("run", "jobs", "update", name, "--image", image)
         if kind == "services":
-            revision = current["status"]["latestCreatedRevisionName"]
-            require(current["status"].get("latestReadyRevisionName") == revision,
-                    f"{name} latest revision is not ready")
-            require(revision_digest(revision) == image, f"{name} resolved digest mismatch")
-            gcloud("run", "services", "update-traffic", name, "--to-latest")
+            revision, current = wait_for_new_revision(
+                name, record["previous_revision"], image, baseline[name])
+        else:
             current = gcloud("run", kind, "describe", name)
-            require(serving_revision(current) == revision, f"{name} traffic mismatch")
+            assert_runtime_unchanged(baseline[name], current, kind, name)
+            require(single_container(current, kind)["image"] == image,
+                    f"{name} image mismatch")
+        if kind == "services":
             record["revision"] = revision
+            record["state"] = "staged"
+            save()
+            current = wait_for_staged_revision(name, revision, image, baseline[name])
+            if name == API:
+                validate_profile(profile_from_container(single_container(current, kind)), image)
+            record["state"] = "image-verified"
+            save()
+            # Pin promotion to the exact revision validated above, not an alias
+            # that could select a newer revision after another deployment.
+            gcloud("run", "services", "update-traffic", name,
+                   "--to-revisions", f"{revision}=100")
+            current = wait_for_traffic(name, revision)
+            assert_runtime_unchanged(baseline[name], current, kind, name)
+            require(revision_digest(revision) == image, f"{name} promoted digest mismatch")
+        else:
+            current = wait_for_job_ready(name, image, baseline[name])
         record["state"] = "image-verified"
         save()
         if name == API:
