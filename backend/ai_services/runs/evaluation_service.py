@@ -47,21 +47,22 @@ async def evaluate(request: EvaluationRequest):
     require_enabled()
     from ai_services.runs.run_pr_evaluation import run
 
-    async with slot:
-        jobs = EvaluationStore(SqliteApplicationStore().session_factory)
-        if jobs.get(request.job_id) is None:
-            raise HTTPException(404, "Unknown evaluation")
-        try:
-            # Cancel before Cloud Tasks' 1800s deadline; the durable lease and
-            # checkpoints survive timeout/restart and provider ambiguity is retained.
-            async with asyncio.timeout(1680):
+    try:
+        # Include admission wait and setup, not just evaluation. The persisted
+        # 1500s evaluation deadline starts later, after checkout/context work.
+        # The outer guard retains 120s before the 1800s transport deadline.
+        async with asyncio.timeout(1680):
+            async with slot:
+                jobs = EvaluationStore(SqliteApplicationStore().session_factory)
+                if jobs.get(request.job_id) is None:
+                    raise HTTPException(404, "Unknown evaluation")
                 await run(request.job_id)
-        except TimeoutError:
-            raise HTTPException(503, "Evaluation timed out; recovery pending") from None
-        job = jobs.get(request.job_id)
-        if job.status in {"QUEUED", "RETRY", "RUNNING"}:
-            raise HTTPException(503, "Evaluation recovery pending")
-        return {"status": job.status}
+                job = jobs.get(request.job_id)
+                if job.status in {"QUEUED", "RETRY", "RUNNING"}:
+                    raise HTTPException(503, "Evaluation recovery pending")
+                return {"status": job.status}
+    except TimeoutError:
+        raise HTTPException(503, "Evaluation timed out; recovery pending") from None
 
 
 @app.post("/reconcile")

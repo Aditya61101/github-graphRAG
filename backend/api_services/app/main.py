@@ -229,7 +229,9 @@ async def lifespan(app: FastAPI):
         graph_service=graph_service,
     )
 
-    from ai_services.decision_guard.evaluation.models import EvaluationSettings
+    from ai_services.decision_guard.orchestration.profiles import (
+        automatic_evaluation_settings,
+    )
     from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator, LocalDispatcher
     from ai_services.decision_guard.orchestration.runtime import production_runtime
     from ai_services.decision_guard.orchestration.store import EvaluationStore
@@ -254,9 +256,7 @@ async def lifespan(app: FastAPI):
             enabled=os.getenv("GITHUB_CHECKS_ENABLED", "false").lower() == "true",
             details_base=os.getenv("GITHUB_CHECKS_DETAILS_BASE") or None,
         ),
-        settings=EvaluationSettings.model_validate_json(
-            os.getenv("PR_EVALUATION_SETTINGS", "{}")
-        ),
+        settings_factory=automatic_evaluation_settings,
     )
 
     # Create the conversational agent once. Creating it inside the request

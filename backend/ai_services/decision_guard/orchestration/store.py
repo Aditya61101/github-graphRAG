@@ -694,6 +694,23 @@ class EvaluationStore:
                     "This evaluation was superseded by a different revision"
                 )
             if settings:
+                previous = EvaluationSettings.model_validate_json(job.settings_json)
+                # These fields affect context pruning, source preparation or the
+                # coherent singleton feasibility probe. Reusing that checkpoint
+                # after a change would preserve omissions from the old profile.
+                context_fields = (
+                    "token_encoding", "max_input_tokens", "max_output_tokens",
+                    "model_window", "provider_reserve", "max_batch_units", "max_units",
+                    "max_reads", "max_read_bytes", "max_source_bytes",
+                    "max_policy_reads", "max_policy_read_bytes", "max_policy_bytes",
+                )
+                if job.context_json and not rebuild_context and any(
+                    getattr(previous, name) != getattr(settings, name)
+                    for name in context_fields
+                ):
+                    raise ValueError(
+                        "Context-affecting settings changes require rebuild_context=True"
+                    )
                 job.settings_json = settings.model_dump_json()
             if rebuild_context:
                 job.context_json = None

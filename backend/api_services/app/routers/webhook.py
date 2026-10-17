@@ -159,9 +159,14 @@ async def _queue_pr(request, background_tasks, normalized_pr, tracked):
     if orchestrator is None:
         raise HTTPException(503, "PR evaluation orchestration is not initialized")
     from sqlalchemy.exc import SQLAlchemyError
+    from ai_services.decision_guard.orchestration.profiles import (
+        EvaluationConfigurationError,
+    )
 
     try:
         job_id = await orchestrator.accept(tracked.id, normalized_pr, background_tasks)
+    except EvaluationConfigurationError as error:
+        raise HTTPException(503, str(error)) from None
     except SQLAlchemyError:
         # Never acknowledge a job whose durable transaction did not commit.
         raise HTTPException(

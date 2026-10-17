@@ -120,6 +120,7 @@ class EvaluationOrchestrator:
         worker,
         *,
         settings=None,
+        settings_factory=None,
         dispatcher=None,
         publisher=None,
         lifecycle_github=None,
@@ -129,14 +130,18 @@ class EvaluationOrchestrator:
         self.processing_enabled = processing_enabled or _processing_enabled
         self.publisher = publisher
         self.lifecycle_github = lifecycle_github
+        if settings is not None and settings_factory is not None:
+            raise ValueError("Provide settings or settings_factory, not both")
         self.settings = settings or EvaluationSettings()
+        self.settings_factory = settings_factory
         self.tasks = {}
         self.dispatcher = dispatcher or LocalDispatcher(worker, tasks=self.tasks)
 
     async def accept(self, repository_id, event, background_tasks):
         if not self.processing_enabled():
             raise RuntimeError("PR evaluation processing is disabled")
-        job_id = self.store.enqueue(repository_id, event, self.settings)
+        settings = self.settings_factory() if self.settings_factory else self.settings
+        job_id = self.store.enqueue(repository_id, event, settings)
         if isinstance(self.dispatcher, LocalDispatcher):
             await LocalDispatcher(self.worker, background_tasks).dispatch(job_id)
         else:
