@@ -16,6 +16,7 @@ from ai_services.decision_guard.evaluation.models import (
 from ai_services.ingestion.persistence.models import RepositoryModel
 
 from . import read_models
+from .check_lifecycle import enabled as lifecycle_enabled, intent as lifecycle_intent, queue_max_age
 from .models import (
     DispatchIntent,
     EvaluationAttempt,
@@ -70,6 +71,8 @@ class EvaluationStore:
                         raise ValueError(
                             "Webhook delivery identity was reused with different metadata"
                         )
+                    if lifecycle_enabled():
+                        lifecycle_intent(session, job, now)
                     return job.id
             job = session.scalar(
                 select(EvaluationJob).where(
@@ -172,12 +175,22 @@ class EvaluationStore:
                 and session.get(DispatchIntent, job.id) is None
             ):
                 session.add(DispatchIntent(job_id=job.id, next_dispatch_at=now))
+            if lifecycle_enabled():
+                lifecycle_intent(session, job, now)
             return job.id
 
     @staticmethod
     def _advance(session, head, job_id, now):
         if head.latest_job_id == job_id:
             return
+        retiring = []
+        if lifecycle_enabled():
+            retiring = list(session.scalars(select(EvaluationJob).where(
+                EvaluationJob.repository_id == head.repository_id,
+                EvaluationJob.pr_number == head.pr_number,
+                EvaluationJob.id != job_id,
+                EvaluationJob.status.in_(['QUEUED', 'RETRY', 'RUNNING', 'DEFERRED']),
+            )))
         session.execute(
             update(EvaluationJob)
             .where(
@@ -199,6 +212,9 @@ class EvaluationStore:
             .values(status="SUPERSEDED", finished_at=now)
         )
         head.latest_job_id, head.current_result_job_id = job_id, None
+        for old in retiring:
+            session.refresh(old)
+            lifecycle_intent(session, old, now)
 
     def observe_current(self, job_id, token):
         """Called only after GitHub confirms this exact open PR revision."""
@@ -234,6 +250,8 @@ class EvaluationStore:
     def claim(self, job_id):
         now, token = self.clock(), uuid.uuid4().hex
         with self.sessions.begin() as session:
+            if lifecycle_enabled():
+                self._expire_waiting(session, now, job_id=job_id)
             limit = int(os.getenv("PR_EVALUATION_MAX_CONCURRENCY", "2"))
             if limit < 1:
                 raise ValueError("PR_EVALUATION_MAX_CONCURRENCY must be positive")
@@ -297,6 +315,8 @@ class EvaluationStore:
                     status="RUNNING",
                 )
             )
+            if lifecycle_enabled():
+                lifecycle_intent(session, job, now)
             return token
 
     def _fence(self, session, job_id, token, **values):
@@ -426,6 +446,8 @@ class EvaluationStore:
                 or "Execution failed; inspect stage and error_code, resolve the dependency, then retry."
             )
             job.next_attempt_at = now + min(300, 2**job.attempts)
+            if lifecycle_enabled():
+                lifecycle_intent(session, job, now)
             if job.result_json and job.stage == "EVALUATED":
                 from .projections import project
 
@@ -455,6 +477,8 @@ class EvaluationStore:
         """Recover missed dispatch, crashed execution and exhausted expired claims."""
         now = self.clock()
         with self.sessions.begin() as session:
+            if lifecycle_enabled():
+                self._expire_waiting(session, now)
             expired = and_(
                 EvaluationJob.status == "RUNNING", EvaluationJob.lease_until <= now
             )
@@ -495,6 +519,50 @@ class EvaluationStore:
                     .limit(limit)
                 )
             )
+
+    @staticmethod
+    def _expire_waiting(session, now, *, job_id=None):
+        age = queue_max_age()
+        waiting = or_(EvaluationJob.status.in_(['QUEUED', 'RETRY']), and_(
+            EvaluationJob.status == 'RUNNING', EvaluationJob.lease_until <= now))
+        filters = [waiting, EvaluationJob.created_at <= now - age,
+                   or_(EvaluationJob.stage != 'EVALUATED', EvaluationJob.result_json.is_(None))]
+        if job_id is not None:
+            filters.append(EvaluationJob.id == job_id)
+        for job in session.scalars(select(EvaluationJob).where(*filters)).all():
+            changed = session.execute(update(EvaluationJob).where(
+                EvaluationJob.id == job.id, *filters).values(
+                status='FAILED', error_code='QUEUE_AGE_EXCEEDED',
+                error_message='Evaluation could not start or recover before its queue deadline.',
+                lease_token=None, lease_until=None, updated_at=now))
+            if changed.rowcount:
+                session.execute(update(EvaluationAttempt).where(
+                    EvaluationAttempt.job_id == job.id, EvaluationAttempt.status == 'RUNNING'
+                ).values(status='LEASE_EXPIRED', finished_at=now))
+                intent = session.get(DispatchIntent, job.id)
+                if intent:
+                    session.delete(intent)
+                lifecycle_intent(session, job, now)
+
+    def reconcile_check_lifecycle(self):
+        """Repair intents from compatibility-mode workers; never schedule AI."""
+        if not lifecycle_enabled():
+            return
+        publication = read_models.CheckPublication
+        with self.sessions.begin() as session:
+            terminal = ~EvaluationJob.status.in_(['QUEUED', 'RETRY', 'RUNNING'])
+            jobs = list(session.scalars(select(EvaluationJob).outerjoin(
+                publication, publication.job_id == EvaluationJob.id).where(or_(
+                    and_(publication.job_id.is_(None), ~terminal),
+                    and_(publication.desired_version == 0, ~terminal),
+                    and_(publication.desired_state == 'queued', EvaluationJob.status.in_(['RUNNING', 'RETRY'])),
+                    and_(publication.desired_state.in_(['queued', 'in_progress']), terminal),
+                )).order_by(EvaluationJob.created_at).limit(200)))
+            for job in jobs:
+                evaluation_id = (EvaluationResult.model_validate_json(job.result_json).evaluation_id
+                                 if job.result_json and job.stage == 'EVALUATED' and
+                                 job.status not in {'QUEUED', 'RETRY', 'RUNNING'} else None)
+                lifecycle_intent(session, job, self.clock(), evaluation_id=evaluation_id)
 
     @staticmethod
     def _fence_expired(session, job, now):

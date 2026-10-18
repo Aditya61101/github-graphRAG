@@ -66,12 +66,16 @@ def _validate_table(conn, inspector, table, *, legacy_ingestion=False):
     name = table.name
     actual = {c["name"]: c for c in inspector.get_columns(name, schema=SCHEMA)}
     expected_columns = set(table.columns.keys())
+    if name == 'dg_check_publications':
+        from ai_services.decision_guard.orchestration.check_lifecycle import LIFECYCLE_COLUMNS, enabled
+        if legacy_ingestion or not enabled():
+            expected_columns -= LIFECYCLE_COLUMNS - set(actual)
     if legacy_ingestion and name == "ingestion_runs":
         expected_columns -= set(EXTRA_COLUMNS) - set(actual)
     if set(actual) != expected_columns:
         raise PostgreSQLSchemaError(f"PostgreSQL schema is incomplete or incompatible: columns in {name}.")
     for column in table.columns:
-        if column.name not in actual and legacy_ingestion:
+        if column.name not in actual and (legacy_ingestion or column.name not in expected_columns):
             continue
         reflected = actual[column.name]
         actual_type = str(reflected["type"].compile(dialect=conn.dialect)).upper()

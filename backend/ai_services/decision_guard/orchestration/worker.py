@@ -22,18 +22,28 @@ from ai_services.ingestion.pr.models import (
 
 from .packets import DurableEvaluationModel
 from .store import LostLease
+from .check_lifecycle import enabled as lifecycle_enabled, queue_max_age
 from shared.utils.processing import background_processing_enabled
 
 logger = logging.getLogger(__name__)
 
 
 class EvaluationWorker:
-    def __init__(self, store, runtime, *, concurrency=2):
+    def __init__(self, store, runtime, *, concurrency=2, publisher=None, runtime_factory=None):
         self.store, self.runtime = store, runtime
+        if lifecycle_enabled():
+            queue_max_age()
         self.semaphore = asyncio.Semaphore(concurrency)
+        self.publisher, self.runtime_factory = publisher, runtime_factory
 
-    async def _current(self, job, token, event):
-        current = await self.runtime.current_event(event)
+    async def _publish_check(self, job_id):
+        try:
+            await self.publisher.publish(job_id)
+        except Exception as error:  # publication must not change evaluation outcome
+            logger.warning('Check delivery deferred job=%s error_type=%s', job_id, type(error).__name__)
+
+    async def _current(self, job, token, event, runtime=None):
+        current = await (runtime or self.runtime).current_event(event)
         if current is None:
             raise SupersededRevisionError("Pull request is no longer open")
         if current.revision_key != event.revision_key:
@@ -63,13 +73,19 @@ class EvaluationWorker:
             )
 
     async def _execute(self, job, token):
+        if self.runtime_factory is not None:
+            async with self.runtime_factory() as runtime:
+                return await self._execute_runtime(job, token, runtime)
+        return await self._execute_runtime(job, token, self.runtime)
+
+    async def _execute_runtime(self, job, token, runtime):
         event = PullRequestEvent.model_validate_json(job.event_json)
-        await self._current(job, token, event)
+        await self._current(job, token, event, runtime)
         # A durable final-stage checkpoint needs no checkout or model execution.
         if job.result_json and job.stage == "EVALUATED":
             result = EvaluationResult.model_validate_json(job.result_json)
         else:
-            async with self.runtime.open(job, event) as pipeline:
+            async with runtime.open(job, event) as pipeline:
                 if job.changes_json:
                     changes = PullRequestChangeSet.model_validate_json(job.changes_json)
                 else:
@@ -97,7 +113,7 @@ class EvaluationWorker:
                     )
                 settings = EvaluationSettings.model_validate_json(job.settings_json)
                 model = DurableEvaluationModel(
-                    self.runtime.model,
+                    runtime.model,
                     self.store,
                     job.id,
                     token,
@@ -112,7 +128,7 @@ class EvaluationWorker:
                 )
         # Remote freshness and installation authorization are checked again after
         # the expensive work. The DB pointer update is fenced in one transaction.
-        await self._current(job, token, event)
+        await self._current(job, token, event, runtime)
         self.store.finish(job.id, token, result)
 
     async def run_job(self, job_id):
@@ -123,6 +139,8 @@ class EvaluationWorker:
             if token is None:
                 return
             job = self.store.get(job_id)
+            publication = (asyncio.create_task(self._publish_check(job_id))
+                           if lifecycle_enabled() and self.publisher is not None else None)
             execution = asyncio.create_task(self._execute(job, token))
             heartbeat = asyncio.create_task(self._heartbeat(job_id, token, execution))
             try:
@@ -164,6 +182,15 @@ class EvaluationWorker:
                     code,
                 )
             finally:
+                if publication is not None:
+                    if not publication.done():
+                        publication.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await publication
                 heartbeat.cancel()
                 with suppress(asyncio.CancelledError):
                     await heartbeat
+            if lifecycle_enabled() and self.publisher is not None:
+                # Result/failure intent may have advanced while progress HTTP was
+                # in flight; use the same outbox/identity, never a second Check.
+                await self._publish_check(job_id)

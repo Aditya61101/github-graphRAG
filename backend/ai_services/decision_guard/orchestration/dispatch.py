@@ -8,6 +8,7 @@ from typing import Protocol
 
 from ai_services.decision_guard.evaluation.models import EvaluationSettings
 from shared.utils.processing import background_processing_enabled as _processing_enabled
+from .check_lifecycle import enabled as lifecycle_enabled, queue_max_age
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,8 @@ class EvaluationOrchestrator:
         processing_enabled=None,
     ):
         self.store, self.worker = store, worker
+        if lifecycle_enabled():
+            queue_max_age()
         self.processing_enabled = processing_enabled or _processing_enabled
         self.publisher = publisher
         self.lifecycle_github = lifecycle_github
@@ -136,18 +139,32 @@ class EvaluationOrchestrator:
         self.settings_factory = settings_factory
         self.tasks = {}
         self.dispatcher = dispatcher or LocalDispatcher(worker, tasks=self.tasks)
+        if worker is not None and publisher is not None:
+            worker.publisher = publisher
 
     async def accept(self, repository_id, event, background_tasks):
         if not self.processing_enabled():
             raise RuntimeError("PR evaluation processing is disabled")
         settings = self.settings_factory() if self.settings_factory else self.settings
         job_id = self.store.enqueue(repository_id, event, settings)
-        if isinstance(self.dispatcher, LocalDispatcher):
+        if lifecycle_enabled() and self.publisher is not None:
+            background_tasks.add_task(self._accepted_with_check, job_id)
+        elif isinstance(self.dispatcher, LocalDispatcher):
             await LocalDispatcher(self.worker, background_tasks).dispatch(job_id)
         else:
             # Cloud API latency must not delay the persisted webhook response.
             background_tasks.add_task(self._dispatch_persisted, job_id)
         return job_id
+
+    async def _accepted_with_check(self, job_id):
+        # GitHub must not gate dispatch (and neither result may cancel the other).
+        launch = (self.worker.run_job(job_id) if isinstance(self.dispatcher, LocalDispatcher)
+                  else self._dispatch_persisted(job_id))
+        results = await asyncio.gather(self.publisher.publish(job_id), launch,
+                                       return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning('Accepted evaluation recovery pending error_type=%s', type(result).__name__)
 
     async def _dispatch_persisted(self, job_id):
         if not self.processing_enabled():
@@ -166,6 +183,12 @@ class EvaluationOrchestrator:
     async def reconcile(self):
         if not self.processing_enabled():
             return
+        jobs_due = None
+        if lifecycle_enabled():
+            # Expire abandoned jobs BEFORE publishing; compatibility workers may
+            # also have changed a job without emitting a lifecycle intent.
+            jobs_due = self.store.due()
+            self.store.reconcile_check_lifecycle()
         if self.lifecycle_github is not None:
             from .projections import synchronize_due
 
@@ -184,7 +207,7 @@ class EvaluationOrchestrator:
                     "Check publication recovery unavailable error_type=%s",
                     type(error).__name__,
                 )
-        for job_id in self.store.due():
+        for job_id in self.store.due() if jobs_due is None else jobs_due:
             try:
                 await self.dispatcher.dispatch(job_id)
                 self.store.dispatched(job_id)

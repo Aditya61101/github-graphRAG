@@ -38,6 +38,7 @@ def pg(monkeypatch):
         for f in tables[name].foreign_key_constraints]
     monkeypatch.setattr(schema, "inspect", lambda conn: inspector)
     monkeypatch.setattr('ai_services.ingestion.persistence.migrate_pr_orchestration.inspect', lambda conn: inspector)
+    monkeypatch.setattr('ai_services.ingestion.persistence.migrate_frontend_checks.inspect', lambda conn: inspector)
     conn = MagicMock()
     conn.dialect = postgresql.dialect()
     def execute(statement, *args):
