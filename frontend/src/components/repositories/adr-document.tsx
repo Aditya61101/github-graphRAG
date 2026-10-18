@@ -2,22 +2,28 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { FileText } from "lucide-react";
 import { Dialog } from "@base-ui/react/dialog";
+import axios from "axios";
 import { knowledgeService } from "@/api/knowledge-service";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { Button } from "@/components/ui/button";
 import type { ADRDocument } from "@/types/knowledge";
+import {
+  readADRState,
+  reconcileADRDocuments,
+  recordADRDeletion,
+} from "@/lib/adr-reconciliation";
 
 export function ADRDocumentEntry({
   document,
   repositoryId,
   scope,
-  canManage = false,
+  canDelete = false,
   onDeleted,
 }: {
   document: ADRDocument;
   repositoryId: string;
   scope: (string | null | undefined)[];
-  canManage?: boolean;
+  canDelete?: boolean;
   onDeleted?: (name: string) => void;
 }) {
   const client = useQueryClient();
@@ -28,45 +34,43 @@ export function ADRDocumentEntry({
   const [error, setError] = useState<string | null>(null);
   const [checked, setChecked] = useState<string | null>(null);
   const remove = async () => {
-    if (!canManage || request.current) return;
+    if (!canDelete || request.current) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy("delete");
     setError(null);
+    const started = readADRState(client, scope);
     try {
       await knowledgeService.deleteDocument(
         repositoryId,
         document.id,
         controller.signal
       );
-      if (controller.signal.aborted) return;
-      await client.cancelQueries({ queryKey: ["adr-documents", ...scope] });
-      // Invalidate derived caches before unmounting the row. They must not show
-      // the deleted source while the backend's cleanup/read barrier is active.
-      for (const key of [
-        "architectural-knowledge",
-        "architectural-knowledge-detail",
-        "repository-overview",
-        "repository-graph",
-      ]) {
-        client.removeQueries({ queryKey: [key, ...scope] });
-      }
-      onDeleted?.(document.source_name);
-      client.setQueryData<ADRDocument[]>(
-        ["adr-documents", ...scope],
-        (current) => current?.filter((item) => item.id !== document.id)
-      );
+      if (!controller.signal.aborted) onDeleted?.(document.source_name);
+      recordADRDeletion(client, scope, document, true, started);
     } catch (failure) {
       if (!controller.signal.aborted) {
         setConfirming(false);
+        const ambiguous =
+          !axios.isAxiosError(failure) ||
+          !failure.response ||
+          failure.response.status >= 500;
+        if (ambiguous) {
+          // A lost response can follow a committed delete. Hide potentially
+          // obsolete evidence until the layout verifies repository readiness.
+          recordADRDeletion(client, scope, document, false, started);
+        }
         setError(
           getApiErrorMessage(
             failure,
-            "Could not delete this ADR. Please try again."
+            "Deletion could not be confirmed. Refresh documents before retrying; the server may already have saved the deletion."
           )
         );
       }
     } finally {
+      if (controller.signal.aborted && !readADRState(client, scope)?.cleanup) {
+        recordADRDeletion(client, scope, document, false, started);
+      }
       if (!controller.signal.aborted) {
         setBusy(null);
         request.current = null;
@@ -78,6 +82,7 @@ export function ADRDocumentEntry({
     if (request.current) return;
     const controller = new AbortController();
     request.current = controller;
+    const started = readADRState(client, scope);
     setBusy(action);
     setError(null);
     try {
@@ -94,34 +99,28 @@ export function ADRDocumentEntry({
         throw new Error("Invalid ADR status response.");
       await client.cancelQueries({ queryKey: ["adr-documents", ...scope] });
       if (controller.signal.aborted) return;
+      const entries = reconcileADRDocuments(
+        client,
+        scope,
+        [
+          {
+            ...document,
+            status: status.status,
+            updated_at: status.updated_at,
+            error: status.error,
+          },
+        ],
+        started
+      );
+      const latest = entries.find((item) => item.id === document.id);
       client.setQueryData<ADRDocument[]>(
         ["adr-documents", ...scope],
         (current) =>
           current?.map((item) =>
-            item.id === status.adr_id
-              ? {
-                  ...item,
-                  status: status.status,
-                  updated_at: status.updated_at,
-                  error: status.error,
-                }
-              : item
+            item.id === status.adr_id && latest ? latest : item
           )
       );
       setChecked(new Date().toLocaleTimeString());
-      if (status.status === "COMPLETED") {
-        await Promise.all(
-          [
-            "adr-documents",
-            "architectural-knowledge",
-            "architectural-knowledge-detail",
-            "repository-overview",
-            "repository-graph",
-          ].map((key) =>
-            client.invalidateQueries({ queryKey: [key, ...scope] })
-          )
-        );
-      }
     } catch (failure) {
       if (!controller.signal.aborted)
         setError(
@@ -173,13 +172,14 @@ export function ADRDocumentEntry({
         <p className="text-sm text-destructive">{document.error}</p>
       )}
       <div className="flex gap-2">
-        {canManage && (
+        {canDelete && (
           <>
             <Button
               ref={deleteTrigger}
               variant="destructive"
               size="sm"
               disabled={busy !== null}
+              aria-busy={busy !== null}
               aria-haspopup="dialog"
               aria-expanded={confirming}
               onClick={() => setConfirming(true)}
@@ -231,15 +231,17 @@ export function ADRDocumentEntry({
           variant="outline"
           size="sm"
           disabled={busy !== null}
+          aria-busy={busy !== null}
           onClick={() => void act("check")}
         >
-          {busy === "check" ? "Checking..." : "Check Status"}
+          {busy === "check" ? "Checking status…" : "Check Status"}
         </Button>
         {document.status === "FAILED" && (
           <Button
             variant="outline"
             size="sm"
             disabled={busy !== null}
+            aria-busy={busy !== null}
             onClick={() => void act("retry")}
           >
             {busy === "retry" ? "Retrying..." : "Retry"}

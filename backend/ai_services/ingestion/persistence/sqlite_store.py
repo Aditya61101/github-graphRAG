@@ -457,6 +457,31 @@ class SqliteApplicationStore:
             stmt = stmt.order_by(RepositoryModel.full_name)
             return list(session.scalars(stmt).all())
 
+    def repository_monitoring_bindings(self, items: list[dict]) -> dict[str, list]:
+        """Minimal unscoped ownership lookup; never load connection credentials.
+
+        Include all identifier aliases and all owners, just like get_repository.
+        Chunk parameters for large installations and SQLite's bind limit.
+        """
+        identifiers = sorted({value for item in items
+                              for value in (str(item['id']), item['full_name'])})
+        bindings = {identifier: [] for identifier in identifiers}
+        with self.session_factory() as session:
+            for offset in range(0, len(identifiers), 200):
+                chunk = identifiers[offset:offset + 200]
+                chunk_set = set(chunk)
+                rows = session.execute(select(
+                    RepositoryModel.id, RepositoryModel.github_repository_id,
+                    RepositoryModel.full_name, RepositoryModel.user_id,
+                    RepositoryModel.installation_id, RepositoryModel.status,
+                ).where(or_(RepositoryModel.id.in_(chunk),
+                            RepositoryModel.github_repository_id.in_(chunk),
+                            RepositoryModel.full_name.in_(chunk)))).all()
+                for row in rows:
+                    for identifier in {row.id, row.github_repository_id, row.full_name} & chunk_set:
+                        bindings[identifier].append(row)
+        return bindings
+
     def record_ingestion_start(
         self,
         repository_id: str,

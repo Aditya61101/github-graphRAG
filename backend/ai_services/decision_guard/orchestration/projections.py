@@ -520,9 +520,14 @@ class RepositoryReadModel:
             )
             recent = list(
                 session.execute(
-                    select(EvaluationJob, EvaluationProjection)
+                    select(EvaluationJob, EvaluationProjection, CheckPublication, PullRequestState)
                     .options(*LIGHT_JOBS)
                     .join(EvaluationProjection)
+                    .outerjoin(CheckPublication, CheckPublication.job_id == EvaluationJob.id)
+                    .outerjoin(PullRequestState, and_(
+                        PullRequestState.repository_id == EvaluationJob.repository_id,
+                        PullRequestState.pr_number == EvaluationJob.pr_number,
+                    ))
                     .where(EvaluationJob.repository_id == repository_id)
                     .order_by(
                         EvaluationProjection.evaluated_at.desc(), EvaluationJob.id
@@ -559,16 +564,8 @@ class RepositoryReadModel:
                 "recent": [
                     {
                         "pr_number": j.pr_number,
-                        **evaluation_data(j, p, session.get(CheckPublication, j.id)),
-                        "state": (
-                            s.state
-                            if (
-                                s := session.get(
-                                    PullRequestState, (repository_id, j.pr_number)
-                                )
-                            )
-                            else "unknown"
-                        ),
+                        **evaluation_data(j, p, publication),
+                        "state": s.state if s else "unknown",
                         "freshness": "CURRENT_OBSERVED"
                         if s
                         and s.freshness == "OBSERVED"
@@ -579,6 +576,6 @@ class RepositoryReadModel:
                         "title": s.title if s else json.loads(j.event_json or '{}').get('title'),
                         "observed_at": s.observed_at if s else None,
                     }
-                    for j, p in recent
+                    for j, p, publication, s in recent
                 ],
             }

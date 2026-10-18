@@ -1,3 +1,4 @@
+import { ContentLoading } from "@/components/core/query-feedback";
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChatPanel } from "@/components/explore/chat-panel";
@@ -39,6 +40,7 @@ function ScopedExplorer({
   const [context, setContext] = useState<AnswerContext | null>(null);
   const container = useRef<HTMLDivElement>(null);
   const graph = useQuery({
+    enabled: !isMobile || tab === "graph",
     queryKey: ["repository-graph", userId, token, repositoryId],
     queryFn: ({ signal }) => exploreService.graph(repositoryId, signal),
     retry: false,
@@ -176,13 +178,7 @@ function ScopedExplorer({
               </Button>
             </section>
           ) : graph.isPending ? (
-            <section
-              role="status"
-              aria-busy="true"
-              className="h-full rounded-xl border p-5"
-            >
-              Loading repository graph...
-            </section>
+            <ContentLoading label="Loading repository graph..." />
           ) : !graph.data.nodes.length ? (
             <section className="h-full space-y-3 rounded-xl border p-5">
               <h2 className="font-semibold">No graph entities yet</h2>

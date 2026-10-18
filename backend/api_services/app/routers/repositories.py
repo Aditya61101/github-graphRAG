@@ -47,14 +47,13 @@ from api_services.app.models.repository import (
 from api_services.app.utils.github_app_access import (
     authorize_repository,
     authorize_repository_read,
+    authorized_overview,
     get_github_app,
     query_authorized,
 )
 from api_services.app.utils.jwt_utils import get_current_user
 from api_services.app.utils.processing import require_processing_enabled
 from api_services.app.utils.query_response_mapper import build_api_response
-
-from ai_services.ingestion.readiness import guarded_route
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -136,6 +135,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
     # Prefer the existing owned binding if multiple installations grant one repository.
     accessible.sort(key=lambda item: 0 if tracked.get(str(item['id'])) and
                     tracked[str(item['id'])].installation_id == item['installation_id'] else 1)
+    bindings = resource(request, 'sqlite_store').repository_monitoring_bindings(accessible)
     output, seen = [], set()
     for item in accessible:
         rid = str(item['id'])
@@ -145,7 +145,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
         local = tracked.get(rid)
         output.append(AvailableRepositoryResponse(
             id=local.id if local else None, github_repository_id=rid,
-            monitoring=app_service.monitoring_capabilities(current_user.id, item),
+            monitoring=app_service.monitoring_capabilities(current_user.id, item, bindings=bindings),
             installation_id=item['installation_id'], owner=item['owner']['login'], name=item['name'],
             full_name=item['full_name'], repository_url=item['html_url'],
             default_branch=item.get('default_branch') or 'main',
@@ -158,10 +158,12 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
 
 
 @router.get('/{repo_id}/overview', response_model=RepositoryOverviewResponse)
-@guarded_route
+@authorized_overview
 async def get_repository_overview(repo_id: str, request: Request,
                                  current_user: UserModel = Depends(get_current_user)):
-    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    scope = getattr(request.state, 'overview_read_scope', None)
+    repo = (scope.repository if scope is not None else
+            await authorize_repository_read(request, current_user.id, repo_id))
     # This endpoint accepts only canonical tracked IDs, never client graph scopes.
     if repo.id != repo_id:
         raise HTTPException(400, 'A canonical tracked repository ID is required')
@@ -177,8 +179,8 @@ async def get_repository_overview(repo_id: str, request: Request,
             raise HTTPException(exc.status_code, str(exc)) from None
     # Settings remains a placeholder. Reuse the existing verified admin policy;
     # unknown permissions must not make read-only Overview unavailable.
-    can_view_settings = False
-    if repo.user_id == current_user.id:
+    can_view_settings = scope.can_view_settings if scope is not None else False
+    if scope is None and repo.user_id == current_user.id:
         try:
             await get_github_app(request).authorize_tracked(current_user.id, repo.id, require_admin=True)
             can_view_settings = True

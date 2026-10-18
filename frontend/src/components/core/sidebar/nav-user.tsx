@@ -78,12 +78,10 @@ export function NavUser() {
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
-                <Link to="/settings">
-                  <DropdownMenuItem>
-                    <SettingsIcon />
-                    Settings
-                  </DropdownMenuItem>
-                </Link>
+                <DropdownMenuItem render={<Link to="/settings" />}>
+                  <SettingsIcon />
+                  My Profile
+                </DropdownMenuItem>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleLogout}>

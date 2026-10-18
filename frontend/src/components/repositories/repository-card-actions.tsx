@@ -5,6 +5,7 @@ import {
   type QueryKey,
 } from "@tanstack/react-query";
 import { repositoryService } from "@/api/repository-service";
+import { refreshRepositoryDiscovery } from "@/lib/repository-discovery";
 import { RepositoryCard } from "./repository-card";
 import {
   getMonitoringActionError,
@@ -37,13 +38,6 @@ export function RepositoryCardActions({ repository, queryKey }: Props) {
       setNotice((previous) => ({ error: previous.error }));
     }
   }, [lifecycle]);
-  const update = (current: Repository) => {
-    queryClient.setQueryData<Repository[]>(queryKey, (previous) =>
-      previous?.map((item) =>
-        item.githubRepositoryId === current.githubRepositoryId ? current : item
-      )
-    );
-  };
   const operation = useMutation({
     mutationFn: async (kind: "index" | "status") => {
       const controller = new AbortController();
@@ -70,12 +64,19 @@ export function RepositoryCardActions({ repository, queryKey }: Props) {
                 : undefined,
           });
         }
-        const current = await repositoryService.getRepositoryStatus(
-          repository,
-          controller.signal
+        const repositories = await refreshRepositoryDiscovery(
+          queryClient,
+          queryKey,
+          kind === "index"
         );
         if (controller.signal.aborted) return;
-        update(current);
+        const current = repositories.find(
+          (item) => item.githubRepositoryId === repository.githubRepositoryId
+        );
+        if (!current)
+          throw new Error(
+            "Repository access is no longer available. Refresh repositories or check GitHub access."
+          );
         const state = getRepositoryState(current);
         setAccepted((previous) =>
           state === "available" || state === "restricted" || state === "unknown"

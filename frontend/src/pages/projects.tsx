@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
+import axios from "axios";
 import {
   GitForkIcon,
   Loader,
@@ -9,7 +10,10 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { useGitHubAuth } from "@/hooks/use-github-auth";
-import { repositoryService } from "@/api/repository-service";
+import {
+  repositoryDiscoveryOptions,
+  refreshRepositoryDiscovery,
+} from "@/lib/repository-discovery";
 import { RepositoryHeader } from "@/components/repositories/repository-header";
 import { RepositoryCardActions } from "@/components/repositories/repository-card-actions";
 import { EmptyState } from "@/components/core/feedback/empty-state";
@@ -30,29 +34,38 @@ import {
 } from "@/lib/repository-dashboard";
 
 export default function ProjectsPage() {
+  const queryClient = useQueryClient();
   const github = useGitHubAuth();
   const { token, user, status } = useAuth();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RepositoryFilter>("all");
+  const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const queryKey = ["repositories", user?.id, token];
   const discovery = useQuery({
-    queryKey,
-    queryFn: ({ signal }) => repositoryService.getRepositories(signal),
+    ...repositoryDiscoveryOptions(queryKey),
     enabled: Boolean(user && token),
-    retry: false,
-    staleTime: 0,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
   });
   const repositories = uniqueRepositories(discovery.data ?? []);
   const visible = filterRepositories(repositories, search, filter);
-  const failure = discovery.error ? getOnboardingError(discovery.error) : null;
+  // A card's transient status failure keeps its last verified row and scoped
+  // notice. Explicit dashboard refresh failures and access denials still hide
+  // stale access-sensitive cards through the existing recovery screen.
+  const transient =
+    axios.isAxiosError(discovery.error) &&
+    (!discovery.error.response ||
+      discovery.error.response.status >= 500 ||
+      discovery.error.response.status === 429);
+  const blockingError =
+    refreshFailure ?? (discovery.data && transient ? null : discovery.error);
+  const failure = blockingError ? getOnboardingError(blockingError) : null;
   const reconnect =
     status?.reconnect_required ||
     failure?.outcome === "reauthorization_required" ||
     needsGitHubReconnect(discovery.error);
   const refresh = () => {
-    void discovery.refetch();
+    void refreshRepositoryDiscovery(queryClient, queryKey)
+      .then(() => setRefreshFailure(null))
+      .catch(setRefreshFailure);
   };
   const connectButton = (
     <Button nativeButton={false} render={<Link to="/install" />}>

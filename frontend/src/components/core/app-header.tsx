@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { Link } from "react-router";
 
 import {
   Breadcrumb,
@@ -32,10 +33,10 @@ export function AppHeader({ crumbs }: AppHeaderProps) {
             {crumbs.map((crumb, index) => {
               const isLast = index === crumbs.length - 1;
               return (
-                <Fragment key={crumb.pathname}>
+                <Fragment key={`${crumb.pathname}:${crumb.label}:${index}`}>
                   <BreadcrumbItem className="hidden md:block">
                     {!isLast ? (
-                      <BreadcrumbLink href={crumb.pathname}>
+                      <BreadcrumbLink render={<Link to={crumb.pathname} />}>
                         {crumb.label}
                       </BreadcrumbLink>
                     ) : (

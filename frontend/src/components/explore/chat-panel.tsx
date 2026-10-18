@@ -61,6 +61,7 @@ export function ChatPanel({
       current ? fn(current) : current
     );
   const switchConversation = (id: string) => {
+    if (denied || locked.current) return;
     update((data) => ({ ...data, activeId: id }));
     setInput("");
     setError(null);
@@ -68,6 +69,7 @@ export function ChatPanel({
     onConversationChange();
   };
   const startConversation = () => {
+    if (denied || locked.current) return;
     const fresh = createConversationHistory();
     update((data) => ({
       activeId: fresh.activeId,
@@ -81,7 +83,8 @@ export function ChatPanel({
   const send = async (retry = false) => {
     const last = conversation.messages.at(-1);
     const query = retry && last?.role === "user" ? last.content : input.trim();
-    if (!query || locked.current || (!retry && last?.role === "user")) return;
+    if (denied || !query || locked.current || (!retry && last?.role === "user"))
+      return;
     locked.current = true;
     setPending(true);
     setError(null);
@@ -230,8 +233,11 @@ export function ChatPanel({
             aria-busy="true"
             className="flex items-center gap-2 text-sm text-muted-foreground"
           >
-            <Loader className="size-4 animate-spin" aria-hidden="true" />
-            Finding an answer...
+            <Loader
+              className="size-4 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+            Generating answer…
           </p>
         )}
         {error && (
@@ -244,7 +250,7 @@ export function ChatPanel({
             <p>{error}</p>
           </div>
         )}
-        {unanswered && (
+        {unanswered && !denied && (
           <Button variant="outline" size="sm" onClick={() => void send(true)}>
             Retry last question
           </Button>

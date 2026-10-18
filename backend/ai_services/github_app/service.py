@@ -4,6 +4,8 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -61,6 +63,37 @@ def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, date
         raise GitHubAppError(502, 'Invalid GitHub OAuth credential response') from None
 
 
+def _binding_identity(repo):
+    if repo is None:
+        return None
+    return (repo.id, repo.github_repository_id, repo.user_id, repo.github_connection_id,
+            repo.installation_id, repo.full_name, repo.owner, repo.name, repo.access_state)
+
+
+@dataclass
+class _OverviewReadScope:
+    service: Any
+    user_id: str
+    repository: Any
+    connection_identity: tuple
+    can_view_settings: bool
+    active: bool = True
+
+    async def revalidate(self):
+        """Fresh provider and local checks before the response leaves its barrier."""
+        if _binding_identity(self.service.store.get_repository(self.repository.id)) != _binding_identity(self.repository):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        repo, selected = await self.service._verify_overview_read(self.user_id, self.repository.id)
+        connection = self.service._overview_connection_identity(self.user_id)
+        # A provider await may race with a local rebind, transfer or disconnect.
+        fresh = self.service.store.get_repository(self.repository.id)
+        if (connection != self.connection_identity or
+                _binding_identity(repo) != _binding_identity(self.repository) or
+                _binding_identity(fresh) != _binding_identity(self.repository)):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        self.can_view_settings = self.service._overview_can_view_settings(self.user_id, selected)
+
+
 class GitHubAppService:
     """User access and installation indexing are distinct; rotations are shared."""
     def __init__(self, store, settings: GitHubAppSettings, client: httpx.AsyncClient):
@@ -73,6 +106,7 @@ class GitHubAppService:
         # outage must not make the next request spend the old refresh token again.
         self.pending_rotations: dict[str, tuple] = {}
         self.auth_states = AuthStateStore(store.session_factory, settings.encryption_key)
+        self._overview_scope = ContextVar('overview_read_scope', default=None)
 
     def app_jwt(self) -> str:
         now = int(time.time())
@@ -401,14 +435,21 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository is not currently granted to this user and App')
         return matches[0]
 
-    def monitoring_capabilities(self, user_id: str, item: dict) -> dict:
+    def monitoring_capabilities(self, user_id: str, item: dict, *, bindings=None) -> dict:
         """Use user-token permissions; never infer admin from installation inventory."""
         permissions = item.get('permissions')
         admin = permissions.get('admin') if isinstance(permissions, dict) else None
         admin = admin if type(admin) is bool else None
-        tracked = self.store.get_repository(str(item['id']))
-        named = self.store.get_repository(item['full_name'])
-        records = [record for record in (tracked, named) if record]
+        if bindings is None:
+            tracked = self.store.get_repository(str(item['id']))
+            named = self.store.get_repository(item['full_name'])
+            records = [record for record in (tracked, named) if record]
+        else:
+            by_id = bindings.get(str(item['id']), [])
+            by_name = bindings.get(item['full_name'], [])
+            tracked = by_id[0] if by_id else None
+            # Check every alias collision, including a different user's binding.
+            records = [*by_id, *by_name]
         if any(record.user_id and record.user_id != user_id for record in records):
             reason, allowed = 'owned_by_another_user', False
         elif admin is None:
@@ -464,6 +505,10 @@ class GitHubAppService:
         return self.store.get_repository(repo.id)
 
     async def authorize_tracked(self, user_id: str, identifier: str, require_admin: bool = False):
+        repo, _ = await self._authorize_tracked(user_id, identifier, require_admin)
+        return repo
+
+    async def _authorize_tracked(self, user_id: str, identifier: str, require_admin: bool = False):
         repo = self.store.get_repository(identifier)
         if not repo:
             raise GitHubAppError(404, 'Repository not found')
@@ -476,7 +521,7 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository identity changed')
         if require_admin:
             self.require_monitoring_admin(user_id, selected)
-        return self.store.get_repository(repo.id)
+        return self.store.get_repository(repo.id), selected
 
     async def indexing_credential(self, repository_id: str, installation_id: str):
         repo = self.store.get_repository(repository_id)
@@ -509,6 +554,13 @@ class GitHubAppService:
 
     async def authorize_repository_read(self, user_id: str, identifier: str):
         """Shared knowledge reads only; never select, bind, or transfer ownership."""
+        scope = self._overview_scope.get()
+        if (scope is not None and scope.active and scope.user_id == user_id and
+                scope.repository.id == identifier):
+            return scope.repository
+        return await self._authorize_repository_read(user_id, identifier)
+
+    async def _authorize_repository_read(self, user_id: str, identifier: str):
         repo = self.store.get_repository(identifier)
         if not repo:
             raise GitHubAppError(404, 'Repository not found')
@@ -551,6 +603,65 @@ class GitHubAppService:
                 fresh.access_state != 'ACTIVE'):
             raise GitHubAppError(403, 'Repository access changed during authorization')
         return fresh
+
+    def _overview_can_view_settings(self, user_id, selected):
+        if selected is None:
+            return False
+        # Reuse the final discovery's user permissions, retaining the complete
+        # established local ownership/admin policy without another discovery.
+        try:
+            self.require_monitoring_admin(user_id, selected)
+        except GitHubAppError as exc:
+            if exc.status_code in (403, 503):
+                return False
+            raise
+        return True
+
+    def _overview_connection_identity(self, user_id):
+        connection = self.store.get_user_github_connection(user_id)
+        if not connection or connection.access_status != 'ACTIVE':
+            raise GitHubAppError(401, 'GitHub reconnect required', reconnect_required=True)
+        # Legitimate token rotations may occur; the final verifier uses the new
+        # credentials. Identity replacement/disconnect must invalidate the scope.
+        return connection.id, connection.github_user_id
+
+    async def _verify_overview_read(self, user_id, identifier):
+        before = self.store.get_repository(identifier)
+        if before is None:
+            raise GitHubAppError(404, 'Repository not found')
+        if before.id != identifier:
+            raise GitHubAppError(400, 'A canonical tracked repository ID is required')
+        if before.user_id == user_id:
+            repo, selected = await self._authorize_tracked(user_id, identifier)
+        else:
+            repo, selected = await self._authorize_repository_read(user_id, identifier), None
+        # Live reconciliation may legitimately restore a previously removed
+        # access_state. Ownership/identity changes must never be accepted.
+        if (repo is None or repo.access_state != 'ACTIVE' or
+                _binding_identity(repo)[:-1] != _binding_identity(before)[:-1]):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        return repo, selected
+
+    @asynccontextmanager
+    async def overview_read_scope(self, user_id, identifier):
+        """Overview-only internal reuse; mutation authorization never consults it.
+
+        Caller must revalidate within its response-wide graph-readiness barrier.
+        No scope survives request exit, including inherited child-task contexts.
+        """
+        identity = self._overview_connection_identity(user_id)
+        repo, _ = await self._verify_overview_read(user_id, identifier)
+        if self._overview_connection_identity(user_id) != identity:
+            raise GitHubAppError(403, 'GitHub identity changed during authorization')
+        # Settings are filled from the final live verification, never released
+        # from an earlier permission snapshot.
+        scope = _OverviewReadScope(self, user_id, repo, identity, False)
+        marker = self._overview_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            scope.active = False
+            self._overview_scope.reset(marker)
 
     def bind_conversation(self, user_id: str, repository_id: str, conversation_id: str):
         if len(conversation_id) > 255:

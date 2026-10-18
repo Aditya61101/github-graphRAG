@@ -281,7 +281,7 @@ async function openProfile() {
   await browser.evaluate(
     "document.querySelector('[aria-label=\"Open profile menu\"]').click()"
   );
-  await browser.waitFor(bodyContains("My profile"));
+  await browser.waitFor(bodyContains("My Profile"));
 }
 
 test("multiple installations render unique real repositories and no mock project workspace", async () => {
@@ -553,7 +553,7 @@ test("profile menu navigates to the existing profile page and logout clears repo
   await browser.waitFor(card("101") + " !== null");
   await openProfile();
   await browser.evaluate(
-    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e => e.innerText.trim() === 'My profile').click()"
+    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e => e.innerText.trim() === 'My Profile').click()"
   );
   await browser.waitFor(pathIs("/settings"));
   await browser.waitFor(
@@ -656,7 +656,7 @@ test("repository cards and profile remain usable on mobile in dark mode", async 
   console.log("Dashboard visual checks: " + screenshots);
 });
 
-test("manual status checks update only the selected repository without polling", async () => {
+test("manual status checks update the authoritative collection without polling", async () => {
   fixture.repositories = [
     repository("103", "example-org/worker", "INDEXING", true, "20"),
     repository("109", "example-org/second", "INDEXING", true, "20"),
@@ -682,7 +682,7 @@ test("manual status checks update only the selected repository without polling",
   await browser.evaluate(card("103") + ".querySelector('button').click()");
   await browser.waitFor(card("103") + ".innerText.includes('Monitored')");
   assert.equal(
-    await browser.evaluate(card("109") + ".innerText.includes('Indexing')"),
+    await browser.evaluate(card("109") + ".innerText.includes('Monitored')"),
     true
   );
   assert.equal(
@@ -700,7 +700,7 @@ test("manual status checks update only the selected repository without polling",
     await browser.evaluate(
       "document.querySelectorAll('a[href^=\"/projects/\"]').length"
     ),
-    2
+    3
   );
   assert.equal(
     fixture.calls.some((c) => c.method === "POST"),
@@ -863,7 +863,7 @@ test("concurrent indexing cards have independent loading and remain indexing unt
   );
   assert.equal(
     fixture.calls.filter((c) => c.url === "/repositories").length,
-    count + 2
+    count + 1
   );
   assert.equal(
     await browser.evaluate(

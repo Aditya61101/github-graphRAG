@@ -13,7 +13,7 @@ export const NAV_DATA = {
       icon: BookOpen,
     },
     {
-      title: "Settings",
+      title: "My Profile",
       url: "/settings",
       icon: Settings,
     },
