@@ -1,6 +1,7 @@
 import { apiClient } from "@/lib/api-client";
 import type {
   ADRDocument,
+  ADRStatus,
   ADRUploadResult,
   KnowledgeDetail,
   KnowledgePage,
@@ -8,6 +9,38 @@ import type {
 
 const base = (id: string) => `/repositories/${encodeURIComponent(id)}`;
 export const knowledgeService = {
+  deleteDocument: async (
+    id: string,
+    adrId: string,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    await apiClient.delete(`${base(id)}/adrs/${encodeURIComponent(adrId)}`, {
+      signal,
+    });
+  },
+  status: async (
+    id: string,
+    adrId: string,
+    signal?: AbortSignal
+  ): Promise<ADRStatus> =>
+    (
+      await apiClient.get<ADRStatus>(
+        `${base(id)}/adrs/${encodeURIComponent(adrId)}/status`,
+        { signal }
+      )
+    ).data,
+  retry: async (
+    id: string,
+    adrId: string,
+    signal?: AbortSignal
+  ): Promise<ADRStatus> =>
+    (
+      await apiClient.post<ADRStatus>(
+        `${base(id)}/adrs/${encodeURIComponent(adrId)}/retry`,
+        undefined,
+        { signal }
+      )
+    ).data,
   list: async (
     id: string,
     search: string,

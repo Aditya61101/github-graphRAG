@@ -12,6 +12,7 @@ from ai_services.ingestion.sources.github import GitHubRepositorySource
 from .git_reader import PullRequestGitReader
 from .models import PullRequestChangeSet, PullRequestEvent, PullRequestIngestionError, SupersededRevisionError
 from .settings import PullRequestSettings
+from shared.utils.processing import require_background_processing
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class PullRequestIngestionService:
         temporary.replace(path)
 
     async def ingest_pull_request(self, event: PullRequestEvent) -> PullRequestChangeSet | None:
+        require_background_processing()
         # Backend use outside the webhook still receives the same typed contract.
         repo = self._tracked(event)
         if not self.store.claim_pr_revision(repo.id, event):

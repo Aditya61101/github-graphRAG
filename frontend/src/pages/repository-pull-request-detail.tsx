@@ -26,6 +26,11 @@ import {
 import type { ReviewTab } from "@/components/repositories/pr-review-evidence";
 import { Button } from "@/components/ui/button";
 import {
+  ContentLoading,
+  RefreshButton,
+} from "@/components/core/query-feedback";
+import { isAuthoritativeAccessError } from "@/lib/api-error";
+import {
   checkUrl,
   dateLabel,
   findingGroups,
@@ -84,16 +89,23 @@ function PullRequestDetail({ id, number }: { id: string; number: number }) {
     refetchOnWindowFocus: false,
   });
   if (query.isPending)
+    return <ContentLoading label="Loading pull request analysis..." cards />;
+  if (
+    (query.isError &&
+      (!query.data || isAuthoritativeAccessError(query.error))) ||
+    isAuthoritativeAccessError(historical.error)
+  )
     return (
-      <p role="status" aria-busy="true">
-        Loading pull request analysis...
-      </p>
+      <ReviewFailure
+        error={query.error ?? historical.error}
+        retry={() =>
+          void (
+            isAuthoritativeAccessError(historical.error) ? historical : query
+          ).refetch({ cancelRefetch: false })
+        }
+      />
     );
-  if (query.isError)
-    return (
-      <ReviewFailure error={query.error} retry={() => void query.refetch()} />
-    );
-  const result = selected ? historical.data : query.data.result;
+  const result = selected ? historical.data : query.data!.result;
   const identityMatches =
     !result ||
     (result.revision.repository_id === id &&
@@ -103,23 +115,38 @@ function PullRequestDetail({ id, number }: { id: string; number: number }) {
           result.revision.head_sha === selected.head_sha &&
           result.revision.revision_key === selected.revision_key)));
   return (
-    <PRReview
-      detail={query.data}
-      result={identityMatches ? (result ?? null) : null}
-      selected={selected}
-      select={setSelected}
-      offset={offset}
-      onPage={setOffset}
-      pending={selected !== null && historical.isPending}
-      error={
-        !identityMatches
-          ? new Error("Evaluation revision mismatch")
-          : selected
-            ? historical.error
-            : null
-      }
-      retry={() => void historical.refetch()}
-    />
+    <>
+      <RefreshButton
+        busy={query.isFetching}
+        label="Refresh review"
+        onRefresh={() => {
+          void query.refetch({ cancelRefetch: false });
+        }}
+      />
+      {query.isError && (
+        <p role="alert" className="text-sm text-muted-foreground">
+          Unable to refresh this review. Previously loaded review is shown. Try
+          Refresh review again.
+        </p>
+      )}
+      <PRReview
+        detail={query.data!}
+        result={identityMatches ? (result ?? null) : null}
+        selected={selected}
+        select={setSelected}
+        offset={offset}
+        onPage={setOffset}
+        pending={selected !== null && historical.isPending}
+        error={
+          !identityMatches
+            ? new Error("Evaluation revision mismatch")
+            : selected
+              ? historical.error
+              : null
+        }
+        retry={() => void historical.refetch({ cancelRefetch: false })}
+      />
+    </>
   );
 }
 export function VerdictPanel({
@@ -510,7 +537,7 @@ export function PRReview({
             onPage={onPage}
           />
         ) : pending ? (
-          <p role="status">Loading historical evidence...</p>
+          <ContentLoading label="Loading historical evidence..." cards />
         ) : error ? (
           <ReviewFailure error={error} retry={retry} />
         ) : !result ? (

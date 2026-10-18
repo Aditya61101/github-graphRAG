@@ -45,8 +45,8 @@ class Neo4jRepositoryWriter:
         ]:
             try:
                 self.driver.execute_query(q, database_=self.database)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError("Required repository graph schema initialization failed") from exc
 
         index_options = (
             "{ indexConfig: { "
@@ -64,8 +64,8 @@ class Neo4jRepositoryWriter:
         ]:
             try:
                 self.driver.execute_query(query, database_=self.database)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError("Required repository vector index initialization failed") from exc
 
     def write_source(
         self,
@@ -77,6 +77,8 @@ class Neo4jRepositoryWriter:
         owner: str | None = None,
         name: str | None = None,
     ):
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         chunks = list(chunks)
         for chunk in chunks:
             if chunk.embedding is None:
@@ -138,6 +140,8 @@ class Neo4jRepositoryWriter:
         )
 
     def write_entities(self, entities, repository: str | None = None):
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         payload = []
         for entity in entities:
             if not isinstance(entity.name, str) or not entity.name.strip():
@@ -185,7 +189,16 @@ class Neo4jRepositoryWriter:
             """
             UNWIND $entities AS item
             MERGE (e:Entity {id: item.id})
-            SET e = item.properties
+            WITH e, item, EXISTS {
+                MATCH (:Chunk)-[:MENTIONS]->(e)
+            } AS surviving_support
+            FOREACH (_ IN CASE WHEN surviving_support THEN [] ELSE [1] END |
+                SET e = item.properties
+            )
+            FOREACH (_ IN CASE WHEN surviving_support THEN [1] ELSE [] END |
+                SET e.aliases = reduce(names=coalesce(e.aliases,[]), name IN item.properties.aliases |
+                    CASE WHEN name IN names THEN names ELSE names+[name] END)
+            )
             WITH e, item
             FOREACH (_ IN CASE WHEN $repo IS NOT NULL THEN [1] ELSE [] END |
                 SET e.repository = $repo
@@ -201,6 +214,8 @@ class Neo4jRepositoryWriter:
         )
 
     def write_relationships(self, relationships, repository: str | None = None):
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         relationships = list(relationships)
         if not relationships:
             return
@@ -291,47 +306,82 @@ class Neo4jRepositoryWriter:
 
     def delete_files(self, repository: str, file_paths: list[str]) -> None:
         """Remove stale files, their chunks, and orphan assertions/entities scoped to repository."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not file_paths:
             return
 
         file_keys = [f"{repository}:{path}" for path in file_paths]
 
-        self.driver.execute_query(
-            """
-            UNWIND $file_keys AS f_key
-            MATCH (f:File {key: f_key, repository: $repo})
-            OPTIONAL MATCH (f)-[:HAS_CHUNK]->(ch:Chunk {repository: $repo})
-
-            OPTIONAL MATCH (ch)-[:SUPPORTS]->(a:GraphAssertion {repository: $repo})
-            OPTIONAL MATCH (ch)-[:MENTIONS]->(e:Entity {repository: $repo})
-
-            WITH collect(DISTINCT f) AS files,
-                 collect(DISTINCT ch) AS chunks,
-                 collect(DISTINCT a) AS assertions,
-                 collect(DISTINCT e) AS entities
-
+        self.driver.execute_query("""
+            MATCH (f:File {repository:$repo}) WHERE f.key IN $file_keys
+            OPTIONAL MATCH (f)-[:HAS_CHUNK]->(ch:Chunk {repository:$repo})
+            WHERE NOT ch:ADRChunk AND ch.adr_id IS NULL
+            WITH collect(DISTINCT f) AS files, collect(DISTINCT ch) AS chunks
             FOREACH (c IN chunks | DETACH DELETE c)
-            FOREACH (fl IN files | DETACH DELETE fl)
+            FOREACH (f IN files | DETACH DELETE f)
+            """, file_keys=file_keys, repo=repository, database_=self.database)
+        self.cleanup_unsupported(repository)
 
-            WITH assertions, entities
-            UNWIND assertions AS a
-            WITH a, entities
-            WHERE a IS NOT NULL
-            OPTIONAL MATCH (other_c:Chunk {repository: $repo})-[:SUPPORTS]->(a)
-            WITH a, count(other_c) AS remaining_chunks, entities
-            WHERE remaining_chunks = 0
-            DETACH DELETE a
+    def cleanup_unsupported(self, repository):
+        # Independent queries: an empty assertion set must not suppress entity cleanup.
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
+        for query in [
+            """MATCH (a:GraphAssertion {repository:$repo})
+               WHERE coalesce(a.source_type,'code') <> 'ADR'
+                 AND NOT EXISTS { MATCH (:Chunk)-[:SUPPORTS]->(a) }
+               DETACH DELETE a""",
+            """MATCH (s:Entity {repository:$repo})-[r]->(t:Entity {repository:$repo})
+               WHERE coalesce(r.source_type,'code') <> 'ADR'
+                 AND NOT EXISTS {
+                   MATCH (s)-[:ASSERTS]->(a:GraphAssertion)-[:TARGETS]->(t)
+                   WHERE a.relationshipType=type(r)
+                     AND (a.source_type='ADR' OR EXISTS { MATCH (:Chunk)-[:SUPPORTS]->(a) })
+                 }
+               DELETE r""",
+            """MATCH (e:Entity {repository:$repo})
+               WHERE NOT EXISTS { MATCH (:Chunk)-[:MENTIONS]->(e) }
+                 AND NOT EXISTS {
+                   MATCH (n)-[:AFFECTS|CONSTRAINS]->(e)
+                   WHERE n.repository=$repo
+                 }
+                 AND NOT EXISTS {
+                   MATCH (e)-[:ASSERTS|TARGETS]-(a:GraphAssertion)
+                   WHERE a.source_type='ADR' OR EXISTS { MATCH (:Chunk)-[:SUPPORTS]->(a) }
+                 }
+               DETACH DELETE e""",
+        ]:
+            self.driver.execute_query(query, repo=repository, database_=self.database)
 
-            WITH entities
-            UNWIND entities AS e
-            WITH e
-            WHERE e IS NOT NULL
-            OPTIONAL MATCH (other_c:Chunk {repository: $repo})-[:MENTIONS]->(e)
-            WITH e, count(other_c) AS remaining_chunks
-            WHERE remaining_chunks = 0
-            DETACH DELETE e
-            """,
-            file_keys=file_keys,
-            repo=repository,
-            database_=self.database,
-        )
+    def reconcile_code(self, repository):
+        """Idempotent code-only repair; retain ADR nodes, support and applicability."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
+        self.driver.execute_query("""
+            MATCH (ch:Chunk {repository:$repo})
+            WHERE NOT ch:ADRChunk AND ch.adr_id IS NULL
+            DETACH DELETE ch
+            """, repo=repository, database_=self.database)
+        self.driver.execute_query("MATCH (f:File {repository:$repo}) DETACH DELETE f",
+                                  repo=repository, database_=self.database)
+        self.cleanup_unsupported(repository)
+
+    def validate(self, repository):
+        rows = self.driver.execute_query("""
+            MATCH (a:GraphAssertion {repository:$repo})
+            WHERE coalesce(a.source_type,'code') <> 'ADR'
+              AND (NOT EXISTS { MATCH (:Chunk)-[:SUPPORTS]->(a) }
+                OR NOT EXISTS { MATCH (:Entity)-[:ASSERTS]->(a)-[:TARGETS]->(:Entity) })
+            RETURN count(a) AS invalid
+            """, repo=repository, database_=self.database).records
+        if len(rows) != 1 or rows[0]["invalid"]:
+            raise RuntimeError("Repository graph provenance validation failed")
+        rows = self.driver.execute_query("""
+            MATCH (c:Community {repository:$repo})
+            WHERE c.summary IS NULL OR c.summaryHash IS NULL OR c.contextHash IS NULL
+               OR c.embedding IS NULL OR c.embeddedSummaryHash IS NULL
+            RETURN count(c) AS invalid
+            """, repo=repository, database_=self.database).records
+        if len(rows) != 1 or rows[0]["invalid"]:
+            raise RuntimeError("Repository community validation failed")

@@ -51,14 +51,29 @@ async def drain_thread(function, *args):
 
 
 class DatabaseReadiness:
-    def __init__(self, sessions):
-        self.sessions = sessions
+    def __init__(self, sessions, control=None):
+        self.sessions, self.control = sessions, control
 
     async def snapshot(self, repository_id):
+        if self.control is not None:
+            from ai_services.ingestion.readiness import GraphReadBarrier, GraphUnavailable
+            try:
+                epoch, run_id, token, sha = GraphReadBarrier(self.sessions, self.control).snapshot(repository_id)
+            except GraphUnavailable:
+                raise ContextConstructionError("Repository graph update or repair is in progress") from None
+            with self.sessions() as session:
+                repo = session.get(RepositoryModel, repository_id)
+                return BaselineSnapshot(repository_id=repo.id,
+                    github_repository_id=repo.github_repository_id, tracked_branch=repo.tracked_branch,
+                    indexed_rkg_sha=sha, repository_status="COMPLETED", readiness="READY",
+                    graph_generation=epoch, ingestion_run_id=run_id, unfinished_ingestion=False)
         # Existing ingestion commits INDEXING before graph mutation, and only
         # commits COMPLETED/indexed SHA after graph publication. Failed or
         # abandoned runs remain fail-closed; never infer readiness from SHA alone.
         with self.sessions() as session:
+            from ai_services.ingestion.readiness import pending_adr_deletion
+            if pending_adr_deletion(session, repository_id):
+                raise ContextConstructionError('ADR deletion cleanup is pending')
             repo = session.get(RepositoryModel, repository_id)
             runs = list(
                 session.scalars(
@@ -106,7 +121,10 @@ class ProductionRuntime:
             authority,
             model,
         )
-        self.readiness = DatabaseReadiness(application_store.session_factory)
+        from ai_services.ingestion.graph_control import GraphControl
+        self.readiness = DatabaseReadiness(application_store.session_factory,
+            GraphControl(graph.driver, graph.database)
+            if isinstance(graph, Neo4jArchitectureGraphReader) else None)
 
     async def current_event(self, event):
         repo = self.application_store.get_repository(str(event.github_repository_id))

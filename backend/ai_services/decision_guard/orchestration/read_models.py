@@ -1,6 +1,7 @@
 """Small relational projections; original validated results remain canonical."""
 
 from sqlalchemy import Column, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import deferred
 
 from ai_services.ingestion.persistence.models import Base
 
@@ -58,6 +59,7 @@ class FindingRule(Base):
 
 class CheckPublication(Base):
     __tablename__ = "dg_check_publications"
+    __mapper_args__ = {'eager_defaults': False}
     job_id = Column(
         String(64),
         ForeignKey("pr_evaluation_jobs.id", ondelete="CASCADE"),
@@ -78,6 +80,11 @@ class CheckPublication(Base):
     lease_until = Column(Float)
     # Persisted before POST. An ambiguous POST is reconciled, never blindly repeated.
     create_started_at = Column(Float)
+    # Deferred + server-only defaults keep compatibility-mode reads/inserts
+    # usable before DDL. Enabled publishers explicitly load these fields.
+    desired_state = deferred(Column(String(16), nullable=False, server_default='completed'))
+    desired_version = deferred(Column(Integer, nullable=False, server_default='0'))
+    published_version = deferred(Column(Integer, nullable=False, server_default='0'))
     __table_args__ = (Index("ix_dg_check_due", "status", "next_attempt_at"),)
 
 

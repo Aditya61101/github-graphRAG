@@ -56,6 +56,8 @@ class ADRNeo4jWriter:
 
         Fails explicitly if deletion cannot be completed.
         """
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not self.driver:
             return
 
@@ -84,6 +86,57 @@ class ADRNeo4jWriter:
                 f"Failed to delete stale ADR knowledge for '{adr_id}': {exc}"
             ) from exc
 
+    def delete_adr(self, adr_id: str, repository_id: str) -> None:
+        """Remove document-owned graph/vector records, preserving other owners.
+
+        A fenced transaction keeps cleanup atomic within Neo4j. Ownership is
+        checked through both document links and supporting chunks, not merely
+        the mutable adr_id/source_id property. Chunk/entity embeddings live on
+        these nodes and disappear with them from Neo4j vector indexes.
+        """
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
+        queries = [
+            """// ADR_DELETE_OWNED
+            MATCH (n {repository:$repo})
+            WHERE (n:ADRChunk AND n.adr_id=$adr_id)
+               OR ((n:ArchitecturalDecision OR n:ArchitecturalConstraint) AND n.adr_id=$adr_id)
+               OR (n:GraphAssertion AND n.source_type='ADR' AND n.source_id=$adr_id)
+            OPTIONAL MATCH (owner:ADR {repository:$repo})-[:HAS_CHUNK|DEFINES]->(n)
+            WHERE owner.id <> $adr_id
+            OPTIONAL MATCH (supporter:ADR {repository:$repo})-[:HAS_CHUNK]->(:ADRChunk {repository:$repo})-[:SUPPORTS]->(n)
+            WHERE supporter.id <> $adr_id
+            WITH n, collect(DISTINCT owner.id) + collect(DISTINCT supporter.id) AS owners
+            FOREACH (_ IN CASE WHEN size(owners)>0 AND NOT n:GraphAssertion THEN [1] ELSE [] END |
+                SET n.adr_id=head(owners))
+            FOREACH (_ IN CASE WHEN size(owners)>0 AND n:GraphAssertion THEN [1] ELSE [] END |
+                SET n.source_id=head(owners))
+            FOREACH (_ IN CASE WHEN size(owners)=0 THEN [1] ELSE [] END | DETACH DELETE n)
+            """,
+            """// ADR_DELETE_DOCUMENT
+            MATCH (a:ADR {repository:$repo, id:$adr_id}) DETACH DELETE a
+            """,
+            """// ADR_DELETE_INDEXES
+            MATCH (n:DGRetrievalIndex {repository:$repo})
+            WHERE n.payload_json CONTAINS $adr_id
+            DETACH DELETE n
+            """,
+            """// ADR_DELETE_ORPHANS
+            MATCH (e:Entity {repository:$repo, source:'ADR'})
+            WHERE (e.source_id=$adr_id OR NOT EXISTS {
+                MATCH (owner:ADR {repository:$repo}) WHERE owner.id=e.source_id
+            }) AND NOT EXISTS {
+                MATCH (e)-[r]-() WHERE type(r) <> 'MEMBER_OF'
+            }
+            DETACH DELETE e
+            """,
+        ]
+        with self.driver.session(database=self.database) as session:
+            with session.begin_transaction() as tx:
+                for query in queries:
+                    tx.run(query, repo=repository_id, adr_id=adr_id)
+                tx.commit()
+
     def _run_query_or_tx(self, query: str, tx: Any = None, **params) -> None:
         """Execute query either on an active transaction or directly via execute_query."""
         if tx is not None:
@@ -105,6 +158,8 @@ class ADRNeo4jWriter:
         ],  # source_id, target_id, rel_type, rationale, evidence
     ) -> None:
         """Persist full ADR graph transactionally within the existing Neo4j knowledge graph."""
+        from ai_services.ingestion.graph_control import require_fenced_writer
+        require_fenced_writer(self.driver)
         if not self.driver:
             return
 
@@ -174,7 +229,7 @@ class ADRNeo4jWriter:
             adr.repository_id = $repo,
             adr.title = $title,
             adr.description = $description,
-            adr.status = 'COMPLETED',
+            adr.status = 'GRAPH_PERSISTED',
             adr.source_type = $source_type,
             adr.source_id = $source_id,
             adr.source_name = $source_name,

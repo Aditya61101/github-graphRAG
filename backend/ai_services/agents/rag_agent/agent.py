@@ -38,8 +38,9 @@ class RAGQueryAgent:
         community_retriever: Any,
         chunk_retriever: Any,
         llm: AzureChatOpenAI,
-        reranker: Reranker,
+        reranker: Reranker | None = None,
         retrieval_settings: RetrievalSettings | None = None,
+        barrier=None,
         max_tokens_before_summary: int = 4000,
         messages_to_keep: int = 10,
         tool_context_clear_trigger: int = 8000,
@@ -54,8 +55,10 @@ class RAGQueryAgent:
             entity_retriever=entity_retriever,
             community_retriever=community_retriever,
             chunk_retriever=chunk_retriever,
-            reranker=reranker,
+            # Retain the argument for callers; conversation retrieval is vector-only.
+            reranker=None,
             retrieval_settings=retrieval_settings,
+            barrier=barrier,
         )
 
         self.agent = create_agent(
@@ -90,7 +93,10 @@ class RAGQueryAgent:
     ) -> RAGAgentResult:
         if not repository_id:
             raise ValueError('An authorized repository is required')
-        thread_id = sha256(json.dumps([user_id, repository_id, conversation_id]).encode()).hexdigest()
+        from ai_services.ingestion.readiness import read_epoch
+        epoch = read_epoch.get()
+        # Never reuse checkpointed graph evidence from another published epoch.
+        thread_id = sha256(json.dumps([user_id, repository_id, conversation_id, epoch]).encode()).hexdigest()
         state_input: dict[str, Any] = {
             "messages": [
                 {

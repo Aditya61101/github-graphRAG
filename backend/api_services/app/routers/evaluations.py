@@ -15,6 +15,7 @@ from ai_services.decision_guard.orchestration.projections import RepositoryReadM
 from api_services.app.models.pull_requests import PullRequestDetail, PullRequestPage
 from api_services.app.utils.github_app_access import authorize_repository_read
 from api_services.app.utils.jwt_utils import get_current_user
+from api_services.app.utils.processing import require_processing_enabled
 
 router = APIRouter()
 
@@ -144,6 +145,7 @@ async def continue_run(
     service=Depends(authorized),
     user=Depends(get_current_user),
 ):
+    require_processing_enabled()
     # Continuing evaluation can spend tokens and therefore requires the existing
     # monitoring owner/admin guard, not merely collaborator read permission.
     from ai_services.decision_guard.orchestration.dispatch import LocalDispatcher

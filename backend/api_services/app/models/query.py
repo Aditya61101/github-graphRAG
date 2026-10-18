@@ -12,7 +12,7 @@ class Source(BaseModel):
     file_path: str
     excerpt: str
     score: float | None = None
-    score_type: str | None = Field(default=None, description="reranker_relevance for selected evidence; legacy responses may omit it")
+    score_type: str | None = Field(default=None, description="vector_similarity or reranker_relevance; legacy responses may omit it")
 
 
 class QueryGraphContext(BaseModel):

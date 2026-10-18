@@ -2,9 +2,10 @@ import { useAuth } from "@/contexts/auth-context";
 import { ErrorState } from "@/components/core/feedback/error-state";
 import { Button } from "@/components/ui/button";
 import { useNavigate } from "react-router";
-import { authService } from "@/api/auth-service";
+import { useGitHubAuth } from "@/hooks/use-github-auth";
 
 export function AuthStatusError() {
+  const github = useGitHubAuth();
   const { statusError, refreshStatus, isRefreshing, logout } = useAuth();
   const navigate = useNavigate();
   return (
@@ -17,7 +18,11 @@ export function AuthStatusError() {
         <Button onClick={() => void refreshStatus()} disabled={isRefreshing}>
           Try again
         </Button>
-        <Button variant="outline" onClick={authService.loginWithGithub}>
+        <Button
+          variant="outline"
+          disabled={github.pending}
+          onClick={() => github.start()}
+        >
           Reconnect GitHub
         </Button>
         <Button
@@ -30,6 +35,7 @@ export function AuthStatusError() {
           Sign out
         </Button>
       </div>
+      {github.error && <p role="alert">{github.error}</p>}
     </div>
   );
 }

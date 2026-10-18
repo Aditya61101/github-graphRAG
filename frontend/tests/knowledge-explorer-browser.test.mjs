@@ -314,6 +314,10 @@ test("chat continuity, Markdown, per-answer evidence and exact graph highlightin
     ),
     ["entity:db", "entity:orders"]
   );
+  // React Flow mounts the SVG edges after its node measurement pass.
+  await browser.waitFor(
+    "document.querySelector('.answer-context-edge')?.getAttribute('data-id') === 'edge:orders:WRITES_TO:db'"
+  );
   assert.deepEqual(
     await browser.evaluate(
       "Array.from(document.querySelectorAll('.answer-context-edge')).map(e=>e.getAttribute('data-id'))"
@@ -491,6 +495,29 @@ test("graph failures and query retries remain independent; pending sends cannot 
   fixture.queryError = 403;
   await send("Revoked query");
   await browser.waitFor(contains("Repository chat access denied."));
+  const deniedCalls = fixture.calls.filter((c) => c.method === "POST").length;
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Retry last question'))"
+    ),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelector('#explorer-question').disabled"
+    ),
+    true
+  );
+  // Dispatch directly to the form, bypassing the disabled submit button.
+  await browser.evaluate(
+    "document.querySelector('#explorer-question').closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))"
+  );
+  await browser.evaluate("new Promise(resolve => setTimeout(resolve, 100))");
+  assert.equal(
+    fixture.calls.filter((c) => c.method === "POST").length,
+    deniedCalls
+  );
+
   assert.equal(
     await browser.evaluate(contains("Transactional storage")),
     false
@@ -591,7 +618,9 @@ test("Explorer fills the workspace viewport and cyclic parallel graph retains au
   })()`);
   await click("Fit graph");
   await browser.evaluate("document.querySelector('.react-flow__node').click()");
-  await browser.waitFor("document.querySelector('[aria-label=\"Graph details\"]') !== null");
+  await browser.waitFor(
+    "document.querySelector('[aria-label=\"Graph details\"]') !== null"
+  );
   assert.equal(
     fixture.calls.filter((call) => call.url.endsWith("/graph")).length,
     1
@@ -612,8 +641,10 @@ test("mobile Chat/Graph tabs preserve messages and fit graph without extra fetch
     ),
     "none"
   );
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/graph")).length, 0);
   await send("Mobile question");
   await browser.waitFor(contains("Transactional storage"));
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/graph")).length, 0);
   await click("View in Graph");
   await browser.waitFor(
     "document.querySelector('#explorer-graph-tab').getAttribute('aria-selected')==='true'"
@@ -674,7 +705,7 @@ test("a route change cancels in-flight responses and separates repository graph 
     "(()=>{const input=document.querySelector('#explorer-question');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Old repository question');input.dispatchEvent(new Event('input',{bubbles:true}));})()"
   );
   await click("Send");
-  await browser.waitFor(contains("Finding an answer..."));
+  await browser.waitFor(contains("Generating answer…"));
   await browser.evaluate(
     "history.pushState({},'', '/projects/repo_b/explore');window.dispatchEvent(new PopStateEvent('popstate'))"
   );
@@ -695,4 +726,38 @@ test("a route change cancels in-flight responses and separates repository graph 
     fixture.calls.filter((c) => c.method === "POST").at(-1).url,
     "/repositories/repo_b/query"
   );
+});
+
+test("Batch 4 mobile graph defers until visible and desktop resize activates the cached query", async () => {
+  await browser.call("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await visit();
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/graph")).length, 0);
+  await browser.call("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await readyGraph();
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/graph")).length, 1);
+  await browser.call("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await browser.waitFor(
+    "getComputedStyle(document.querySelector('#explorer-graph-panel')).display === 'none'"
+  );
+  await click("Graph");
+  await readyGraph();
+  await click("Chat");
+  await click("Graph");
+  await readyGraph();
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/graph")).length, 1);
 });

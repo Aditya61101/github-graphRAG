@@ -34,9 +34,6 @@ type AuthContextType = {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 function restoreToken(): string | null {
-  // The callback will replace the token. Do not send a stale account's token
-  // to /auth/me before that effect runs (an old 401 could interrupt login).
-  if (window.location.pathname === "/auth/success") return null;
   const stored = localStorage.getItem("token");
   if (stored && isValidToken(stored)) return stored;
   localStorage.removeItem("token");
@@ -66,6 +63,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       if (localStorage.getItem("token") !== newToken) queryClient.clear();
       localStorage.setItem("token", newToken);
       setToken(newToken);
+      // A popup may return the same JWT within its issuance second. Always
+      // re-read persisted onboarding/account state even in that case.
+      void queryClient.invalidateQueries({ queryKey: ["auth", newToken] });
       return true;
     },
     [queryClient]

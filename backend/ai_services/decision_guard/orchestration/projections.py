@@ -87,6 +87,10 @@ def project(session, job, result, now):
 
 
 def queue_publication(session, job, now, evaluation_id=None):
+    from .check_lifecycle import enabled, intent
+    if enabled():
+        intent(session, job, now, evaluation_id=evaluation_id)
+        return
     row = session.get(CheckPublication, job.id)
     if row is None:
         row = CheckPublication(
@@ -95,12 +99,9 @@ def queue_publication(session, job, now, evaluation_id=None):
         session.add(row)
     elif row.evaluation_id == evaluation_id and row.status != "STALE":
         return
-    row.evaluation_id, row.status, row.next_attempt_at, row.updated_at = (
-        evaluation_id,
-        "PENDING",
-        now,
-        now,
-    )
+    row.evaluation_id, row.next_attempt_at, row.updated_at = evaluation_id, now, now
+    if row.status != 'PUBLISHING' or not row.lease_until or row.lease_until <= now:
+        row.status = 'PENDING'
     row.error_code = None
 
 
@@ -520,9 +521,14 @@ class RepositoryReadModel:
             )
             recent = list(
                 session.execute(
-                    select(EvaluationJob, EvaluationProjection)
+                    select(EvaluationJob, EvaluationProjection, CheckPublication, PullRequestState)
                     .options(*LIGHT_JOBS)
                     .join(EvaluationProjection)
+                    .outerjoin(CheckPublication, CheckPublication.job_id == EvaluationJob.id)
+                    .outerjoin(PullRequestState, and_(
+                        PullRequestState.repository_id == EvaluationJob.repository_id,
+                        PullRequestState.pr_number == EvaluationJob.pr_number,
+                    ))
                     .where(EvaluationJob.repository_id == repository_id)
                     .order_by(
                         EvaluationProjection.evaluated_at.desc(), EvaluationJob.id
@@ -559,16 +565,8 @@ class RepositoryReadModel:
                 "recent": [
                     {
                         "pr_number": j.pr_number,
-                        **evaluation_data(j, p, session.get(CheckPublication, j.id)),
-                        "state": (
-                            s.state
-                            if (
-                                s := session.get(
-                                    PullRequestState, (repository_id, j.pr_number)
-                                )
-                            )
-                            else "unknown"
-                        ),
+                        **evaluation_data(j, p, publication),
+                        "state": s.state if s else "unknown",
                         "freshness": "CURRENT_OBSERVED"
                         if s
                         and s.freshness == "OBSERVED"
@@ -579,6 +577,6 @@ class RepositoryReadModel:
                         "title": s.title if s else json.loads(j.event_json or '{}').get('title'),
                         "observed_at": s.observed_at if s else None,
                     }
-                    for j, p in recent
+                    for j, p, publication, s in recent
                 ],
             }

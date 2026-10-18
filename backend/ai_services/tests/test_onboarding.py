@@ -11,20 +11,18 @@ from sqlalchemy import create_engine, event, inspect
 from ai_services.github_app.service import GitHubAppError
 from ai_services.ingestion.persistence import database
 from ai_services.ingestion.persistence.migrate_onboarding import upgrade
-from ai_services.tests.test_github_app import env, begin_login, callback, installation, repo
+from ai_services.tests.test_github_app import (env, begin_login, callback, installation, repo,
+    start_installation, auth_result, finish_installation_callback, expire_auth_state)
 from ai_services.tests.test_github_refresh import credentials
 from api_services.app.utils.jwt_utils import create_access_token
 
 
 def start(env):
-    response = env.client.post('/auth/github/install', headers=env.headers)
-    assert response.status_code == 200
-    return parse_qs(urlparse(response.json()['installation_url']).query)['state'][0]
+    return start_installation(env)
 
 
 def returned(response):
-    assert response.status_code == 307
-    return {k: v[0] for k, v in parse_qs(urlparse(response.headers['location']).query).items()}
+    return auth_result(response)
 
 
 def assert_incomplete(env):
@@ -260,7 +258,7 @@ def test_successful_installation_and_configuration_complete_directly(env, action
     params = {'state': state, 'installation_id': '10', 'setup_action': action}
     if with_code:
         params['code'] = 'code'
-    result = returned(env.client.get('/auth/github/callback', params=params))
+    result = returned(finish_installation_callback(env, params))
     assert result['installation_outcome'] == 'success' and result['next'] == '/projects'
     assert env.store.get_user(env.user.id).onboarding_completed_at
     assert env.store.list_repositories(env.user.id) == []
@@ -276,7 +274,7 @@ def test_successful_installation_and_configuration_complete_directly(env, action
 ])
 def test_cancelled_pending_or_incomplete_attempt_cannot_use_existing_grants(env, params, outcome):
     params = {'state': start(env), **params}
-    result = returned(env.client.get('/auth/github/callback', params=params))
+    result = returned(finish_installation_callback(env, params))
     assert result['installation_outcome'] == outcome and result['next'] == '/install'
     assert env.state['calls'] == []
     env.oauth.client.fetch_access_token.assert_not_awaited()
@@ -296,37 +294,40 @@ def test_new_installation_without_eligible_repositories_cannot_use_other_install
 
 def test_transient_return_can_be_verified_again_without_replaying_oauth(env):
     state = start(env)
-    env.state['user_status'] = 503
-    result = returned(env.client.get('/auth/github/callback', params={
+    # Identity authorization must succeed before a retryable verified return
+    # exists; simulate failure only in installation discovery afterwards.
+    discovery = env.service.discovery
+    env.service.discovery = AsyncMock(side_effect=GitHubAppError(503, 'Temporary discovery failure'))
+    result = returned(finish_installation_callback(env, {
         'state': state, 'installation_id': '10', 'setup_action': 'update'}))
     assert result['installation_outcome'] == 'temporary_failure'
     assert_incomplete(env)
-    env.state['user_status'] = 200
+    env.service.discovery = discovery
     result = env.client.post('/auth/onboarding/installation/verify', headers=env.headers)
     assert result.status_code == 200 and result.json()['installation_outcome'] == 'success'
     assert result.json()['next'] == '/projects'
     assert env.client.get('/auth/github/callback', params={'state': state, 'installation_id': '10'}).status_code == 400
 
 
-def test_retry_is_browser_bound_expires_and_cannot_be_supplied_by_client(env):
+def test_retry_is_user_bound_expires_and_cannot_be_supplied_by_client(env):
     returned(callback(env, start(env), installation_id='10', setup_action='update'))
     with TestClient(env.app, follow_redirects=False) as other:
-        assert other.post('/auth/onboarding/installation/verify', headers=env.headers).status_code == 409
-    result = env.oauth.installation_returns[env.user.id]
-    result.expires_at = 0
+        # Bearer-authenticated same-user retry does not require third-party cookies.
+        assert other.post('/auth/onboarding/installation/verify', headers=env.headers).status_code == 200
+    expire_auth_state(env, 'installation_return', env.user.id)
     assert env.client.post('/auth/onboarding/installation/verify', headers=env.headers,
                            json={'installation_id': '10', 'outcome': 'success'}).status_code == 409
 
 
 def test_cancellation_after_completion_keeps_persisted_completion(env):
     first = env.store.complete_onboarding(env.user.id).onboarding_completed_at
-    result = returned(env.client.get('/auth/github/callback', params={
+    result = returned(finish_installation_callback(env, {
         'state': start(env), 'error': 'access_denied'}))
     assert result['installation_outcome'] == 'cancelled' and result['next'] == '/projects'
     assert env.store.get_user(env.user.id).onboarding_completed_at == first
 
 
-def test_code_less_configuration_return_uses_automatic_refresh(env):
+def test_code_less_configuration_return_reauthorizes_current_github_account(env):
     credentials(env)
     original = env.service.client
     refreshes = []
@@ -336,14 +337,14 @@ def test_code_less_configuration_return_uses_automatic_refresh(env):
             return httpx.Response(200, json={'access_token': 'rotated-access', 'refresh_token': 'rotated-refresh',
                 'expires_in': 28800, 'refresh_token_expires_in': 15897600})
         if request.url.path.startswith('/user/'):
-            assert request.headers['Authorization'] == 'Bearer rotated-access'
+            assert request.headers['Authorization'] == 'Bearer opaque-user-token'
         return await original.send(request)
     env.service.client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
-    result = returned(env.client.get('/auth/github/callback', params={
+    result = returned(finish_installation_callback(env, {
         'state': start(env), 'installation_id': '10', 'setup_action': 'update'}))
-    assert result['installation_outcome'] == 'success' and len(refreshes) == 1
+    assert result['installation_outcome'] == 'success' and len(refreshes) == 0
     connection = env.store.get_user_github_connection(env.user.id)
-    assert env.store.decrypt_token(connection.refresh_token) == 'rotated-refresh'
+    assert env.store.decrypt_token(connection.refresh_token) == 'login-refresh-token'
 
 
 def test_reconnect_does_not_reset_completion_or_destroy_app_auth(env):
@@ -360,7 +361,7 @@ def test_reconnect_does_not_reset_completion_or_destroy_app_auth(env):
 
 def test_return_verification_auth_failure_is_distinct_from_no_grants(env):
     env.service.discovery = AsyncMock(side_effect=GitHubAppError(401, 'reconnect', reconnect_required=True))
-    result = returned(env.client.get('/auth/github/callback', params={
+    result = returned(finish_installation_callback(env, {
         'state': start(env), 'installation_id': '10', 'setup_action': 'update'}))
     assert result['installation_outcome'] == 'reauthorization_required'
     assert_incomplete(env)
@@ -372,7 +373,7 @@ def test_expired_and_wrong_browser_installation_states_are_rejected(env):
         assert other.get('/auth/github/callback', params={
             'state': state, 'installation_id': '10', 'setup_action': 'update'}).status_code == 400
     state = start(env)
-    env.oauth.transactions[state] = replace(env.oauth.transactions[state], expires_at=0)
+    expire_auth_state(env, 'oauth', state)
     assert env.client.get('/auth/github/callback', params={
         'state': state, 'installation_id': '10', 'setup_action': 'update'}).status_code == 400
     assert_incomplete(env)

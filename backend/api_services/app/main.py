@@ -29,7 +29,6 @@ from ai_services.ingestion.persistence.sqlite_store import (
 from ai_services.ingestion.pr.service import PullRequestIngestionService
 from ai_services.ingestion.service import RepositoryIngestionService
 from ai_services.ingestion.sources.github import GitHubRepositorySource
-from ai_services.retrievers.reranker import Qwen3Reranker
 from ai_services.retrievers.retriever_factory import create_retrievers
 from api_services.app.config import (
     ADRS_STORAGE_DIR,
@@ -49,6 +48,10 @@ from api_services.app.routers.repositories import router as repositories_router
 from api_services.app.routers.webhook import router as webhook_router
 from shared.utils.env_helper import require_env
 from shared.utils.llm_utils import AzureOpenAILLM
+from api_services.app import config
+from api_services.app.utils.auth_logging import configure_auth_logging
+
+configure_auth_logging()
 
 
 @asynccontextmanager
@@ -58,10 +61,9 @@ async def lifespan(app: FastAPI):
     github_client = httpx.AsyncClient(timeout=30)
     github_app = GitHubAppService(sqlite_store, github_settings, github_client)
     app.state.github_app = github_app
-    app.state.github_oauth = GitHubOAuth(github_settings)
+    app.state.github_oauth = GitHubOAuth(github_settings, sqlite_store.session_factory)
     database = require_env("NEO4J_DATABASE") or None
-    # One model per FastAPI worker; failures propagate and fail startup.
-    reranker = await asyncio.to_thread(Qwen3Reranker, RETRIEVAL_SETTINGS)
+    reranker = None
     app.state.reranker = reranker
 
     # Create application-scoped infrastructure once. These instances are
@@ -136,7 +138,8 @@ async def lifespan(app: FastAPI):
         groq_client=groq_client,
         github_app=github_app,
     )
-    sqlite_store.recover_interrupted_pr_revisions()
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        sqlite_store.recover_interrupted_pr_revisions()
     pr_ingestion_service = PullRequestIngestionService(
         repository_source=repo_source,
         metadata_store=sqlite_store,
@@ -154,7 +157,8 @@ async def lifespan(app: FastAPI):
         database=database or "neo4j",
         embedding_dimensions=embedder.dimensions if embedder else 3072,
     )
-    adr_writer.initialize_constraints()
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        adr_writer.initialize_constraints()
 
     adr_processor = ADRProcessingService(
         chunker=ADRChunker(),
@@ -183,11 +187,22 @@ async def lifespan(app: FastAPI):
         processor=adr_processor,
     )
 
+    from ai_services.ingestion.graph_control import GraphControl
+    from ai_services.ingestion.readiness import GraphReadBarrier
+    graph_barrier = GraphReadBarrier(sqlite_store.session_factory, GraphControl(driver, database or "neo4j"))
+    app.state.graph_barrier = graph_barrier
+    from ai_services.ingestion.adr.guard import GuardedADRProcessor
+    from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
+    if config.ENABLE_BACKGROUND_PROCESSING:
+        graph_barrier.control.initialize()
+    adr_service.processor = GuardedADRProcessor(adr_processor, sqlite_store,
+        IngestionJobs(sqlite_store.session_factory), graph_barrier.control, graph_barrier, llm, embedder)
     graph_repo = Neo4jGraphRepository(driver=driver, database=database or "neo4j")
     graph_service = RepositoryGraphService(
         sqlite_store=sqlite_store,
         graph_repo=graph_repo,
         read_authorizer=github_app.authorize_repository_read,
+        barrier=graph_barrier,
     )
 
     app.state.sqlite_store = sqlite_store
@@ -214,11 +229,14 @@ async def lifespan(app: FastAPI):
         graph_service=graph_service,
     )
 
-    from ai_services.decision_guard.evaluation.models import EvaluationSettings
-    from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator
+    from ai_services.decision_guard.orchestration.profiles import (
+        automatic_evaluation_settings,
+    )
+    from ai_services.decision_guard.orchestration.dispatch import EvaluationOrchestrator, LocalDispatcher
     from ai_services.decision_guard.orchestration.runtime import production_runtime
     from ai_services.decision_guard.orchestration.store import EvaluationStore
     from ai_services.decision_guard.orchestration.worker import EvaluationWorker
+    from ai_services.decision_guard.orchestration.gcp import configured_dispatcher
 
     evaluation_store = EvaluationStore(sqlite_store.session_factory)
     runtime = production_runtime(
@@ -230,6 +248,7 @@ async def lifespan(app: FastAPI):
     app.state.evaluation_orchestrator = EvaluationOrchestrator(
         evaluation_store,
         evaluation_worker,
+        dispatcher=configured_dispatcher(github_client),
         lifecycle_github=github_app,
         publisher=CheckPublisher(
             evaluation_store,
@@ -237,9 +256,7 @@ async def lifespan(app: FastAPI):
             enabled=os.getenv("GITHUB_CHECKS_ENABLED", "false").lower() == "true",
             details_base=os.getenv("GITHUB_CHECKS_DETAILS_BASE") or None,
         ),
-        settings=EvaluationSettings.model_validate_json(
-            os.getenv("PR_EVALUATION_SETTINGS", "{}")
-        ),
+        settings_factory=automatic_evaluation_settings,
     )
 
     # Create the conversational agent once. Creating it inside the request
@@ -254,17 +271,22 @@ async def lifespan(app: FastAPI):
         llm=chat_llm,
         reranker=reranker,
         retrieval_settings=RETRIEVAL_SETTINGS,
+        barrier=graph_barrier,
     )
 
     recovery_task = asyncio.create_task(
         app.state.evaluation_orchestrator.recover_forever()
-    )
+    ) if config.ENABLE_BACKGROUND_PROCESSING and isinstance(
+        app.state.evaluation_orchestrator.dispatcher,
+        LocalDispatcher,
+    ) else None
     try:
         yield
     finally:
-        recovery_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await recovery_task
+        if recovery_task is not None:
+            recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery_task
         await app.state.evaluation_orchestrator.close()
         driver.close()
         await github_client.aclose()

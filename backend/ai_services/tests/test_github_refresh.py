@@ -180,7 +180,7 @@ def test_installation_auth_failure_does_not_require_user_reconnection(env):
 
 def test_login_persists_refresh_credentials(env):
     state = begin_login(env)['state'][0]
-    assert callback(env, state).status_code == 307
+    assert callback(env, state).status_code == 200
     connection = env.store.get_user_github_connection(env.user.id)
     assert env.store.decrypt_token(connection.refresh_token) == 'login-refresh-token'
     assert as_utc(connection.refresh_token_expires_at) > datetime.now(timezone.utc)

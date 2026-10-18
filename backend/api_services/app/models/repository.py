@@ -25,7 +25,7 @@ class IngestRepositoryRequest(BaseModel):
     )
     sync: bool = Field(
         default=False,
-        description="If True, awaits completion and returns final result. If False (default), runs in background.",
+        description="Compatibility option. Indexing is durable and returns an accepted run; check repository status.",
     )
 
 
@@ -40,7 +40,7 @@ class SyncRepositoryRequest(BaseModel):
     )
     sync: bool = Field(
         default=False,
-        description="If True, awaits completion and returns final result. If False (default), runs in background.",
+        description="Compatibility option. Sync is durable and returns an accepted run; check repository status.",
     )
 
 

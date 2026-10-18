@@ -789,6 +789,9 @@ def test_additive_pr_schema_initialization_preserves_repository_data(
         )
         connection.execute(text("CREATE TABLE repositories (id TEXT PRIMARY KEY)"))
         connection.execute(text("INSERT INTO repositories VALUES ('repo_101')"))
+        # Core v3 includes ingestion history; include that required core table.
+        from ai_services.ingestion.persistence.models import IngestionRunModel
+        IngestionRunModel.__table__.create(connection)
     monkeypatch.setattr(database, "get_engine", lambda: engine)
     database.init_db()
     database.init_db()

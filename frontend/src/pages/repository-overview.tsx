@@ -5,11 +5,16 @@ import {
   ShieldAlert,
   TriangleAlert,
 } from "lucide-react";
-import { useRepositoryOverview } from "@/layouts/repository-layout";
+import {
+  useRepositoryOverview,
+  useOverviewRefresh,
+} from "@/layouts/repository-layout";
+import { RefreshButton } from "@/components/core/query-feedback";
 import type { Availability, OverviewMetric } from "@/types/overview";
 import type { RecentReview } from "@/types/reviews";
 import { dateLabel, label, prPath } from "@/lib/review-presentation";
 import { OverviewAttention } from "@/components/repositories/overview-attention";
+import { RepositoryADRGuidance } from "@/components/repositories/adr-guidance";
 
 export function Reviews({
   items,
@@ -75,6 +80,7 @@ function sectionMessage(availability: Availability, unavailable: string) {
 
 export default function RepositoryOverviewPage() {
   const overview = useRepositoryOverview();
+  const refresh = useOverviewRefresh();
   const { repository, kpis } = overview;
   const base = `/projects/${encodeURIComponent(repository.id)}`;
   const metrics = [
@@ -113,10 +119,12 @@ export default function RepositoryOverviewPage() {
         <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
           Architecture Overview
         </h1>
+        <RefreshButton busy={refresh.busy} onRefresh={refresh.refresh} />
         <p className="text-sm text-muted-foreground">
           Architectural decisions and review status for this repository.
         </p>
       </section>
+      <RepositoryADRGuidance />
       <section
         aria-label="Architecture metrics"
         className="grid gap-4 md:grid-cols-2"

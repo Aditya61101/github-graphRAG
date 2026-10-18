@@ -40,9 +40,19 @@ const unavailable = { status: "unavailable", reason: "engine_not_implemented" };
 function setup() {
   return {
     owner: true,
+    admin: true,
+    overviewError: null,
+    deleteCode: 503,
     denied: false,
     calls: [],
     uploaded: false,
+    documents: null,
+    statusDelay: 0,
+    retryError: 0,
+    deleteError: false,
+    deleteDelay: 0,
+    sequential: false,
+    duplicate: false,
     uploadError: false,
     partial: false,
     release: null,
@@ -95,6 +105,8 @@ before(async () => {
               !url.pathname.startsWith("/repositories/repo_a/")
             )
               return json({ detail: "Repository access denied" }, 403);
+            if (url.pathname.endsWith("/overview") && f.overviewError)
+              return json({ detail: f.overviewError }, 503);
             if (url.pathname.endsWith("/overview"))
               return json({
                 repository: {
@@ -107,7 +119,7 @@ before(async () => {
                   status: "COMPLETED",
                 },
                 permissions: {
-                  can_view_settings: false,
+                  can_view_settings: f.owner && f.admin,
                   can_manage_source_documents: f.owner,
                 },
                 kpis: {
@@ -206,11 +218,109 @@ before(async () => {
                 evidence_truncated: false,
                 relationship_basis: "documented_ADR_knowledge",
               });
+            const deleteAdr = url.pathname.match(/\/adrs\/([^/]+)$/);
+            if (deleteAdr && req.method === "DELETE") {
+              if (!f.owner || !f.admin)
+                return json({ detail: "Administrator access required" }, 403);
+              if (f.deleteDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, f.deleteDelay)
+                );
+              if (f.deleteError)
+                return json({ detail: "Deletion unavailable" }, f.deleteCode);
+              f.documents = (f.documents ?? []).filter(
+                (item) => item.id !== deleteAdr[1]
+              );
+              return json({ adr_id: deleteAdr[1], status: "DELETED" }, 202);
+            }
+            const adrAction = url.pathname.match(
+              /\/adrs\/([^/]+)\/(status|retry)$/
+            );
+            if (adrAction) {
+              const entry = f.documents?.find(
+                (item) => item.id === adrAction[1]
+              );
+              if (!entry) return json({ detail: "ADR not found" }, 404);
+              if (adrAction[2] === "retry") {
+                if (f.retryError)
+                  return json(
+                    {
+                      detail:
+                        f.retryError === 403
+                          ? "Repository access denied"
+                          : "ADR already completed",
+                    },
+                    f.retryError
+                  );
+                entry.status = "PENDING";
+                entry.error = null;
+              }
+              if (f.statusDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, f.statusDelay)
+                );
+              return json(
+                {
+                  adr_id: entry.id,
+                  status: entry.status,
+                  error: entry.error,
+                  updated_at: entry.updated_at ?? "2026-10-17T07:00:00Z",
+                },
+                adrAction[2] === "retry" ? 202 : 200
+              );
+            }
             if (url.pathname.endsWith("/adrs")) {
               if (!f.owner) return json({ detail: "Owner only" }, 403);
-              if (req.method === "GET") return json(f.uploaded ? [doc] : []);
+              if (req.method === "GET") {
+                if (f.documentDelay)
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, f.documentDelay)
+                  );
+                if (f.documentError)
+                  return json(
+                    { detail: "Document inventory unavailable" },
+                    f.documentError
+                  );
+                return json(
+                  f.documents ??
+                    (f.uploaded ? [{ ...doc, status: "PENDING" }] : [])
+                );
+              }
               for await (const chunk of req) {
                 assert.ok(chunk.length);
+              }
+              if (f.sequential || f.duplicate) {
+                f.documents ??= [];
+                const entry = f.duplicate
+                  ? f.documents[0]
+                  : {
+                      ...doc,
+                      id: `adr_${f.documents.length + 1}`,
+                      source_name: `adr-${f.documents.length + 1}.md`,
+                      status: "PENDING",
+                    };
+                if (!f.duplicate) f.documents.push(entry);
+                return json(
+                  {
+                    repository_id: "repo_a",
+                    total: 1,
+                    completed: 0,
+                    accepted: f.duplicate ? 0 : 1,
+                    duplicates: f.duplicate ? 1 : 0,
+                    failed: 0,
+                    results: [
+                      {
+                        index: 0,
+                        filename: "storage.md",
+                        status: f.duplicate ? "duplicate" : "accepted",
+                        status_code: f.duplicate ? 409 : 202,
+                        adr: entry,
+                        error: null,
+                      },
+                    ],
+                  },
+                  202
+                );
               }
               await new Promise((resolve) => {
                 f.release = resolve;
@@ -226,16 +336,17 @@ before(async () => {
                   {
                     repository_id: "repo_a",
                     total: 2,
-                    completed: 1,
+                    completed: 0,
+                    accepted: 1,
                     duplicates: 0,
                     failed: 1,
                     results: [
                       {
                         index: 0,
                         filename: "storage.md",
-                        status: "completed",
-                        status_code: 201,
-                        adr: doc,
+                        status: "accepted",
+                        status_code: 202,
+                        adr: { ...doc, status: "PENDING" },
                         error: null,
                       },
                       {
@@ -254,21 +365,22 @@ before(async () => {
                 {
                   repository_id: "repo_a",
                   total: 1,
-                  completed: 1,
+                  completed: 0,
+                  accepted: 1,
                   duplicates: 0,
                   failed: 0,
                   results: [
                     {
                       index: 0,
                       filename: "storage.md",
-                      status: "completed",
-                      status_code: 201,
-                      adr: doc,
+                      status: "accepted",
+                      status_code: 202,
+                      adr: { ...doc, status: "PENDING" },
                       error: null,
                     },
                   ],
                 },
-                201
+                202
               );
             }
             return json({ detail: "Not found" }, 404);
@@ -323,6 +435,322 @@ async function selectFile() {
     `(() => { const input=document.querySelector('#adr-files'); const dt=new DataTransfer(); dt.items.add(new File(['# Storage'], 'storage.md', {type:'text/markdown'})); input.files=dt.files; input.dispatchEvent(new Event('change',{bubbles:true})); })()`
   );
 }
+
+const row = (id) => `document.querySelector('article[aria-label="${id}.md"]')`;
+const rowText = (id, text) =>
+  `${row(id)}?.innerText.includes(${JSON.stringify(text)})`;
+const rowAction = (id, action) =>
+  `Array.from(${row(id)}.querySelectorAll('button')).find(b => b.textContent.trim() === '${action}').click()`;
+test("delete requires confirmation, prevents duplicate submissions and removes only the confirmed document", async () => {
+  fixture.documents = ["001", "002"].map((id) => ({
+    ...doc,
+    id,
+    source_name: `${id}.md`,
+  }));
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  assert.equal(
+    await browser.evaluate(
+      "document.querySelector('[role=dialog]').innerText.includes('001.md')"
+    ),
+    true
+  );
+  assert.equal(fixture.calls.filter((c) => c.method === "DELETE").length, 0);
+  await click("Cancel");
+  await browser.waitFor("!document.querySelector('[role=dialog]')");
+  assert.equal(await browser.evaluate(`!!${row("001")}`), true);
+  await browser.evaluate(rowAction("001", "Delete"));
+  fixture.deleteDelay = 300;
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await browser.evaluate(
+    `(() => {const button=Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Delete ADR'); button.click(); button.click();})()`
+  );
+  await browser.waitFor(contains("Deleting..."));
+  assert.equal(
+    await browser.evaluate(
+      "Array.from(document.querySelectorAll('[role=dialog] button')).every(b => b.disabled)"
+    ),
+    true
+  );
+  await browser.waitFor(contains("Deleted 001.md."));
+  assert.equal(await browser.evaluate(contains("Use PostgreSQL")), false);
+  await click("Refresh repository knowledge");
+  await browser.waitFor(rowText("002", "COMPLETED"));
+  assert.equal(await browser.evaluate("location.search"), "?tab=sources");
+  assert.equal(await browser.evaluate(`!!${row("001")}`), false);
+  assert.equal(await browser.evaluate(`!!${row("002")}`), true);
+  assert.equal(fixture.calls.filter((c) => c.method === "DELETE").length, 1);
+});
+
+test("ambiguous deletion preserves the ADR and requires readiness verification", async () => {
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  fixture.deleteError = true;
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await click("Delete ADR");
+  await browser.waitFor(contains("Deletion could not be confirmed"));
+  assert.equal(await browser.evaluate(contains("ADR deleted.")), false);
+  await click("Refresh repository knowledge");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(await browser.evaluate(`!!${row("001")}`), true);
+  assert.equal(fixture.documents.length, 1);
+});
+
+test("readiness cleanup hides all deleted evidence and recovers only after explicit refresh", async () => {
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  fixture.overviewError =
+    "Repository graph update or repair is in progress; retry later";
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await click("Delete ADR");
+  await browser.waitFor(contains("Deleted 001.md."));
+  assert.equal(await browser.evaluate(contains("Use PostgreSQL")), false);
+  assert.equal(
+    await browser.evaluate(
+      contains("PostgreSQL provides transactional persistence.")
+    ),
+    false
+  );
+  await click("Refresh repository knowledge");
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Refresh repository knowledge' && !b.disabled)"
+  );
+  assert.equal(
+    await browser.evaluate(contains("Unable to load repository")),
+    false
+  );
+  const count = fixture.calls.length;
+  await new Promise((r) => setTimeout(r, 1100));
+  assert.equal(
+    fixture.calls.length,
+    count,
+    "readiness failure must not start polling"
+  );
+  fixture.overviewError = null;
+  fixture.items = [];
+  await click("Refresh repository knowledge");
+  await browser.waitFor(
+    contains("No ADR source documents have been uploaded.")
+  );
+  assert.equal(await browser.evaluate(`!!${row("001")}`), false);
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("No extracted architectural knowledge yet"));
+});
+
+test("unrelated Overview 503 is an ordinary error; access revocation during cleanup stays fail-closed", async () => {
+  fixture.overviewError = "Database unavailable";
+  await browser.navigate(base + "/projects/repo_a/decisions");
+  await browser.waitFor(contains("Unable to load repository"));
+  assert.equal(
+    await browser.evaluate(contains("Updating repository knowledge")),
+    false
+  );
+  fixture.overviewError = null;
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  await click("Try again");
+  await browser.waitFor(contains("Use PostgreSQL"));
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await click("Delete ADR");
+  await browser.waitFor(contains("Deleted 001.md."));
+  fixture.denied = true;
+  await click("Refresh repository knowledge");
+  await browser.waitFor(contains("Repository access denied"));
+  assert.equal(await browser.evaluate(contains("Use PostgreSQL")), false);
+  assert.equal(
+    await browser.evaluate(contains("Refresh repository knowledge")),
+    false
+  );
+});
+
+test("owners without verified admin retain Sources and upload but cannot delete", async () => {
+  fixture.admin = false;
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(
+    await browser.evaluate("!!document.querySelector('#adr-files')"),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(`${row("001")}.innerText.includes('Delete')`),
+    false
+  );
+  assert.equal(
+    await browser.evaluate(`${row("001")}.innerText.includes('Check Status')`),
+    true
+  );
+});
+
+test("a live delete 403 keeps the source row and offers access guidance", async () => {
+  fixture.documents = [{ ...doc, id: "001", source_name: "001.md" }];
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  fixture.admin = false;
+  await browser.evaluate(rowAction("001", "Delete"));
+  await browser.waitFor("!!document.querySelector('[role=dialog]')");
+  await click("Delete ADR");
+  await browser.waitFor(rowText("001", "GitHub access is unavailable"));
+  assert.equal(fixture.documents.length, 1);
+  assert.equal(await browser.evaluate(contains("ADR deleted.")), false);
+});
+
+test("list completion invalidates once without hidden knowledge fetching", async () => {
+  fixture.documents = ["001", "002", "003"].map((id) => ({
+    ...doc,
+    id,
+    source_name: `${id}.md`,
+    status: id === "003" ? "FAILED" : "PROCESSING",
+  }));
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "PROCESSING"));
+  const knowledgeBefore = knowledgeCalls();
+  fixture.documents[0].status = "COMPLETED";
+  fixture.documents[0].updated_at = "2026-10-18T01:00:00Z";
+  fixture.items = [{ ...decision, title: "Newly completed ADR decision" }];
+  await click("Refresh documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(knowledgeCalls(), knowledgeBefore);
+  const overviewBefore = fixture.calls.filter((c) =>
+    c.url.endsWith("/overview")
+  ).length;
+  await browser.evaluate(rowAction("001", "Check Status"));
+  await browser.waitFor(rowText("001", "Last checked"));
+  assert.equal(knowledgeCalls(), knowledgeBefore);
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/overview")).length,
+    overviewBefore
+  );
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("Newly completed ADR decision"));
+  assert.equal(knowledgeCalls(), knowledgeBefore + 1);
+});
+
+test("Source Documents remount discovers newer completion and refreshes knowledge on return", async () => {
+  fixture.documents = [
+    { ...doc, id: "001", source_name: "001.md", status: "PENDING" },
+  ];
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "PENDING"));
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("Use PostgreSQL"));
+  const before = knowledgeCalls();
+  fixture.documents[0].status = "COMPLETED";
+  fixture.items = [{ ...decision, title: "Completed during navigation" }];
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(knowledgeCalls(), before);
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("Completed during navigation"));
+  assert.equal(knowledgeCalls(), before + 1);
+});
+
+test("three ADR identities persist independently across manual status, completion, retry and reload without polling", async () => {
+  fixture.documents = ["001", "002", "003"].map((id) => ({
+    ...doc,
+    id,
+    source_name: `${id}.md`,
+    status: "PENDING",
+  }));
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("003", "PENDING"));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(
+    fixture.calls.some((call) => call.url.endsWith("/status")),
+    false
+  );
+  fixture.documents[0].status = "PROCESSING";
+  fixture.statusDelay = 400;
+  await browser.evaluate(rowAction("001", "Check Status"));
+  await browser.waitFor(rowText("001", "Checking status…"));
+  assert.equal(
+    await browser.evaluate(`${row("002")}.querySelector('button').disabled`),
+    false
+  );
+  await browser.waitFor(rowText("001", "PROCESSING"));
+  assert.equal(await browser.evaluate(rowText("002", "PENDING")), true);
+  fixture.statusDelay = 0;
+  fixture.documents[0].status = "COMPLETED";
+  const before = fixture.calls.filter((c) =>
+    c.url.includes("/knowledge?")
+  ).length;
+  await browser.evaluate(rowAction("001", "Check Status"));
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  await click("Architectural Knowledge");
+  await browser.waitFor(contains("Use PostgreSQL"));
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Refresh knowledge' && !b.disabled)"
+  );
+  assert.ok(
+    fixture.calls.filter((c) => c.url.includes("/knowledge?")).length > before
+  );
+  await click("Source Documents");
+  await browser.waitFor(rowText("002", "PENDING"));
+  fixture.documents[1].status = "FAILED";
+  fixture.documents[1].error = "Document processing failed. Please retry.";
+  await browser.evaluate(rowAction("002", "Check Status"));
+  await browser.waitFor(rowText("002", "Document processing failed"));
+  assert.equal(
+    await browser.evaluate(`${row("001")}.innerText.includes('Retry')`),
+    false
+  );
+  await browser.evaluate(rowAction("002", "Retry"));
+  await browser.waitFor(rowText("002", "PENDING"));
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/002/retry")).length,
+    1
+  );
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(rowText("001", "COMPLETED"));
+  assert.equal(await browser.evaluate(rowText("002", "PENDING")), true);
+  assert.equal(await browser.evaluate(rowText("003", "PENDING")), true);
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/status")).length,
+    3
+  );
+});
+for (const code of [403, 404, 409])
+  test(`ADR retry ${code} stays scoped and preserves existing status`, async () => {
+    fixture.documents = [
+      {
+        ...doc,
+        id: "001",
+        source_name: "001.md",
+        status: "FAILED",
+        error: "Document failed",
+      },
+    ];
+    fixture.retryError = code;
+    await visit();
+    await click("Source Documents");
+    await browser.waitFor(rowText("001", "FAILED"));
+    await browser.evaluate(rowAction("001", "Retry"));
+    await browser.waitFor(
+      `${row("001")}.querySelector('[role=alert]') !== null`
+    );
+    assert.equal(await browser.evaluate(rowText("001", "FAILED")), true);
+    assert.equal(
+      fixture.calls.filter((c) => c.url.endsWith("/001/retry")).length,
+      1
+    );
+  });
 
 async function closeDrawer() {
   await browser.call("Input.dispatchKeyEvent", {
@@ -565,7 +993,7 @@ test("collaborator can open a constraint modal with its actual statement and rel
   await closeDrawer();
 });
 
-test("responses are cached across filters, drawers, tabs and client navigation; refresh fetches again", async () => {
+test("knowledge stays cached across navigation while ADR list remount reads persisted status", async () => {
   await visit();
   assert.equal(knowledgeCalls(), 1);
   await click("Decisions");
@@ -612,7 +1040,10 @@ test("responses are cached across filters, drawers, tabs and client navigation; 
   await browser.waitFor(
     contains("No ADR source documents have been uploaded.")
   );
-  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/adrs")).length, 1);
+  await browser.waitFor(
+    "!Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Refresh documents').disabled"
+  );
+  assert.equal(fixture.calls.filter((c) => c.url.endsWith("/adrs")).length, 2);
   await browser.evaluate(
     "document.querySelector('a[href=\"/projects/repo_a/overview\"]').click()"
   );
@@ -894,7 +1325,7 @@ test("collaborator source tab is hidden and revocation hides repository content"
 });
 
 for (const error of [false, true, "partial"])
-  test(`synchronous upload locks submissions and refreshes both inventories (${error ? "failure" : "success"})`, async () => {
+  test(`asynchronous upload locks submissions and refreshes both inventories (${error ? "failure" : "success"})`, async () => {
     fixture.uploadError = error === true;
     fixture.partial = error === "partial";
     await visit();
@@ -904,7 +1335,7 @@ for (const error of [false, true, "partial"])
     );
     await selectFile();
     await click("Upload documents");
-    await browser.waitFor(contains("Processing documents..."));
+    await browser.waitFor(contains("Uploading…"));
     assert.equal(
       await browser.evaluate("document.querySelector('#adr-files').disabled"),
       true
@@ -917,12 +1348,12 @@ for (const error of [false, true, "partial"])
     );
     assert.equal(
       await browser.evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Processing documents')).disabled"
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Uploading')).disabled"
       ),
       true
     );
     await browser.evaluate(
-      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Processing documents')).click()"
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Uploading')).click()"
     );
     assert.equal(fixture.calls.filter((c) => c.method === "POST").length, 1);
     assert.match(
@@ -935,7 +1366,7 @@ for (const error of [false, true, "partial"])
     fixture.release();
     await browser.waitFor(
       contains(
-        error === true ? "Some data may have been persisted" : "1 processed"
+        error === true ? "Some data may have been persisted" : "1 accepted"
       )
     );
     await browser.waitFor(contains("storage.md"));
@@ -950,8 +1381,108 @@ for (const error of [false, true, "partial"])
     );
     await click("Architectural Knowledge");
     await browser.waitFor(contains("Use PostgreSQL"));
+    await browser.waitFor(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Refresh knowledge' && !b.disabled)"
+    );
     assert.ok(
       fixture.calls.filter((c) => c.url.includes("/knowledge?")).length >
         knowledgeCalls
     );
   });
+
+test("Back during a pending upload releases the tab lock and preserves recovery", async () => {
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(
+    contains("No ADR source documents have been uploaded.")
+  );
+  await selectFile();
+  await click("Upload documents");
+  await browser.waitFor(contains("Uploading…"));
+  await browser.evaluate("history.back()");
+  await browser.waitFor(
+    "!!document.querySelector('#knowledge-panel') && !document.querySelector('#sources-tab').disabled"
+  );
+  fixture.release();
+  await click("Source Documents");
+  await browser.waitFor(contains("storage.md"));
+  assert.equal(
+    fixture.calls.filter((call) => call.method === "POST").length,
+    1
+  );
+});
+
+test("three sequential accepted uploads preserve individual ADR IDs and duplicate response adds no row", async () => {
+  fixture.sequential = true;
+  await visit();
+  await click("Source Documents");
+  await browser.waitFor(contains("No ADR source documents have been uploaded"));
+  for (let index = 1; index <= 3; index++) {
+    await selectFile();
+    await click("Upload documents");
+    await browser.waitFor(
+      `document.querySelector('article[aria-label="adr-${index}.md"]') !== null`
+    );
+    await browser.waitFor("!document.querySelector('#adr-files').disabled");
+    assert.equal(
+      await browser.evaluate("document.querySelectorAll('article').length"),
+      index
+    );
+    assert.equal(await browser.evaluate(contains("1 accepted")), true);
+  }
+  fixture.duplicate = true;
+  await selectFile();
+  await click("Upload documents");
+  await browser.waitFor(contains("1 duplicate"));
+  assert.equal(
+    await browser.evaluate("document.querySelectorAll('article').length"),
+    3
+  );
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/status")).length,
+    0
+  );
+  assert.deepEqual(
+    fixture.documents.map((d) => d.id),
+    ["adr_1", "adr_2", "adr_3"]
+  );
+});
+
+test("Batch 3 knowledge and document refresh retain safe data with local errors and themed loading", async () => {
+  fixture.knowledgeDelay = 600;
+  fixture.documents = [doc];
+  fixture.documentDelay = 600;
+  await browser.navigate(base + "/projects/repo_a/decisions");
+  await browser.waitFor(
+    "document.querySelector('[role=status][aria-busy=true] [data-slot=skeleton]') !== null"
+  );
+  await browser.waitFor(contains("Use PostgreSQL"));
+  fixture.knowledgeError = 500;
+  await click("Refresh knowledge");
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Refreshing') && b.disabled)"
+  );
+  assert.equal(await browser.evaluate(contains("Use PostgreSQL")), true);
+  await browser.waitFor(contains("Unable to refresh knowledge"));
+  assert.equal(await browser.evaluate(contains("Use PostgreSQL")), true);
+  await click("Source Documents");
+  await browser.waitFor(
+    "document.querySelector('[role=status][aria-busy=true] [data-slot=skeleton]') !== null"
+  );
+  await browser.waitFor(contains("storage.md"));
+  const before = fixture.calls.filter((c) => c.url.endsWith("/adrs")).length;
+  fixture.documentError = 500;
+  await browser.evaluate(
+    "(() => { const b = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Refresh documents'); b.click(); b.click(); })()"
+  );
+  await browser.waitFor(contains("Unable to refresh documents"));
+  assert.equal(await browser.evaluate(contains("storage.md")), true);
+  assert.equal(
+    fixture.calls.filter((c) => c.url.endsWith("/adrs")).length,
+    before + 1
+  );
+  fixture.documentError = 403;
+  await click("Refresh documents");
+  await browser.waitFor(contains("GitHub access is unavailable"));
+  assert.equal(await browser.evaluate(contains("storage.md")), false);
+});

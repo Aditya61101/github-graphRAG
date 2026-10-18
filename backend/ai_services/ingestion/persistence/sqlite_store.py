@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
-from typing import Any
 import os
-from cryptography.fernet import Fernet
+from datetime import UTC, datetime
 
+from cryptography.fernet import Fernet
 from sqlalchemy import or_, select, update
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
+from ai_services.ingestion.persistence.concurrency import serialize_metadata_write
 from ai_services.ingestion.persistence.database import get_session_factory, init_db
 from ai_services.ingestion.persistence.models import (
     ADRModel,
@@ -20,7 +21,10 @@ from ai_services.ingestion.persistence.models import (
     UserModel,
     utc_now,
 )
-from ai_services.ingestion.sources.credentials import CredentialProvider, GitHubCredential
+from ai_services.ingestion.sources.credentials import (
+    CredentialProvider,
+    GitHubCredential,
+)
 from ai_services.ingestion.sources.interface import RepositoryMetadata
 
 logger = logging.getLogger(__name__)
@@ -45,27 +49,41 @@ class SqliteApplicationStore:
 
     def claim_pr_revision(self, repository_id, event) -> bool:
         """Unique insert/conditional update atomically excludes running/completed jobs."""
-        values = dict(revision_key=event.revision_key, repository_id=repository_id,
-            github_repository_id=str(event.github_repository_id), pull_request_number=event.pull_request_number,
-            base_sha=event.base_sha, head_sha=event.head_sha, delivery_id=event.delivery_id,
-            status='RUNNING', attempts=1, started_at=utc_now())
+        values = {
+            'revision_key': event.revision_key, 'repository_id': repository_id,
+            'github_repository_id': str(event.github_repository_id), 'pull_request_number': event.pull_request_number,
+            'base_sha': event.base_sha, 'head_sha': event.head_sha, 'delivery_id': event.delivery_id,
+            'status': 'RUNNING', 'attempts': 1, 'started_at': utc_now(),
+        }
         with self.session_factory() as session:
-            result = session.execute(insert(PullRequestRevisionModel).values(**values).on_conflict_do_nothing())
-            claimed = result.rowcount == 1
+            dialect = session.get_bind().dialect.name
+            if dialect == "sqlite":
+                insert = sqlite_insert
+            elif dialect == "postgresql":
+                insert = postgresql_insert
+            else:
+                raise RuntimeError("PR revision claims require SQLite or PostgreSQL")
+            result = session.execute(insert(PullRequestRevisionModel).values(**values)
+                .on_conflict_do_nothing().returning(PullRequestRevisionModel.revision_key))
+            # psycopg/SQLAlchemy need not preserve rowcount for INSERT. The
+            # returned key distinguishes a successful claim from a conflict.
+            claimed = result.scalar_one_or_none() is not None
             if not claimed:
                 result = session.execute(update(PullRequestRevisionModel).where(
                     PullRequestRevisionModel.revision_key == event.revision_key,
                     PullRequestRevisionModel.status.in_(['FAILED', 'SUPERSEDED'])).values(
                     status='RUNNING', delivery_id=event.delivery_id, started_at=utc_now(), completed_at=None,
-                    error=None, error_type=None, attempts=PullRequestRevisionModel.attempts + 1))
-                claimed = result.rowcount == 1
+                    error=None, error_type=None, attempts=PullRequestRevisionModel.attempts + 1)
+                    .returning(PullRequestRevisionModel.revision_key))
+                claimed = result.scalar_one_or_none() is not None
             session.commit()
             return claimed
 
     def finish_pr_revision(self, revision_key, status, error_type=None, error=None):
         with self.session_factory() as session:
             session.execute(update(PullRequestRevisionModel).where(
-                PullRequestRevisionModel.revision_key == revision_key).values(
+                PullRequestRevisionModel.revision_key == revision_key,
+                PullRequestRevisionModel.status == 'RUNNING').values(
                 status=status, completed_at=utc_now(), error_type=error_type, error=error))
             session.commit()
 
@@ -74,12 +92,29 @@ class SqliteApplicationStore:
             return session.get(PullRequestRevisionModel, revision_key)
 
     def recover_interrupted_pr_revisions(self):
-        # Called once at single-worker startup, never by a request or second job.
+        # SQLite preserves the historical single-worker development recovery.
+        # PostgreSQL cannot infer ownership of shared RUNNING revisions.
         with self.session_factory() as session:
+            if session.get_bind().dialect.name != "sqlite":
+                return
             session.execute(update(PullRequestRevisionModel).where(
                 PullRequestRevisionModel.status == 'RUNNING').values(status='FAILED',
                 completed_at=utc_now(), error_type='ProcessInterrupted', error='Worker stopped; redeliver to retry'))
             session.commit()
+
+    def recover_pr_revision(self, revision_key, expected_attempts, *, worker_stopped=False):
+        """Explicit operator recovery only after all possible owners have stopped."""
+        if not worker_stopped:
+            raise ValueError("Confirm the revision's worker is stopped before recovery")
+        with self.session_factory() as session:
+            result = session.execute(update(PullRequestRevisionModel).where(
+                PullRequestRevisionModel.revision_key == revision_key,
+                PullRequestRevisionModel.attempts == expected_attempts,
+                PullRequestRevisionModel.status == 'RUNNING',
+            ).values(status='FAILED', completed_at=utc_now(), error_type='ManualRecovery',
+                     error='Operator confirmed worker stopped; redeliver to retry'))
+            session.commit()
+            return result.rowcount == 1
 
     def encrypt_token(self, token: str) -> str:
         if not self.token_cipher:
@@ -94,7 +129,7 @@ class SqliteApplicationStore:
     def _connection_credential(self, connection):
         if (connection and connection.credential_kind == 'github_app' and connection.access_status == 'ACTIVE'
                 and connection.access_token_expires_at
-                and connection.access_token_expires_at.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)):
+                and connection.access_token_expires_at.replace(tzinfo=UTC) > datetime.now(UTC)):
             return GitHubCredential(self.decrypt_token(connection.access_token), connection.token_type)
         return None
 
@@ -110,6 +145,7 @@ class SqliteApplicationStore:
         expires_at: datetime | None = None,
         refresh_token: str | None = None,
         refresh_expires_at: datetime | None = None,
+        lease_owner: str | None = None,
     ) -> tuple[UserModel, GitHubConnectionModel]:
         """Upsert application user and GitHub connection from GitHub OAuth callback.
 
@@ -124,10 +160,16 @@ class SqliteApplicationStore:
         encrypted_refresh = self.encrypt_token(refresh_token) if refresh_token else None
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_user_id)
             )
             conn = session.scalars(stmt).first()
+            if lease_owner:
+                from ai_services.github_app.auth_state import AuthStateStore, InvalidAuthState
+                if conn is None:
+                    raise InvalidAuthState('GitHub account binding changed; restart authentication')
+                AuthStateStore.require_credentials(session, conn.user_id, lease_owner, self.token_cipher)
             collision = session.scalars(select(UserModel).where(UserModel.username == username)).first()
             if collision and (not conn or collision.id != conn.user_id):
                 # A renamed GitHub login is not proof of account identity.
@@ -178,9 +220,13 @@ class SqliteApplicationStore:
             session.refresh(conn)
             return user, conn
 
-    def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at):
+    def rotate_github_tokens(self, connection, access_token, refresh_token, expires_at, refresh_expires_at, lease_owner=None):
         """Commit the entire encrypted rotation, only if authorization is unchanged."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
+            if lease_owner:
+                from ai_services.github_app.auth_state import AuthStateStore
+                AuthStateStore.require_credentials(session, connection.user_id, lease_owner, self.token_cipher)
             result = session.execute(update(GitHubConnectionModel).where(
                 GitHubConnectionModel.id == connection.id,
                 GitHubConnectionModel.access_status == 'ACTIVE',
@@ -236,6 +282,7 @@ class SqliteApplicationStore:
     ) -> UserModel:
         """Create or update an application user."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(UserModel).where(
                 or_(UserModel.username == username, UserModel.id == user_id)
             ) if user_id else select(UserModel).where(UserModel.username == username)
@@ -268,6 +315,7 @@ class SqliteApplicationStore:
     ) -> GitHubConnectionModel:
         """Associate a user's GitHub identity and OAuth token with their user account."""
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(GitHubConnectionModel).where(
                 GitHubConnectionModel.user_id == user_id,
                 GitHubConnectionModel.github_user_id == str(github_user_id),
@@ -304,6 +352,7 @@ class SqliteApplicationStore:
         repo_pk = f"repo_{github_repo_id}"
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = select(RepositoryModel).where(
                 or_(
                     RepositoryModel.id == repo_pk,
@@ -316,7 +365,9 @@ class SqliteApplicationStore:
             if repo:
                 # Requirement 2: Do not silently transfer repository ownership
                 if repo.user_id and user_id and repo.user_id != user_id:
-                    from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictError
+                    from ai_services.ingestion.sources.interface import (
+                        RepositoryOwnershipConflictError,
+                    )
                     raise RepositoryOwnershipConflictError(
                         f"Repository '{metadata.full_name}' is already connected and owned by another user. "
                         "Ownership transfer is prohibited."
@@ -406,6 +457,31 @@ class SqliteApplicationStore:
             stmt = stmt.order_by(RepositoryModel.full_name)
             return list(session.scalars(stmt).all())
 
+    def repository_monitoring_bindings(self, items: list[dict]) -> dict[str, list]:
+        """Minimal unscoped ownership lookup; never load connection credentials.
+
+        Include all identifier aliases and all owners, just like get_repository.
+        Chunk parameters for large installations and SQLite's bind limit.
+        """
+        identifiers = sorted({value for item in items
+                              for value in (str(item['id']), item['full_name'])})
+        bindings = {identifier: [] for identifier in identifiers}
+        with self.session_factory() as session:
+            for offset in range(0, len(identifiers), 200):
+                chunk = identifiers[offset:offset + 200]
+                chunk_set = set(chunk)
+                rows = session.execute(select(
+                    RepositoryModel.id, RepositoryModel.github_repository_id,
+                    RepositoryModel.full_name, RepositoryModel.user_id,
+                    RepositoryModel.installation_id, RepositoryModel.status,
+                ).where(or_(RepositoryModel.id.in_(chunk),
+                            RepositoryModel.github_repository_id.in_(chunk),
+                            RepositoryModel.full_name.in_(chunk)))).all()
+                for row in rows:
+                    for identifier in {row.id, row.github_repository_id, row.full_name} & chunk_set:
+                        bindings[identifier].append(row)
+        return bindings
+
     def record_ingestion_start(
         self,
         repository_id: str,
@@ -416,6 +492,8 @@ class SqliteApplicationStore:
     ) -> IngestionRunModel:
         """Record the start of an ingestion run and transition repository to INDEXING."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             repo = session.get(RepositoryModel, repository_id)
             if not repo:
                 # Try finding by full_name or github_id
@@ -448,6 +526,8 @@ class SqliteApplicationStore:
     ) -> None:
         """Mark ingestion run and repository as COMPLETED and update indexed_commit_sha."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             run = session.get(IngestionRunModel, run_id)
             if run:
                 run.status = "COMPLETED"
@@ -475,6 +555,8 @@ class SqliteApplicationStore:
     ) -> None:
         """Mark ingestion run and repository as FAILED without advancing indexed_commit_sha."""
         with self.session_factory() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                raise RuntimeError("PostgreSQL ingestion requires the owned IngestionJobs lifecycle")
             run = session.get(IngestionRunModel, run_id)
             if run:
                 run.status = "FAILED"
@@ -559,13 +641,16 @@ class SqliteApplicationStore:
         import uuid
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             stmt = (
                 select(ADRModel)
                 .where(
                     ADRModel.repository_id == repository_id,
                     ADRModel.content_hash == content_hash,
+                    ADRModel.status != 'DELETED',
                 )
                 .order_by(ADRModel.created_at.desc())
+                .with_for_update()
             )
             existing = session.scalars(stmt).first()
 
@@ -579,7 +664,9 @@ class SqliteApplicationStore:
                 existing.title = title
                 existing.description = description
                 existing.source_name = source_name
-                existing.file_path = file_path
+                # A retry keeps the same ADR identity and immutable original.
+                # The proposed path contains a new provisional ID and cannot
+                # safely become this record's provenance location.
                 existing.file_size = file_size
                 existing.mime_type = mime_type
                 existing.file_extension = file_extension
@@ -633,6 +720,7 @@ class SqliteApplicationStore:
         import uuid
 
         with self.session_factory() as session:
+            serialize_metadata_write(session)
             adr = ADRModel(
                 id=adr_id or f"adr_{uuid.uuid4().hex[:12]}",
                 repository_id=repository_id,
@@ -656,10 +744,11 @@ class SqliteApplicationStore:
             return adr
 
 
-    def get_adr(self, adr_id: str) -> ADRModel | None:
-        """Fetch ADR by primary key."""
+    def get_adr(self, adr_id: str, *, include_deleted: bool = False) -> ADRModel | None:
+        """Fetch an active ADR; internal cleanup can explicitly include tombstones."""
         with self.session_factory() as session:
-            return session.get(ADRModel, adr_id)
+            record = session.get(ADRModel, adr_id)
+            return record if record and (include_deleted or record.status != 'DELETED') else None
 
     def get_adr_by_hash(self, repository_id: str, content_hash: str) -> ADRModel | None:
         """Fetch ADR by repository ID and content hash for duplicate detection."""
@@ -667,8 +756,16 @@ class SqliteApplicationStore:
             stmt = select(ADRModel).where(
                 ADRModel.repository_id == repository_id,
                 ADRModel.content_hash == content_hash,
+                ADRModel.status != 'DELETED',
             )
             return session.scalars(stmt).first()
+
+    def assert_adrs_active(self, repository_id, adr_ids):
+        with self.session_factory() as session:
+            if session.scalar(select(ADRModel.id).where(
+                ADRModel.repository_id == repository_id,
+                ADRModel.id.in_(tuple(adr_ids)), ADRModel.status == 'DELETED').limit(1)):
+                raise ValueError('Evaluation context contains a deleted ADR; rebuild context')
 
     def update_adr_status(
         self,
@@ -679,14 +776,17 @@ class SqliteApplicationStore:
     ) -> ADRModel | None:
         """Update ADR processing status, optional title, and error message."""
         with self.session_factory() as session:
+            # Atomic predicate prevents a stale ingestion result from reviving
+            # a tombstone after waiting on the deletion transaction's row lock.
+            from sqlalchemy import update
+            values = dict(status=status, error=error, updated_at=utc_now())
+            if title:
+                values['title'] = title
+            session.execute(update(ADRModel).where(
+                ADRModel.id == adr_id, ADRModel.status != 'DELETED').values(**values))
+            session.commit()
             adr = session.get(ADRModel, adr_id)
             if adr:
-                adr.status = status
-                if title:
-                    adr.title = title
-                adr.error = error
-                adr.updated_at = utc_now()
-                session.commit()
                 session.refresh(adr)
             return adr
 
@@ -695,20 +795,19 @@ class SqliteApplicationStore:
         with self.session_factory() as session:
             stmt = (
                 select(ADRModel)
-                .where(ADRModel.repository_id == repository_id)
+                .where(ADRModel.repository_id == repository_id, ADRModel.status != 'DELETED')
                 .order_by(ADRModel.created_at.desc())
             )
             return list(session.scalars(stmt).all())
 
     def delete_adr(self, adr_id: str) -> bool:
-        """Delete an ADR record."""
-        with self.session_factory() as session:
-            adr = session.get(ADRModel, adr_id)
-            if adr:
-                session.delete(adr)
-                session.commit()
-                return True
+        """Logical deletion, preserving provenance and a durable cleanup intent."""
+        from ai_services.ingestion.adr.jobs import ADRJobs
+        record = self.get_adr(adr_id, include_deleted=True)
+        if record is None:
             return False
+        ADRJobs(self.session_factory).delete_adr(record.repository_id, adr_id)
+        return True
 
 
 class SqliteCredentialProvider(CredentialProvider):

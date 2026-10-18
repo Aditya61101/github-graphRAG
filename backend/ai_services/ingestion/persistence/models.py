@@ -22,6 +22,19 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class GitHubAuthState(Base):
+    """Short-lived encrypted OAuth/handoff records shared by every API instance."""
+    __tablename__ = 'github_auth_state'
+    key = Column(String(64), primary_key=True)
+    purpose = Column(String(32), nullable=False)
+    user_id = Column(String(64), ForeignKey('users.id'), nullable=True)
+    github_user_id = Column(String(64), nullable=True)
+    browser_hash = Column(String(64), nullable=True)
+    payload = Column(Text, nullable=False)
+    expires_at = Column(Integer, nullable=False, index=True)
+    consumed_at = Column(Integer, nullable=True)
+
+
 class UserModel(Base):
     """Represents an authenticated application user."""
 
@@ -214,6 +227,15 @@ class IngestionRunModel(Base):
     completed_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
 
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at = Column(Integer, nullable=False, default=0, server_default="0")
+    owner = Column(String(64), nullable=True)
+    token = Column(Integer, nullable=True)
+    lease_until = Column(Integer, nullable=True)
+    force_full = Column(Integer, nullable=False, default=0, server_default="0")
+    branch = Column(String(100), nullable=True)
+    installation_id = Column(String(64), nullable=True)
+
     repository = relationship("RepositoryModel", back_populates="ingestion_runs")
 
     def to_dict(self) -> dict[str, Any]:
@@ -231,6 +253,32 @@ class IngestionRunModel(Base):
         }
 
 
+class ADRIngestionRun(Base):
+    """One durable execution identity per immutable ADR, using repository leases."""
+    __tablename__ = "adr_ingestion_runs"
+    adr_id = Column(String(64), ForeignKey("adrs.id"), primary_key=True)
+    run_id = Column(String(64), ForeignKey("ingestion_runs.id"), nullable=False, unique=True)
+
+
+class RepositoryIngestionState(Base):
+    """One durable ownership/read barrier per repository; no source or LLM cache."""
+    __tablename__ = "repository_ingestion_state"
+    repository_id = Column(String(64), ForeignKey("repositories.id"), primary_key=True)
+    epoch = Column(Integer, nullable=False, default=0)
+    state = Column(String(32), nullable=False, default="UNVERIFIED")
+    active_run_id = Column(String(64), nullable=True)
+    published_run_id = Column(String(64), nullable=True)
+    published_token = Column(Integer, nullable=True)
+
+
+class IngestionDelivery(Base):
+    __tablename__ = "ingestion_deliveries"
+    delivery_id = Column(String(255), primary_key=True)
+    repository_id = Column(String(64), ForeignKey("repositories.id"), nullable=False)
+    target_sha = Column(String(40), nullable=False)
+    run_id = Column(String(64), ForeignKey("ingestion_runs.id"), nullable=False)
+
+
 class ADRModel(Base):
     """Represents an Architecture Decision Record (ADR) associated with a repository."""
 
@@ -245,7 +293,7 @@ class ADRModel(Base):
     )
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    status = Column(String(32), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED
+    status = Column(String(32), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED, DELETED
 
     # Source metadata (designed for MANUAL_UPLOAD, CONFLUENCE, etc.)
     source_type = Column(String(32), default="MANUAL_UPLOAD", nullable=False)

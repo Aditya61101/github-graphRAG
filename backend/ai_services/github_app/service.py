@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import json
 import time
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -12,13 +16,20 @@ import jwt
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 
+from ai_services.ingestion.persistence.concurrency import serialize_metadata_write
 from ai_services.ingestion.persistence.models import (
-    GitHubConnectionModel, GitHubInstallationModel, InstallationRepositoryModel,
-    RepositoryModel, ConversationScopeModel, utc_now,
+    ConversationScopeModel,
+    GitHubConnectionModel,
+    GitHubInstallationModel,
+    InstallationRepositoryModel,
+    RepositoryModel,
+    utc_now,
 )
 from ai_services.ingestion.sources.credentials import GitHubCredential
 from ai_services.ingestion.sources.interface import RepositoryMetadata
+
 from .settings import GitHubAppSettings
+from .auth_state import AuthStateStore, InvalidAuthState
 
 
 class GitHubAppError(Exception):
@@ -29,12 +40,12 @@ class GitHubAppError(Exception):
 
 
 def parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+    return datetime.fromisoformat(value).astimezone(UTC)
 
 
 def as_utc(value: datetime) -> datetime:
     # SQLite returns naive UTC values even when aware timestamps were written.
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, datetime, datetime]:
@@ -52,8 +63,39 @@ def oauth_credentials(result: dict, issued_at: datetime) -> tuple[str, str, date
         raise GitHubAppError(502, 'Invalid GitHub OAuth credential response') from None
 
 
+def _binding_identity(repo):
+    if repo is None:
+        return None
+    return (repo.id, repo.github_repository_id, repo.user_id, repo.github_connection_id,
+            repo.installation_id, repo.full_name, repo.owner, repo.name, repo.access_state)
+
+
+@dataclass
+class _OverviewReadScope:
+    service: Any
+    user_id: str
+    repository: Any
+    connection_identity: tuple
+    can_view_settings: bool
+    active: bool = True
+
+    async def revalidate(self):
+        """Fresh provider and local checks before the response leaves its barrier."""
+        if _binding_identity(self.service.store.get_repository(self.repository.id)) != _binding_identity(self.repository):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        repo, selected = await self.service._verify_overview_read(self.user_id, self.repository.id)
+        connection = self.service._overview_connection_identity(self.user_id)
+        # A provider await may race with a local rebind, transfer or disconnect.
+        fresh = self.service.store.get_repository(self.repository.id)
+        if (connection != self.connection_identity or
+                _binding_identity(repo) != _binding_identity(self.repository) or
+                _binding_identity(fresh) != _binding_identity(self.repository)):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        self.can_view_settings = self.service._overview_can_view_settings(self.user_id, selected)
+
+
 class GitHubAppService:
-    """Single-worker service. User access and installation indexing are distinct."""
+    """User access and installation indexing are distinct; rotations are shared."""
     def __init__(self, store, settings: GitHubAppSettings, client: httpx.AsyncClient):
         self.store, self.settings, self.client = store, settings, client
         self.tokens: dict[tuple, tuple[str, datetime]] = {}
@@ -63,6 +105,8 @@ class GitHubAppService:
         # Keep a completed rotation until its transaction succeeds. A database
         # outage must not make the next request spend the old refresh token again.
         self.pending_rotations: dict[str, tuple] = {}
+        self.auth_states = AuthStateStore(store.session_factory, settings.encryption_key)
+        self._overview_scope = ContextVar('overview_read_scope', default=None)
 
     def app_jwt(self) -> str:
         now = int(time.time())
@@ -110,6 +154,7 @@ class GitHubAppService:
 
     def revoke_user(self, github_id: str, expected_token: str | None = None) -> None:
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             connection = session.scalars(select(GitHubConnectionModel).where(
                 GitHubConnectionModel.github_user_id == str(github_id))).first()
             if connection and (expected_token is None or connection.access_token == expected_token):
@@ -124,24 +169,52 @@ class GitHubAppService:
         raise GitHubAppError(401, 'GitHub reconnect required', reconnect_required=True)
 
     async def user_token(self, user_id: str, rejected_token: str | None = None) -> str:
-        # Supported runtime is one worker (OAuth state and jobs are process-local).
-        # Always re-read under the per-user lock before spending a rotating token.
-        async with self.user_locks.setdefault(user_id, asyncio.Lock()):
-            return await self._user_token_locked(user_id, rejected_token)
+        async with self.credential_lock(user_id) as owner:
+            try:
+                return await self._user_token_locked(user_id, rejected_token, owner)
+            except InvalidAuthState:
+                raise GitHubAppError(503, 'GitHub credential ownership changed; reconnect or retry shortly') from None
 
-    async def _user_token_locked(self, user_id: str, rejected_token: str | None) -> str:
+    @asynccontextmanager
+    async def credential_lock(self, user_id):
+        async with self.user_locks.setdefault(user_id, asyncio.Lock()):
+            try:
+                owner = self.auth_states.acquire_credentials(user_id)
+            except InvalidAuthState:
+                raise GitHubAppError(503, 'GitHub credentials are being updated; retry shortly') from None
+            try:
+                # Bound network work below the shared 120-second lease. No
+                # transaction or database connection is held during provider IO.
+                try:
+                    async with asyncio.timeout(90):
+                        yield owner
+                except TimeoutError:
+                    raise GitHubAppError(503, 'GitHub credentials update timed out; reconnect or retry shortly') from None
+            finally:
+                self.auth_states.release_credentials(user_id, owner)
+
+    async def _user_token_locked(self, user_id: str, rejected_token: str | None, owner=None) -> str:
         connection = self.store.get_user_github_connection(user_id)
         pending = self.pending_rotations.get(user_id)
+        shared = self.auth_states.get('rotation', user_id)
+        if shared:
+            payload = shared[1]
+            pending = (SimpleNamespace(id=payload['connection_id'], user_id=user_id,
+                access_token=payload['previous_access'], refresh_token=payload['previous_refresh']),
+                (payload['access'], payload['refresh'], datetime.fromisoformat(payload['expiry']),
+                 datetime.fromisoformat(payload['refresh_expiry'])))
+            self.pending_rotations[user_id] = pending
         if pending:
             previous, credentials = pending
             if (connection and connection.access_status == 'ACTIVE' and
                     connection.access_token == previous.access_token and
                     connection.refresh_token == previous.refresh_token):
-                self._persist_rotation(user_id, previous, credentials)
+                self._persist_rotation(user_id, previous, credentials, owner)
                 connection = self.store.get_user_github_connection(user_id)
             else:
                 # A new login or revocation supersedes any pending rotation.
-                del self.pending_rotations[user_id]
+                self.pending_rotations.pop(user_id, None)
+                self.auth_states.remove('rotation', user_id)
         if not connection or connection.credential_kind != 'github_app' or connection.access_status != 'ACTIVE':
             self._reconnect(connection)
         try:
@@ -149,7 +222,7 @@ class GitHubAppService:
         except (InvalidToken, RuntimeError):
             # Missing/misconfigured encryption keys are operational failures.
             raise GitHubAppError(503, 'Stored GitHub credentials unavailable') from None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expiry = connection.access_token_expires_at
         if expiry and as_utc(expiry) > now + timedelta(seconds=60) and token != rejected_token:
             return token
@@ -184,16 +257,25 @@ class GitHubAppService:
             # Client configuration errors and unknown responses do not revoke users.
             raise GitHubAppError(503, 'GitHub token refresh failed; retry later')
         credentials = oauth_credentials(result, now)
+        # Persist provider success before replacing stored credentials, so another
+        # instance can finish a failed SQL publication without spending the old
+        # rotating refresh token again. Payload is encrypted with the existing key.
+        self.auth_states.put('rotation', user_id, {
+            'connection_id': connection.id, 'previous_access': connection.access_token,
+            'previous_refresh': connection.refresh_token, 'access': credentials[0],
+            'refresh': credentials[1], 'expiry': credentials[2].isoformat(),
+            'refresh_expiry': credentials[3].isoformat()}, ttl=600, user_id=user_id, credential_owner=owner)
         self.pending_rotations[user_id] = (connection, credentials)
-        self._persist_rotation(user_id, connection, credentials)
+        self._persist_rotation(user_id, connection, credentials, owner)
         return credentials[0]
 
-    def _persist_rotation(self, user_id, connection, credentials):
+    def _persist_rotation(self, user_id, connection, credentials, owner=None):
         try:
-            self.store.rotate_github_tokens(connection, *credentials)
-        except Exception:
+            self.store.rotate_github_tokens(connection, *credentials, owner)
+        except Exception:  # noqa: BLE001 - sanitize storage errors and retain pending rotation
             raise GitHubAppError(503, 'Unable to persist GitHub token refresh; retry later') from None
-        del self.pending_rotations[user_id]
+        self.auth_states.remove('rotation', user_id)
+        self.pending_rotations.pop(user_id, None)
 
     async def user_request_pages(self, user_id: str, path: str, field: str) -> list[dict]:
         token = await self.user_token(user_id)
@@ -228,7 +310,7 @@ class GitHubAppService:
         async with lock:
             generation = self.generations.get(str(installation_id), 0)
             cached = self.tokens.get(key)
-            if cached and cached[1] > datetime.now(timezone.utc) + timedelta(seconds=60):
+            if cached and cached[1] > datetime.now(UTC) + timedelta(seconds=60):
                 return GitHubCredential(cached[0])
             body: dict[str, Any] = {'permissions': permissions}
             if repository_ids:
@@ -238,7 +320,7 @@ class GitHubAppService:
             if not isinstance(result, dict) or not isinstance(result.get('token'), str) or not result.get('expires_at'):
                 raise GitHubAppError(502, 'Invalid installation token response')
             expires = parse_time(result['expires_at'])
-            if expires <= datetime.now(timezone.utc) + timedelta(seconds=60):
+            if expires <= datetime.now(UTC) + timedelta(seconds=60):
                 raise GitHubAppError(502, 'Installation token already expired')
             if self.generations.get(str(installation_id), 0) != generation:
                 raise GitHubAppError(403, 'Installation access changed while issuing credentials')
@@ -248,6 +330,7 @@ class GitHubAppService:
     def persist_inventory(self, installation: dict, repositories: list[dict], status: str):
         iid = str(installation['id'])
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             item = session.get(GitHubInstallationModel, iid)
             previous = (item.status, item.repository_selection) if item else None
             if not item:
@@ -352,14 +435,21 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository is not currently granted to this user and App')
         return matches[0]
 
-    def monitoring_capabilities(self, user_id: str, item: dict) -> dict:
+    def monitoring_capabilities(self, user_id: str, item: dict, *, bindings=None) -> dict:
         """Use user-token permissions; never infer admin from installation inventory."""
         permissions = item.get('permissions')
         admin = permissions.get('admin') if isinstance(permissions, dict) else None
         admin = admin if type(admin) is bool else None
-        tracked = self.store.get_repository(str(item['id']))
-        named = self.store.get_repository(item['full_name'])
-        records = [record for record in (tracked, named) if record]
+        if bindings is None:
+            tracked = self.store.get_repository(str(item['id']))
+            named = self.store.get_repository(item['full_name'])
+            records = [record for record in (tracked, named) if record]
+        else:
+            by_id = bindings.get(str(item['id']), [])
+            by_name = bindings.get(item['full_name'], [])
+            tracked = by_id[0] if by_id else None
+            # Check every alias collision, including a different user's binding.
+            records = [*by_id, *by_name]
         if any(record.user_id and record.user_id != user_id for record in records):
             reason, allowed = 'owned_by_another_user', False
         elif admin is None:
@@ -399,12 +489,26 @@ class GitHubAppService:
             tracked_branch=branch or item.get('default_branch') or 'main',
             repository_url=item['html_url'], visibility='public'), user_id=user_id, connection_id=connection.id)
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             record = session.get(RepositoryModel, repo.id)
+            if record.user_id != user_id:
+                raise GitHubAppError(409, 'Repository ownership changed during binding')
+            installation = session.get(GitHubInstallationModel, str(item['installation_id']))
+            granted = session.get(InstallationRepositoryModel,
+                                  (str(item['installation_id']), record.github_repository_id))
+            if (not installation or installation.status != 'ACTIVE' or not granted
+                    or not granted.granted or granted.is_private
+                    or granted.full_name.lower() != record.full_name.lower()):
+                raise GitHubAppError(409, 'Installation access changed during repository binding')
             record.installation_id, record.access_state = item['installation_id'], 'ACTIVE'
             session.commit()
         return self.store.get_repository(repo.id)
 
     async def authorize_tracked(self, user_id: str, identifier: str, require_admin: bool = False):
+        repo, _ = await self._authorize_tracked(user_id, identifier, require_admin)
+        return repo
+
+    async def _authorize_tracked(self, user_id: str, identifier: str, require_admin: bool = False):
         repo = self.store.get_repository(identifier)
         if not repo:
             raise GitHubAppError(404, 'Repository not found')
@@ -417,7 +521,7 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository identity changed')
         if require_admin:
             self.require_monitoring_admin(user_id, selected)
-        return self.store.get_repository(repo.id)
+        return self.store.get_repository(repo.id), selected
 
     async def indexing_credential(self, repository_id: str, installation_id: str):
         repo = self.store.get_repository(repository_id)
@@ -450,6 +554,13 @@ class GitHubAppService:
 
     async def authorize_repository_read(self, user_id: str, identifier: str):
         """Shared knowledge reads only; never select, bind, or transfer ownership."""
+        scope = self._overview_scope.get()
+        if (scope is not None and scope.active and scope.user_id == user_id and
+                scope.repository.id == identifier):
+            return scope.repository
+        return await self._authorize_repository_read(user_id, identifier)
+
+    async def _authorize_repository_read(self, user_id: str, identifier: str):
         repo = self.store.get_repository(identifier)
         if not repo:
             raise GitHubAppError(404, 'Repository not found')
@@ -493,10 +604,70 @@ class GitHubAppService:
             raise GitHubAppError(403, 'Repository access changed during authorization')
         return fresh
 
+    def _overview_can_view_settings(self, user_id, selected):
+        if selected is None:
+            return False
+        # Reuse the final discovery's user permissions, retaining the complete
+        # established local ownership/admin policy without another discovery.
+        try:
+            self.require_monitoring_admin(user_id, selected)
+        except GitHubAppError as exc:
+            if exc.status_code in (403, 503):
+                return False
+            raise
+        return True
+
+    def _overview_connection_identity(self, user_id):
+        connection = self.store.get_user_github_connection(user_id)
+        if not connection or connection.access_status != 'ACTIVE':
+            raise GitHubAppError(401, 'GitHub reconnect required', reconnect_required=True)
+        # Legitimate token rotations may occur; the final verifier uses the new
+        # credentials. Identity replacement/disconnect must invalidate the scope.
+        return connection.id, connection.github_user_id
+
+    async def _verify_overview_read(self, user_id, identifier):
+        before = self.store.get_repository(identifier)
+        if before is None:
+            raise GitHubAppError(404, 'Repository not found')
+        if before.id != identifier:
+            raise GitHubAppError(400, 'A canonical tracked repository ID is required')
+        if before.user_id == user_id:
+            repo, selected = await self._authorize_tracked(user_id, identifier)
+        else:
+            repo, selected = await self._authorize_repository_read(user_id, identifier), None
+        # Live reconciliation may legitimately restore a previously removed
+        # access_state. Ownership/identity changes must never be accepted.
+        if (repo is None or repo.access_state != 'ACTIVE' or
+                _binding_identity(repo)[:-1] != _binding_identity(before)[:-1]):
+            raise GitHubAppError(403, 'Repository access changed during authorization')
+        return repo, selected
+
+    @asynccontextmanager
+    async def overview_read_scope(self, user_id, identifier):
+        """Overview-only internal reuse; mutation authorization never consults it.
+
+        Caller must revalidate within its response-wide graph-readiness barrier.
+        No scope survives request exit, including inherited child-task contexts.
+        """
+        identity = self._overview_connection_identity(user_id)
+        repo, _ = await self._verify_overview_read(user_id, identifier)
+        if self._overview_connection_identity(user_id) != identity:
+            raise GitHubAppError(403, 'GitHub identity changed during authorization')
+        # Settings are filled from the final live verification, never released
+        # from an earlier permission snapshot.
+        scope = _OverviewReadScope(self, user_id, repo, identity, False)
+        marker = self._overview_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            scope.active = False
+            self._overview_scope.reset(marker)
+
     def bind_conversation(self, user_id: str, repository_id: str, conversation_id: str):
         if len(conversation_id) > 255:
             raise GitHubAppError(400, 'Conversation ID is too long')
         with self.store.session_factory() as session:
+            serialize_metadata_write(session)
             scope = session.get(ConversationScopeModel, (user_id, conversation_id))
             if scope and scope.repository_id != repository_id:
                 raise GitHubAppError(409, 'Conversation belongs to a different repository')

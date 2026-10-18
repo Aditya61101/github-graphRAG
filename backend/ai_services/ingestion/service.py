@@ -104,6 +104,11 @@ class RepositoryIngestionService:
         installation_id: str | None = None,
     ) -> IngestionResult:
         """Trigger initial or incremental repository ingestion with user credential."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
+        from ai_services.ingestion.sources.github import GitHubRepositorySource
+        if isinstance(self.repository_source, GitHubRepositorySource):
+            raise RuntimeError("Repository ingestion must execute through the durable isolated worker")
         from ai_services.ingestion.sources.interface import RepositoryAuthenticationError
 
         if self.github_app and repository_id:
@@ -267,6 +272,8 @@ class RepositoryIngestionService:
                 progress_callback=audit.record_result,
                 publication_guard=lambda: self._check_publication(repo_id),
             )
+            # Full ingestion is an authoritative code-only reconciliation.
+            pipeline.neo4j_writer.reconcile_code(repo_id)
             result = await pipeline.ingest(plan.files)
             audit.record_result(result)
             audit.counts.persisted = await asyncio.to_thread(
@@ -474,15 +481,15 @@ class RepositoryIngestionService:
             self.metadata_store.record_ingestion_failure(repo_id, run.id, str(exc))
             raise
 
-    async def _run_community_pipeline(self, repository_id: str):
+    async def _run_community_pipeline(self, repository_id: str, *, reuse_unchanged: bool = False):
         """Run community detection and summarization scoped strictly to the specified repository."""
         if not self.llm or not self.embedder:
-            logger.info("Skipping community detection: LLM or Embedder not configured.")
-            return
+            raise RuntimeError("Required community LLM and embedder are not configured")
 
         try:
             config = CommunityConfig(
-                graph_name="entityGraph",
+                graph_name=(f"entityGraph_{repository_id}_{self.neo4j_driver.run.token}"
+                            if hasattr(self.neo4j_driver, "run") else "entityGraph"),
                 repository_id=repository_id,
                 algorithm="leiden",
                 random_seed=42,
@@ -494,12 +501,49 @@ class RepositoryIngestionService:
                 embedder=self.embedder,
                 config=config,
             )
+            if reuse_unchanged:
+                # ADR cleanup removes assertion/document nodes and isolated
+                # entities, never direct Entity->Entity edges. Existing memberships
+                # can therefore be reused if their persisted contexts are current.
+                # Recheck after every retry: a prior refresh may have failed after
+                # committing memberships or summaries, before embedding publication.
+                from ai_services.ingestion.community.embedder import compute_embedding_version_hash
+                result = await asyncio.to_thread(self.neo4j_driver.execute_query, """
+                    MATCH (c:Community {repository:$repo})
+                    RETURN c.communityId AS community_id
+                    UNION
+                    MATCH (e:Entity {repository:$repo})
+                    WHERE EXISTS {
+                        MATCH (e)-[r]-(other:Entity {repository:$repo})
+                        WHERE type(r) <> 'MEMBER_OF'
+                    } AND NOT EXISTS {
+                        MATCH (e)-[:MEMBER_OF]->(:Community {repository:$repo})
+                    }
+                    RETURN null AS community_id
+                    """, repo=repository_id, database_=self.database)
+                rows = result.records if hasattr(result, 'records') else result[0]
+                ids = [row['community_id'] for row in rows]
+                if None not in ids:
+                    contexts = await community_pipeline.store.load_community_contexts(ids)
+                    states = await community_pipeline.store.get_processing_states(ids)
+                    if ({ctx.community_id for ctx in contexts} == set(ids)
+                        and all((state := states.get(ctx.community_id)) is not None
+                            and state.has_summary and state.summary is not None
+                            and state.architectural_role is not None and state.summary_hash is not None
+                            and state.context_hash == ctx.context_hash() and state.has_embedding
+                            and state.embedded_summary_hash == compute_embedding_version_hash(
+                                state.summary_hash, config.include_key_entities_in_embedding)
+                            for ctx in contexts)):
+                        return None
             return await community_pipeline.run(force_refresh=False)
-        except Exception as exc:
-            logger.warning(f"Community pipeline error for repo {repository_id}: {exc}")
+        except Exception:
+            logger.exception("Required community pipeline failed")
+            raise
 
     async def handle_github_push_webhook(self, payload: dict[str, Any]) -> IngestionResult:
         """Process a GitHub push event on a tracked branch using stored user credential."""
+        from shared.utils.processing import require_background_processing
+        require_background_processing()
         repo_data = payload.get("repository", {})
         full_name = repo_data.get("full_name")
         github_repo_id = str(repo_data.get("id")) if repo_data.get("id") else None

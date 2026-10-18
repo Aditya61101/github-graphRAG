@@ -49,7 +49,7 @@ export function RepositoryHeader() {
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem render={<Link to="/settings" />}>
-                <UserRoundIcon aria-hidden="true" /> My profile
+                <UserRoundIcon aria-hidden="true" /> My Profile
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem

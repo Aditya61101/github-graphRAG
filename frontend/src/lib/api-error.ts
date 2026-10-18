@@ -1,5 +1,12 @@
 import axios from "axios";
 
+export function isAuthoritativeAccessError(error: unknown): boolean {
+  return (
+    axios.isAxiosError(error) &&
+    [401, 403, 404].includes(error.response?.status ?? 0)
+  );
+}
+
 export function isAccessDenied(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 403;
 }

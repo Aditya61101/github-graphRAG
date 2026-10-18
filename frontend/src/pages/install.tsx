@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { authService } from "@/api/auth-service";
+import { useGitHubAuth } from "@/hooks/use-github-auth";
 import { useAuth } from "@/contexts/auth-context";
 import { OnboardingScreen } from "@/components/onboarding/onboarding-screen";
 import {
@@ -11,6 +12,7 @@ import {
 import type { InstallationOutcome } from "@/types/auth";
 
 export default function InstallPage() {
+  const github = useGitHubAuth();
   const { user, token, status, confirmOnboarding, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -42,11 +44,6 @@ export default function InstallPage() {
     setActionError(failure.message);
     setActionOutcome(failure.outcome);
   };
-  const install = useMutation({
-    mutationFn: authService.startInstallation,
-    onSuccess: (url) => window.location.assign(url),
-    onError: reportError,
-  });
   const complete = useMutation({
     mutationFn: async () => {
       const result = await authService.completeOnboarding();
@@ -92,9 +89,9 @@ export default function InstallPage() {
       data={discovery.data}
       isLoading={discovery.isPending && !discovery.error}
       isRefreshing={discovery.isFetching}
-      busy={install.isPending || complete.isPending || verify.isPending}
+      busy={github.pending || complete.isPending || verify.isPending}
       action={
-        install.isPending
+        github.pending
           ? "install"
           : complete.isPending
             ? "complete"
@@ -103,7 +100,7 @@ export default function InstallPage() {
               : null
       }
       discoveryError={failure?.message ?? null}
-      actionError={actionError}
+      actionError={github.error ?? actionError}
       outcome={outcome}
       reconnect={
         status?.reconnect_required === true ||
@@ -112,7 +109,7 @@ export default function InstallPage() {
       }
       onInstall={() => {
         resetAction();
-        install.mutate();
+        github.start(true);
       }}
       onComplete={() => {
         resetAction();
@@ -126,7 +123,7 @@ export default function InstallPage() {
         resetAction();
         void discovery.refetch();
       }}
-      onReconnect={authService.loginWithGithub}
+      onReconnect={() => github.start()}
       onLogout={logout}
     />
   );

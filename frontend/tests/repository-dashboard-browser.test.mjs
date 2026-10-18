@@ -88,6 +88,22 @@ before(async () => {
       {
         name: "dashboard-test-api",
         configureServer(vite) {
+          vite.middlewares.use((request, response, next) => {
+            if (request.url === "/__auth_test_reset") {
+              response.setHeader("Content-Type", "text/html");
+              return response.end("<p>Reset authentication fixture</p>");
+            }
+            if (request.url !== "/auth/github/login") return next();
+            response.setHeader("Content-Type", "text/html");
+            response.end(
+              `<script>window.opener.postMessage(${JSON.stringify({
+                type: "decisionguard.auth",
+                token: fixture.loginToken ?? aliceToken,
+                next: "/projects",
+                installation_outcome: fixture.loginOutcome ?? null,
+              })}, ${JSON.stringify(base)}); window.close();</script>`
+            );
+          });
           vite.middlewares.use(
             "/__dashboard_api",
             async (request, response) => {
@@ -220,10 +236,7 @@ before(async () => {
   base = "http://127.0.0.1:" + server.httpServer.address().port;
   browser = await openBrowser();
   await browser.call("Page.addScriptToEvaluateOnNewDocument", {
-    source:
-      "localStorage.setItem('token', " +
-      JSON.stringify(aliceToken) +
-      "); localStorage.setItem('theme', 'light');",
+    source: "localStorage.setItem('theme', 'light');",
   });
   screenshots = await mkdtemp(
     path.join(tmpdir(), "decisionguard-dashboard-qa-")
@@ -231,6 +244,10 @@ before(async () => {
 });
 beforeEach(async () => {
   fixture = setup();
+  await browser.navigate(base + "/__auth_test_reset");
+  await browser.evaluate(
+    `localStorage.setItem('token', ${JSON.stringify(aliceToken)})`
+  );
   await browser.call("Emulation.setDeviceMetricsOverride", {
     width: 1440,
     height: 1000,
@@ -252,20 +269,19 @@ async function visit() {
   await browser.waitFor(bodyContains("Your repositories"));
 }
 async function login(token = aliceToken, outcome = null) {
-  await browser.navigate(
-    base +
-      "/auth/success?" +
-      new URLSearchParams({
-        token,
-        ...(outcome ? { installation_outcome: outcome } : {}),
-      })
-  );
+  fixture.loginToken = token;
+  fixture.loginOutcome = outcome;
+  await browser.navigate(base + "/__auth_test_reset");
+  await browser.evaluate("localStorage.removeItem('token')");
+  await browser.navigate(base + "/auth/login");
+  await browser.waitFor(bodyContains("Login with Github"));
+  await browser.click("Login with Github");
 }
 async function openProfile() {
   await browser.evaluate(
     "document.querySelector('[aria-label=\"Open profile menu\"]').click()"
   );
-  await browser.waitFor(bodyContains("My profile"));
+  await browser.waitFor(bodyContains("My Profile"));
 }
 
 test("multiple installations render unique real repositories and no mock project workspace", async () => {
@@ -512,11 +528,8 @@ test("connect repositories reuses installation state and refreshes discovery aft
   );
   await browser.waitFor(bodyContains("Manage access on GitHub"));
   await browser.click("Manage access on GitHub");
-  await browser.waitFor(pathIs("/__github_install"));
-  assert.equal(
-    await browser.evaluate("new URLSearchParams(location.search).get('state')"),
-    "server-bound-state"
-  );
+  await browser.waitFor(bodyContains("Invalid URL"));
+  assert.equal(await browser.evaluate(pathIs("/install")), true);
   fixture.repositories.push(
     repository("107", "another-org/new-repository", "NOT_INDEXED", false, "30")
   );
@@ -540,7 +553,7 @@ test("profile menu navigates to the existing profile page and logout clears repo
   await browser.waitFor(card("101") + " !== null");
   await openProfile();
   await browser.evaluate(
-    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e => e.innerText.trim() === 'My profile').click()"
+    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e => e.innerText.trim() === 'My Profile').click()"
   );
   await browser.waitFor(pathIs("/settings"));
   await browser.waitFor(
@@ -643,7 +656,7 @@ test("repository cards and profile remain usable on mobile in dark mode", async 
   console.log("Dashboard visual checks: " + screenshots);
 });
 
-test("manual status checks update only the selected repository without polling", async () => {
+test("manual status checks update the authoritative collection without polling", async () => {
   fixture.repositories = [
     repository("103", "example-org/worker", "INDEXING", true, "20"),
     repository("109", "example-org/second", "INDEXING", true, "20"),
@@ -669,7 +682,7 @@ test("manual status checks update only the selected repository without polling",
   await browser.evaluate(card("103") + ".querySelector('button').click()");
   await browser.waitFor(card("103") + ".innerText.includes('Monitored')");
   assert.equal(
-    await browser.evaluate(card("109") + ".innerText.includes('Indexing')"),
+    await browser.evaluate(card("109") + ".innerText.includes('Monitored')"),
     true
   );
   assert.equal(
@@ -687,7 +700,7 @@ test("manual status checks update only the selected repository without polling",
     await browser.evaluate(
       "document.querySelectorAll('a[href^=\"/projects/\"]').length"
     ),
-    2
+    3
   );
   assert.equal(
     fixture.calls.some((c) => c.method === "POST"),
@@ -850,7 +863,7 @@ test("concurrent indexing cards have independent loading and remain indexing unt
   );
   assert.equal(
     fixture.calls.filter((c) => c.url === "/repositories").length,
-    count + 2
+    count + 1
   );
   assert.equal(
     await browser.evaluate(

@@ -144,19 +144,20 @@ test("repository mapping preserves installation and distinct GitHub/internal IDs
   assert.equal(legacyDto.trackedRepositoryId, "repo_101");
 });
 
-test("installation start uses bearer auth and temporary-cookie credentials; me supplies profile", async () => {
+test("installation start uses bearer auth and secure handoff version; me supplies profile", async () => {
   storage.set("token", "application-token");
+  const handoff = {
+    flow: "post-handoff-v1",
+    method: "POST",
+    action: "https://api.example.test/auth/github/install/continue",
+    fields: { handoff: "synthetic-single-use-proof" },
+    expires_in: 120,
+  };
   const calls = [];
   apiClient.defaults.adapter = async (config) => {
     calls.push(config);
     return {
-      data:
-        config.url === "/auth/me"
-          ? status
-          : {
-              installation_url:
-                "https://github.com/apps/test/installations/new?state=123",
-            },
+      data: config.url === "/auth/me" ? status : handoff,
       status: 200,
       statusText: "OK",
       headers: {},
@@ -164,14 +165,14 @@ test("installation start uses bearer auth and temporary-cookie credentials; me s
     };
   };
   assert.deepEqual(await authService.getStatus(), status);
-  assert.equal(
-    await authService.startInstallation(),
-    "https://github.com/apps/test/installations/new?state=123"
-  );
+  assert.deepEqual(await authService.startInstallation(), handoff);
   assert.equal(calls[0].headers.Authorization, "Bearer application-token");
   assert.equal(calls[1].method, "post");
   assert.equal(calls[1].url, "/auth/github/install");
-  assert.equal(calls[1].withCredentials, true);
+  assert.equal(
+    calls[1].headers["X-DecisionGuard-Auth-Flow"],
+    "post-handoff-v1"
+  );
   assert.equal(calls[1].headers.Authorization, "Bearer application-token");
   assert.notEqual(calls[0].withCredentials, true);
 });

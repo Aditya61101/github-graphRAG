@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { createContext, useContext, useEffect, useRef } from "react";
 import {
   Link,
   NavLink,
@@ -7,7 +7,11 @@ import {
   useOutletContext,
   useParams,
 } from "react-router";
-import { useQuery } from "@tanstack/react-query";
+import {
+  CancelledError,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import axios from "axios";
 import {
   ArrowLeft,
@@ -17,12 +21,17 @@ import {
   GitBranch,
   GitPullRequest,
   LayoutDashboard,
+  LoaderCircle,
   Network,
-  Settings,
 } from "lucide-react";
 import { repositoryService } from "@/api/repository-service";
 import { RepositoryHeader } from "@/components/repositories/repository-header";
 import { Button } from "@/components/ui/button";
+import {
+  ContentLoading,
+  RefreshButton,
+} from "@/components/core/query-feedback";
+import { isAuthoritativeAccessError } from "@/lib/api-error";
 import {
   Sidebar,
   SidebarContent,
@@ -38,9 +47,23 @@ import {
 } from "@/components/ui/sidebar";
 import { useAuth } from "@/contexts/auth-context";
 import type { RepositoryOverview } from "@/types/overview";
+import {
+  adrStateOptions,
+  finishADRRecovery,
+  isGraphReadinessError,
+  readADRState,
+} from "@/lib/adr-reconciliation";
 
 export function useRepositoryOverview() {
   return useOutletContext<RepositoryOverview>();
+}
+
+const OverviewRefreshContext = createContext({
+  busy: false,
+  refresh: () => {},
+});
+export function useOverviewRefresh() {
+  return useContext(OverviewRefreshContext);
 }
 
 function RepositorySidebar({
@@ -66,9 +89,6 @@ function RepositorySidebar({
     ["explore", "Knowledge Explorer", Network],
     ["decisions", "Decisions", FileText],
     ["pull-requests", "Pull Requests", GitPullRequest],
-    ...(overview?.permissions.can_view_settings
-      ? [["settings", "Settings", Settings] as const]
-      : []),
   ] as const;
   const closeDrawer = () => {
     if (isMobile) setOpenMobile(false);
@@ -139,16 +159,25 @@ function RepositorySidebar({
 }
 
 export default function RepositoryLayout() {
+  const queryClient = useQueryClient();
   const { projectId = "" } = useParams();
   const { user, token } = useAuth();
   const location = useLocation();
   const isExplorer = location.pathname.endsWith("/explore");
   const isPRDetails = /\/pull-requests\/[^/]+\/?$/.test(location.pathname);
   const validId = /^repo_[A-Za-z0-9_-]+$/.test(projectId);
+  const scope = [user?.id, token, projectId];
+  const adrState = useQuery(adrStateOptions(scope));
   const overview = useQuery({
     queryKey: ["repository-overview", user?.id, token, projectId],
-    queryFn: ({ signal }) => repositoryService.getOverview(projectId, signal),
-    enabled: validId && Boolean(user && token),
+    queryFn: async ({ signal }) => {
+      const started = readADRState(queryClient, scope);
+      const result = await repositoryService.getOverview(projectId, signal);
+      if (signal.aborted) throw new CancelledError();
+      finishADRRecovery(queryClient, scope, started, result);
+      return result;
+    },
+    enabled: validId && Boolean(user && token) && !adrState.data.cleanup,
     retry: false,
     staleTime: 0,
     gcTime: 0,
@@ -156,6 +185,14 @@ export default function RepositoryLayout() {
     refetchOnReconnect: false,
   });
   const data = overview.data;
+  const blockingError =
+    overview.isError &&
+    (!data ||
+      isAuthoritativeAccessError(overview.error) ||
+      Boolean(adrState.data.cleanup));
+  const updating =
+    isGraphReadinessError(overview.error) ||
+    (Boolean(adrState.data.cleanup) && !overview.isError);
   const status = axios.isAxiosError(overview.error)
     ? overview.error.response?.status
     : undefined;
@@ -166,10 +203,6 @@ export default function RepositoryLayout() {
       : status === 403
         ? "Repository access denied"
         : "Unable to load repository";
-  const settingsDenied =
-    location.pathname.endsWith("/settings") &&
-    data &&
-    !data.permissions.can_view_settings;
   return (
     <div
       className={
@@ -190,7 +223,7 @@ export default function RepositoryLayout() {
         }
       >
         <RepositorySidebar
-          overview={overview.isError ? undefined : data}
+          overview={blockingError ? undefined : data}
           repositoryId={projectId}
         />
         <SidebarInset
@@ -210,7 +243,7 @@ export default function RepositoryLayout() {
               </Link>
               <span aria-hidden="true">/</span>
               <span className="truncate">
-                {!overview.isError && data
+                {!blockingError && data
                   ? data.repository.full_name
                   : "Repository"}
               </span>
@@ -225,7 +258,45 @@ export default function RepositoryLayout() {
                   : "mx-auto w-full max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8"
             }
           >
-            {!validId || overview.isError ? (
+            {validId && updating ? (
+              <section
+                role="status"
+                className="space-y-3 rounded-xl border bg-card p-6"
+              >
+                <h1 className="text-xl font-semibold">
+                  Updating repository knowledge
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  {adrState.data.cleanup
+                    ? adrState.data.uncertain
+                      ? "Deletion could not be confirmed. The server may already have saved the deletion. Refresh repository knowledge, then review source documents before retrying."
+                      : `Deleted ${adrState.data.cleanup}. ADR deleted. Updating repository knowledge. Some views may be temporarily unavailable.`
+                    : "Repository graph update or repair is in progress. Some views are temporarily unavailable."}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Refresh to check readiness. Background cleanup has not yet
+                  been confirmed complete.
+                </p>
+                <Button
+                  variant="outline"
+                  aria-busy={overview.isFetching}
+                  disabled={overview.isFetching}
+                  onClick={() =>
+                    void overview.refetch({ cancelRefetch: false })
+                  }
+                >
+                  {overview.isFetching && (
+                    <LoaderCircle
+                      aria-hidden="true"
+                      className="size-4 animate-spin motion-reduce:animate-none"
+                    />
+                  )}
+                  {overview.isFetching
+                    ? "Checking readiness..."
+                    : "Refresh repository knowledge"}
+                </Button>
+              </section>
+            ) : !validId || blockingError ? (
               <section role="alert" className="space-y-3 rounded-xl border p-6">
                 <h1 className="text-xl font-semibold">{errorTitle}</h1>
                 <p className="text-sm text-muted-foreground">
@@ -238,20 +309,18 @@ export default function RepositoryLayout() {
                 {validId && status !== 403 && status !== 404 && (
                   <Button
                     variant="outline"
-                    onClick={() => void overview.refetch()}
+                    aria-busy={overview.isFetching}
+                    disabled={overview.isFetching}
+                    onClick={() =>
+                      void overview.refetch({ cancelRefetch: false })
+                    }
                   >
                     Try again
                   </Button>
                 )}
               </section>
             ) : overview.isPending || !data ? (
-              <p
-                role="status"
-                aria-busy="true"
-                className="text-muted-foreground"
-              >
-                Loading repository workspace...
-              </p>
+              <ContentLoading label="Loading repository workspace..." cards />
             ) : (
               <>
                 {!isExplorer && !isPRDetails && (
@@ -299,13 +368,34 @@ export default function RepositoryLayout() {
                       : "Indexing is incomplete. Persisted decisions may represent a partial repository snapshot."}
                   </p>
                 )}
-                {settingsDenied ? (
-                  <section role="alert" className="rounded-xl border p-6">
-                    Repository administration permission has not been verified.
-                  </section>
-                ) : (
-                  <Outlet context={data} />
+                {overview.isError && (
+                  <div
+                    role="alert"
+                    className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3 text-sm"
+                  >
+                    <p>
+                      Unable to refresh repository information. Previously
+                      loaded information is shown.
+                    </p>
+                    <RefreshButton
+                      busy={overview.isFetching}
+                      label="Retry refresh"
+                      onRefresh={() => {
+                        void overview.refetch({ cancelRefetch: false });
+                      }}
+                    />
+                  </div>
                 )}
+                <OverviewRefreshContext.Provider
+                  value={{
+                    busy: overview.isFetching,
+                    refresh: () => {
+                      void overview.refetch({ cancelRefetch: false });
+                    },
+                  }}
+                >
+                  <Outlet context={data} />
+                </OverviewRefreshContext.Provider>
               </>
             )}
           </main>

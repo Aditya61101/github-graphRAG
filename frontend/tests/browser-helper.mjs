@@ -126,11 +126,12 @@ export async function openBrowser() {
     await call("Page.enable");
     await call("Runtime.enable");
     await call("Page.bringToFront");
-    const evaluate = async (expression) => {
+    const evaluate = async (expression, userGesture = false) => {
       const result = await call("Runtime.evaluate", {
         expression,
         returnByValue: true,
         awaitPromise: true,
+        userGesture,
       });
       if (result.exceptionDetails)
         throw new Error(result.exceptionDetails.text);
@@ -171,7 +172,8 @@ export async function openBrowser() {
           `Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim() === ${JSON.stringify(label)} && !b.disabled)`
         );
         await evaluate(
-          `Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === ${JSON.stringify(label)}).click()`
+          `Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === ${JSON.stringify(label)}).click()`,
+          true
         );
       },
       close: async () => {

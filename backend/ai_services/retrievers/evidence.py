@@ -38,8 +38,9 @@ class EvidenceCandidate:
 @dataclass(frozen=True)
 class RerankedEvidence:
     candidate: EvidenceCandidate
-    rerank_score: float
+    rerank_score: float | None
     rank: int
+    score_type: str = "reranker_relevance"
 
 
 def deduplicate_candidates(candidates, repository_id=None):
@@ -91,7 +92,7 @@ def select_evidence(reranked, candidates, *, min_score, max_evidence):
 
 
 def build_sources(selected):
-    """API score is reranker relevance; vector scores remain explicitly named."""
+    """Preserve score provenance and per-channel vector discovery metadata."""
     return {"chunks": [
         {
             **item.candidate.metadata,
@@ -100,7 +101,7 @@ def build_sources(selected):
             "repository": item.candidate.repository,
             "excerpt": item.candidate.text,
             "score": item.rerank_score,
-            "score_type": "reranker_relevance",
+            "score_type": item.score_type,
             "retrieval_scores": [
                 {"channel": signal.channel, "rank": signal.rank, "score": signal.score}
                 for signal in item.candidate.discovery_signals

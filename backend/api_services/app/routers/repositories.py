@@ -1,28 +1,58 @@
 from __future__ import annotations
 
+# FastAPI Depends/File defaults are route metadata, not ordinary mutable defaults.
+# ruff: noqa: B008
 import logging
 from typing import Any, Literal
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 
 from ai_services.github_app.service import GitHubAppError
-from ai_services.ingestion.persistence.models import UserModel
-from ai_services.ingestion.sources.interface import RepositoryOwnershipConflictError, RepositorySourceError
-from api_services.app.models.adr import ADRResponse, ADRBatchUploadResponse, ADRUploadItemResponse
-from api_services.app.models.graph import RepositoryGraphResponse
 from ai_services.graph.repository import GraphRepositoryError
-from api_services.app.models.knowledge import KnowledgePage, KnowledgeDetail
+from ai_services.ingestion.persistence.models import UserModel
+from ai_services.ingestion.sources.interface import (
+    RepositoryOwnershipConflictError,
+    RepositorySourceError,
+)
+from api_services.app.models.adr import (
+    ADRBatchUploadResponse,
+    ADRResponse,
+    ADRUploadItemResponse,
+    ADRStatusResponse,
+)
+from api_services.app.models.graph import RepositoryGraphResponse
+from api_services.app.models.knowledge import KnowledgeDetail, KnowledgePage
 from api_services.app.models.overview import (
     Availability, OverviewKPIs, OverviewMetric, OverviewPermissions,
     OverviewSection, RepositoryOverviewResponse, ReviewActivity, DecisionsAttention,
 )
 from api_services.app.models.query import APIResponse, QueryRequest
 from api_services.app.models.repository import (
-    AvailableRepositoryResponse, IngestRepositoryRequest, IngestionJobResponse,
-    RepositoryResponse, SyncRepositoryRequest,
+    AvailableRepositoryResponse,
+    IngestionJobResponse,
+    IngestRepositoryRequest,
+    RepositoryResponse,
+    SyncRepositoryRequest,
 )
-from api_services.app.utils.github_app_access import get_github_app, authorize_repository, authorize_repository_read, query_authorized
+from api_services.app.utils.github_app_access import (
+    authorize_repository,
+    authorize_repository_read,
+    authorized_overview,
+    get_github_app,
+    query_authorized,
+)
 from api_services.app.utils.jwt_utils import get_current_user
+from api_services.app.utils.processing import require_processing_enabled
 from api_services.app.utils.query_response_mapper import build_api_response
 
 logger = logging.getLogger(__name__)
@@ -37,6 +67,7 @@ def resource(request, name):
 
 
 async def _index(service, repo_id, installation_id, user_id, branch, force_full, trigger):
+    require_processing_enabled()
     return await service.ingest_repository(
         repo_identifier=repo_id, repository_id=repo_id, installation_id=installation_id,
         user_id=user_id, branch=branch, force_full=force_full, trigger=trigger,
@@ -51,30 +82,19 @@ async def _run_ingest_background(service, repo_id, installation_id, user_id, bra
 
 
 async def _start_index(request, background_tasks, user, repo, branch, force_full, sync, trigger):
-    service = resource(request, 'ingestion_service')
-    args = (service, repo.id, repo.installation_id, user.id, branch, force_full, trigger)
-    if not sync:
-        background_tasks.add_task(_run_ingest_background, *args)
-        return JSONResponse(status_code=202, content=IngestionJobResponse(
-            status='accepted', repository=repo.full_name, repository_id=repo.id,
-            message='Indexing scheduled with execution-time installation authorization.',
-        ).model_dump())
-    try:
-        result = await _index(*args)
-    except GitHubAppError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from None
-    except RepositorySourceError:
-        raise HTTPException(400, 'Repository could not be indexed; verify public access and branch') from None
-    except Exception:
-        logger.exception('Indexing failed repository=%s', repo.id)
-        raise HTTPException(500, 'Repository indexing failed') from None
-    return IngestionJobResponse(**vars(result))
+    from api_services.app.utils.ingestion import accept
+    run_id = await accept(request, background_tasks, repo, force_full=force_full, trigger=trigger)
+    return JSONResponse(status_code=202, content=IngestionJobResponse(
+        status='accepted', repository=repo.full_name, repository_id=repo.id, run_id=run_id,
+        message='Indexing accepted durably; check repository status for completion.',
+    ).model_dump())
 
 
 @router.post('/ingest', response_model=IngestionJobResponse)
 async def ingest_repository(payload: IngestRepositoryRequest, request: Request,
                             background_tasks: BackgroundTasks,
                             current_user: UserModel = Depends(get_current_user)) -> Any:
+    require_processing_enabled()
     app_service = get_github_app(request)
     try:
         selected = await app_service.select_repository(current_user.id, payload.repository, payload.installation_id)
@@ -115,6 +135,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
     # Prefer the existing owned binding if multiple installations grant one repository.
     accessible.sort(key=lambda item: 0 if tracked.get(str(item['id'])) and
                     tracked[str(item['id'])].installation_id == item['installation_id'] else 1)
+    bindings = resource(request, 'sqlite_store').repository_monitoring_bindings(accessible)
     output, seen = [], set()
     for item in accessible:
         rid = str(item['id'])
@@ -124,7 +145,7 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
         local = tracked.get(rid)
         output.append(AvailableRepositoryResponse(
             id=local.id if local else None, github_repository_id=rid,
-            monitoring=app_service.monitoring_capabilities(current_user.id, item),
+            monitoring=app_service.monitoring_capabilities(current_user.id, item, bindings=bindings),
             installation_id=item['installation_id'], owner=item['owner']['login'], name=item['name'],
             full_name=item['full_name'], repository_url=item['html_url'],
             default_branch=item.get('default_branch') or 'main',
@@ -137,9 +158,12 @@ async def list_user_repositories(request: Request, current_user: UserModel = Dep
 
 
 @router.get('/{repo_id}/overview', response_model=RepositoryOverviewResponse)
+@authorized_overview
 async def get_repository_overview(repo_id: str, request: Request,
                                  current_user: UserModel = Depends(get_current_user)):
-    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    scope = getattr(request.state, 'overview_read_scope', None)
+    repo = (scope.repository if scope is not None else
+            await authorize_repository_read(request, current_user.id, repo_id))
     # This endpoint accepts only canonical tracked IDs, never client graph scopes.
     if repo.id != repo_id:
         raise HTTPException(400, 'A canonical tracked repository ID is required')
@@ -155,8 +179,8 @@ async def get_repository_overview(repo_id: str, request: Request,
             raise HTTPException(exc.status_code, str(exc)) from None
     # Settings remains a placeholder. Reuse the existing verified admin policy;
     # unknown permissions must not make read-only Overview unavailable.
-    can_view_settings = False
-    if repo.user_id == current_user.id:
+    can_view_settings = scope.can_view_settings if scope is not None else False
+    if scope is None and repo.user_id == current_user.id:
         try:
             await get_github_app(request).authorize_tracked(current_user.id, repo.id, require_admin=True)
             can_view_settings = True
@@ -275,25 +299,29 @@ async def get_repository(owner: str, name: str, request: Request,
 async def sync_repository(owner: str, name: str, request: Request, background_tasks: BackgroundTasks,
                           payload: SyncRepositoryRequest | None = None,
                           current_user: UserModel = Depends(get_current_user)):
+    require_processing_enabled()
     repo = await authorize_repository(request, current_user.id, f'{owner}/{name}', require_admin=True)
     payload = payload or SyncRepositoryRequest()
     return await _start_index(request, background_tasks, current_user, repo, repo.tracked_branch,
                               payload.force_full, payload.sync, 'manual_sync')
 
 
-@router.post('/{repo_id}/adrs', response_model=ADRBatchUploadResponse, status_code=201,
+@router.post('/{repo_id}/adrs', response_model=ADRBatchUploadResponse, status_code=202,
              responses={207: {'model': ADRBatchUploadResponse, 'description': 'Per-file failures or duplicates'}})
 async def upload_adr(repo_id: str, request: Request,
                      files: list[UploadFile] = File(..., description='One or more ADR documents (.md, .txt, .pdf, .docx)'),
                      current_user: UserModel = Depends(get_current_user)) -> Any:
+    require_processing_enabled()
     repo = await authorize_repository(request, current_user.id, repo_id)
     try:
-        items = await resource(request, 'adr_service').process_adr_uploads(repo.id, current_user.id, files)
+        items = await resource(request, 'adr_service').process_adr_uploads(
+            repo.id, current_user.id, files, asynchronous=True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     result = ADRBatchUploadResponse(
         repository_id=repo.id, total=len(items),
         completed=sum(item.status == 'completed' for item in items),
+        accepted=sum(item.status == 'accepted' for item in items),
         duplicates=sum(item.status == 'duplicate' for item in items),
         failed=sum(item.status == 'failed' for item in items),
         results=[ADRUploadItemResponse(
@@ -301,5 +329,80 @@ async def upload_adr(repo_id: str, request: Request,
             error=item.error, adr=ADRResponse(**item.adr.to_dict()) if item.adr else None,
         ) for item in items],
     )
-    return JSONResponse(status_code=201 if result.completed == result.total else 207,
+    await _dispatch_adrs(request, [item.adr.id for item in items if item.adr and item.adr.status != 'COMPLETED'])
+    return JSONResponse(status_code=202 if not result.failed else 207,
                         content=result.model_dump(mode='json'))
+
+
+def _adr_status(record):
+    return ADRStatusResponse(adr_id=record.id, status=record.status,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
+        error='ADR ingestion failed; check status or retry.' if record.error else None)
+
+
+async def _dispatch_adrs(request, adr_ids):
+    import asyncio
+    import httpx
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    from ai_services.ingestion.dispatch import configured_dispatcher
+    jobs = ADRJobs(resource(request, 'sqlite_store').session_factory)
+    try:
+        async with asyncio.timeout(5), httpx.AsyncClient(timeout=5) as client:
+            dispatcher = configured_dispatcher(client)
+            runs = [jobs.for_adr(adr_id) for adr_id in set(adr_ids)]
+            await asyncio.gather(*(dispatcher.dispatch_adr(run.id) for run in runs
+                                   if run and run.status in {'QUEUED', 'RETRY', 'INDEXING'}))
+    except Exception as exc:
+        # Intent committed before this bounded best-effort launch. Recovery
+        # repeats dispatch; critical work never depends on the HTTP process.
+        logger.warning('ADR dispatch deferred type=%s', type(exc).__name__)
+
+
+async def _authorized_adr(request, current_user, repo_id, adr_id):
+    repo = await authorize_repository_read(request, current_user.id, repo_id)
+    record = resource(request, 'sqlite_store').get_adr(adr_id)
+    if not record or record.repository_id != repo.id:
+        raise HTTPException(404, 'ADR not found')
+    return record
+
+
+@router.get('/{repo_id}/adrs/{adr_id}/status', response_model=ADRStatusResponse)
+async def adr_status(repo_id: str, adr_id: str, request: Request,
+                     current_user: UserModel = Depends(get_current_user)):
+    return _adr_status(await _authorized_adr(request, current_user, repo_id, adr_id))
+
+
+@router.delete('/{repo_id}/adrs/{adr_id}', status_code=202)
+async def delete_adr(repo_id: str, adr_id: str, request: Request,
+                     background_tasks: BackgroundTasks,
+                     current_user: UserModel = Depends(get_current_user)):
+    repo = await authorize_repository(request, current_user.id, repo_id, require_admin=True)
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    jobs = ADRJobs(resource(request, 'sqlite_store').session_factory)
+    try:
+        jobs.delete_adr(repo.id, adr_id)
+    except ValueError:
+        raise HTTPException(404, 'ADR not found') from None
+    # Recovery dispatches the committed intent even if this response/process is lost.
+    background_tasks.add_task(_dispatch_adrs, request, [adr_id])
+    return {'adr_id': adr_id, 'status': 'DELETED'}
+
+
+@router.post('/{repo_id}/adrs/{adr_id}/retry', response_model=ADRStatusResponse, status_code=202)
+async def retry_adr(repo_id: str, adr_id: str, request: Request,
+                    current_user: UserModel = Depends(get_current_user)):
+    require_processing_enabled()
+    repo = await authorize_repository(request, current_user.id, repo_id)
+    resource(request, 'adr_service').validate_repository_access(repo.id, current_user.id)
+    record = resource(request, 'sqlite_store').get_adr(adr_id)
+    if not record or record.repository_id != repo.id:
+        raise HTTPException(404, 'ADR not found')
+    if record.status == 'COMPLETED':
+        raise HTTPException(409, 'ADR already completed')
+    from ai_services.ingestion.adr.jobs import ADRJobs
+    try:
+        ADRJobs(resource(request, 'sqlite_store').session_factory).enqueue_adr(adr_id, retry=True)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    await _dispatch_adrs(request, [adr_id])
+    return _adr_status(resource(request, 'sqlite_store').get_adr(adr_id))

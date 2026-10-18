@@ -118,7 +118,7 @@ class CommunityPipeline:
 
                 detection_result = await self.detector.detect(
                     self.driver,
-                    self.config.graph_name,
+                    self.config.effective_graph_name,
                 )
                 algorithm_name = detection_result.algorithm
 

@@ -145,6 +145,14 @@ class Neo4jVectorIndexManager(VectorIndexManager):
                 sim_fn,
             )
         except Exception as exc:
+            if (getattr(exc, "code", None) in {
+                    "Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists",
+                    "Neo.ClientError.Schema.IndexAlreadyExists"}
+                    and await self.get_index_details(name) is not None):
+                # Two repositories may initialize the same global index at once.
+                # Verify the winner's schema/dimensions rather than fail ingestion.
+                await self.ensure_index(expected_dimensions)
+                return
             raise CommunityVectorIndexError(
                 f"Failed to create community vector index '{name}': {exc}"
             ) from exc

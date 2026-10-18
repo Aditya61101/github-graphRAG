@@ -35,6 +35,14 @@ class ADRBatchUploadResponse(BaseModel):
     repository_id: str
     total: int
     completed: int
+    accepted: int = 0
     duplicates: int
     failed: int
     results: list[ADRUploadItemResponse]
+
+
+class ADRStatusResponse(BaseModel):
+    adr_id: str
+    status: str
+    updated_at: str | None = None
+    error: str | None = None

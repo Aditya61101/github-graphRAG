@@ -1,4 +1,5 @@
 import { apiClient } from "@/lib/api-client";
+import type { InstallationHandoff } from "@/lib/auth-popup";
 import type {
   AuthStatus,
   InstallationVerification,
@@ -32,17 +33,12 @@ export const authService = {
     );
     return response.data;
   },
-  startInstallation: async (): Promise<string> => {
-    const response = await apiClient.post<{ installation_url: string }>(
+  startInstallation: async (): Promise<InstallationHandoff> => {
+    const response = await apiClient.post<InstallationHandoff>(
       "/auth/github/install",
       undefined,
-      { withCredentials: true }
+      { headers: { "X-DecisionGuard-Auth-Flow": "post-handoff-v1" } }
     );
-    return response.data.installation_url;
-  },
-  loginWithGithub: () => {
-    window.location.assign(
-      `${import.meta.env.VITE_BACKEND_URL}/auth/github/login`
-    );
+    return response.data;
   },
 };

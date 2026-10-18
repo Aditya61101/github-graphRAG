@@ -1,8 +1,10 @@
 """Durable GitHub Checks delivery. This module has no model dependency."""
 
+import asyncio
 import uuid
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.orm import undefer
 
 from ai_services.decision_guard.evaluation.models import EvaluationResult
 from ai_services.github_app.service import GitHubAppError
@@ -10,8 +12,35 @@ from ai_services.github_app.service import GitHubAppError
 from .check_presentation import details_url, render_review
 from .projections import synchronize
 from .read_models import CheckPublication, PullRequestState
+from .check_lifecycle import enabled as lifecycle_enabled, intent as lifecycle_intent
+from .models import EvaluationJob, PullRequestEvaluationHead
 
 CHECK_NAME = "DecisionGuard / Architecture"
+
+
+class PublicationChanged(RuntimeError):
+    """The desired state advanced before the remote mutation fence."""
+
+
+def lifecycle_payload(job, row, result, full_name, *, retiring=False, details_base=None):
+    if retiring:
+        payload = check_payload(job, None, full_name)
+        payload.update(conclusion='cancelled', output={
+            'title': 'Architectural evaluation cancelled',
+            'summary': 'This PR revision is closed or superseded. No current-result conclusion is asserted.',
+        })
+        return payload
+    if row.desired_state == 'completed':
+        return check_payload(job, result, full_name, details_base=details_base)
+    return {
+        'name': CHECK_NAME, 'head_sha': job.head_sha,
+        'external_id': f'decisionguard:{job.id}', 'status': row.desired_state,
+        'output': {
+            'title': 'Architectural evaluation queued' if row.desired_state == 'queued'
+                     else 'Architectural evaluation in progress',
+            'summary': 'Evaluation has been accepted durably; execution and publication are recoverable.',
+        },
+    }
 
 
 def conclusion(result):
@@ -82,6 +111,12 @@ class CheckPublisher:
                                 CheckPublication.status == "PUBLISHING",
                                 CheckPublication.lease_until <= now,
                             ),
+                            *([and_(or_(CheckPublication.status == 'PUBLISHED', and_(
+                                    CheckPublication.status == 'STALE', or_(
+                                        CheckPublication.check_run_id.is_not(None),
+                                        CheckPublication.create_started_at.is_not(None)))),
+                                    CheckPublication.desired_version > CheckPublication.published_version)]
+                              if lifecycle_enabled() else []),
                         )
                     )
                     .limit(50)
@@ -106,6 +141,12 @@ class CheckPublisher:
                             CheckPublication.status == "PUBLISHING",
                             CheckPublication.lease_until <= now,
                         ),
+                        *([and_(or_(CheckPublication.status == 'PUBLISHED', and_(
+                                CheckPublication.status == 'STALE', or_(
+                                    CheckPublication.check_run_id.is_not(None),
+                                    CheckPublication.create_started_at.is_not(None)))),
+                                CheckPublication.desired_version > CheckPublication.published_version)]
+                          if lifecycle_enabled() else []),
                     ),
                 )
                 .values(
@@ -118,7 +159,7 @@ class CheckPublisher:
             )
             return token if changed.rowcount == 1 else None
 
-    def save(self, job_id, token, **values):
+    def save(self, job_id, token, *, expected_version=None, **values):
         with self.store.sessions.begin() as session:
             changed = session.execute(
                 update(CheckPublication)
@@ -127,11 +168,77 @@ class CheckPublisher:
                     CheckPublication.lease_token == token,
                     CheckPublication.status == "PUBLISHING",
                     CheckPublication.lease_until > self.store.clock(),
+                    *([CheckPublication.desired_version == expected_version]
+                      if expected_version is not None else []),
                 )
                 .values(updated_at=self.store.clock(), **values)
             )
             if changed.rowcount != 1:
-                raise RuntimeError("Publication ownership lost")
+                raise PublicationChanged("Publication ownership or desired version changed")
+
+    def snapshot(self, job_id):
+        """Refresh intent under the same job -> publication lock order as writers."""
+        with self.store.sessions.begin() as session:
+            job = session.get(EvaluationJob, job_id)
+            self.store._repository_lock(session, job.repository_id)
+            # Claims/failures also write jobs without the repository lock.
+            # Serialize the job+intent snapshot with those transactions so a
+            # newly completed intent cannot be paired with an older job body.
+            session.refresh(job, with_for_update=True)
+            evaluation_id = (EvaluationResult.model_validate_json(job.result_json).evaluation_id
+                             if job.result_json and job.stage == 'EVALUATED' and
+                             job.status not in {'QUEUED', 'RETRY', 'RUNNING'}
+                             else None)
+            lifecycle_intent(session, job, self.store.clock(), evaluation_id=evaluation_id)
+            row = session.scalar(select(CheckPublication).options(undefer('*')).where(
+                CheckPublication.job_id == job_id))
+            return job, row
+
+    def retire(self, job_id, token):
+        with self.store.sessions.begin() as session:
+            row = session.scalar(select(CheckPublication).options(undefer('*')).where(
+                CheckPublication.job_id == job_id).with_for_update())
+            if (row.status != 'PUBLISHING' or row.lease_token != token or
+                    row.lease_until <= self.store.clock()):
+                raise PublicationChanged('Publication ownership lost')
+            if row.desired_state != 'completed':
+                row.desired_state = 'completed'
+                row.desired_version += 1
+
+    def acknowledge(self, job_id, token, version, response, payload):
+        with self.store.sessions.begin() as session:
+            row = session.scalar(select(CheckPublication).options(undefer('*')).where(
+                CheckPublication.job_id == job_id).with_for_update())
+            if (row.status != 'PUBLISHING' or row.lease_token != token or
+                    row.lease_until <= self.store.clock()):
+                raise PublicationChanged('Publication ownership lost')
+            row.check_run_id = str(response['id'])
+            row.published_version = max(row.published_version, version)
+            row.status = 'PUBLISHED' if row.desired_version == version else 'RETRY'
+            row.conclusion = payload.get('conclusion')
+            row.published_at = row.updated_at = self.store.clock()
+            row.next_attempt_at = self.store.clock()
+            row.error_code = row.lease_token = row.lease_until = None
+
+    def preserve_completed_history(self, job_id, token):
+        # The validated remote Check is already terminal. Do not change its
+        # historical conclusion; acknowledge only that the desired state exists.
+        _, row = self.snapshot(job_id)
+        self.save(job_id, token, expected_version=row.desired_version,
+                  published_version=row.desired_version, status='STALE',
+                  error_code='PR_REVISION_NOT_CURRENT', lease_token=None, lease_until=None)
+
+    def current(self, job, pr):
+        with self.store.sessions() as session:
+            state = session.get(PullRequestState, (job.repository_id, job.pr_number))
+            head = session.get(PullRequestEvaluationHead, (job.repository_id, job.pr_number))
+            if state is None or state.freshness != 'OBSERVED':
+                raise GitHubAppError(503, 'PR freshness is not established; retry synchronization')
+            return (job.status != 'SUPERSEDED' and pr['state'] == 'open' and
+                    state is not None and state.freshness == 'OBSERVED' and
+                    (state.base_sha, state.head_sha) == (job.base_sha, job.head_sha) and
+                    (pr['base']['sha'], pr['head']['sha']) == (job.base_sha, job.head_sha) and
+                    head is not None and head.latest_job_id == job.id)
 
     def retry(self, job_id):
         """Operator retry independent of evaluation; unknown POSTs stay reconcile-only."""
@@ -153,7 +260,12 @@ class CheckPublisher:
         if token is None:
             return
         try:
-            await self._publish(job_id, token)
+            # Complete before the 180-second publication lease can be stolen.
+            async with asyncio.timeout(120):
+                await self._publish(job_id, token)
+        except asyncio.CancelledError:
+            self._cancelled(job_id, token)
+            raise
         except Exception as error:  # noqa: BLE001 -- publication never alters evaluation status
             with self.store.sessions() as session:
                 row = session.get(CheckPublication, job_id)
@@ -170,9 +282,11 @@ class CheckPublisher:
                     and error.status_code in {401, 403, 404}
                 )
                 else "CREATE_UNKNOWN"
-                if row.create_started_at and not row.check_run_id
+                if row.create_started_at is not None and not row.check_run_id
                 else "RETRY"
             )
+            if isinstance(error, PublicationChanged):
+                status = 'RETRY'
             # Only safe error codes are retained, never source/credential strings.
             try:
                 self.save(
@@ -180,17 +294,30 @@ class CheckPublisher:
                     token,
                     status=status,
                     error_code=code,
-                    next_attempt_at=self.store.clock()
-                    + min(3600, 2 ** min(row.attempts, 11)),
+                    next_attempt_at=self.store.clock() + (
+                        0 if isinstance(error, PublicationChanged)
+                        else min(3600, 2 ** min(row.attempts, 11))),
                     lease_token=None,
                     lease_until=None,
                 )
             except RuntimeError:
                 pass
 
+    def _cancelled(self, job_id, token):
+        # A cancelled POST may have committed. Keep its durable create marker.
+        try:
+            with self.store.sessions() as session:
+                row = session.get(CheckPublication, job_id)
+            self.save(job_id, token, status='CREATE_UNKNOWN' if
+                      row.create_started_at is not None and not row.check_run_id else 'RETRY',
+                      next_attempt_at=self.store.clock(), lease_token=None, lease_until=None)
+        except RuntimeError:
+            pass
+
     async def _publish(self, job_id, token):
+        phase_a = lifecycle_enabled()
         job = self.store.get(job_id)
-        if job.status in {"RUNNING", "QUEUED", "RETRY"}:
+        if not phase_a and job.status in {"RUNNING", "QUEUED", "RETRY"}:
             self.save(
                 job_id,
                 token,
@@ -202,9 +329,12 @@ class CheckPublisher:
             return
         with self.store.sessions() as session:
             row = session.get(CheckPublication, job_id)
+        if phase_a:
+            job, row = self.snapshot(job_id)
         result = (
             EvaluationResult.model_validate_json(job.result_json)
-            if job.result_json
+            if job.result_json and (not phase_a or
+                                   (row.desired_state == 'completed' and job.stage == 'EVALUATED'))
             else None
         )
         if result and row.evaluation_id != result.evaluation_id:
@@ -214,7 +344,8 @@ class CheckPublisher:
         )
         with self.store.sessions() as session:
             state = session.get(PullRequestState, (job.repository_id, job.pr_number))
-        if (
+        retiring = not self.current(job, pr) if phase_a else False
+        if not phase_a and (
             pr["state"] != "open"
             or state.freshness != "OBSERVED"
             or (state.base_sha, state.head_sha) != (job.base_sha, job.head_sha)
@@ -228,6 +359,8 @@ class CheckPublisher:
                 lease_until=None,
             )
             return
+        if retiring:
+            self.retire(job_id, token)
         repo = self.github.store.get_repository(job.repository_id)
         credential = await self.github.installation_token(
             repo.installation_id,
@@ -271,7 +404,7 @@ class CheckPublisher:
             if matches:
                 check_id = str(matches[0]["id"])
                 self.save(job_id, token, check_run_id=check_id)
-            elif row.create_started_at:
+            elif row.create_started_at is not None:
                 # GitHub has no idempotency key for POST. A timed-out POST may
                 # still commit later; absence from a GET is not proof of failure.
                 self.save(
@@ -284,6 +417,10 @@ class CheckPublisher:
                     lease_until=None,
                 )
                 return
+        if retiring and not check_id:
+            self.save(job_id, token, status='STALE', error_code='PR_REVISION_NOT_CURRENT',
+                      lease_token=None, lease_until=None)
+            return
         from .read_models import FindingRule
 
         with self.store.sessions() as session:
@@ -293,6 +430,9 @@ class CheckPublisher:
         payload = check_payload(
             job, result, repo.full_name, details_base=self.details_base, rules=rules
         )
+        if phase_a:
+            payload = lifecycle_payload(job, row, result, repo.full_name,
+                                        retiring=retiring, details_base=self.details_base)
         if check_id:
             remote = await self.github.request(
                 "GET", f"{prefix}/check-runs/{check_id}", credential.token
@@ -300,6 +440,9 @@ class CheckPublisher:
             validate_remote_check(
                 remote, job, repo.full_name, check_id, self.github.settings.app_id
             )
+            if retiring and remote.get('status') == 'completed':
+                self.preserve_completed_history(job_id, token)
+                return
         if "details_url" in payload:
             import httpx
 
@@ -316,10 +459,10 @@ class CheckPublisher:
         pr = await synchronize(
             self.store, self.github, job.repository_id, job.pr_number
         )
-        if pr["state"] != "open" or (pr["base"]["sha"], pr["head"]["sha"]) != (
+        if not phase_a and (pr["state"] != "open" or (pr["base"]["sha"], pr["head"]["sha"]) != (
             job.base_sha,
             job.head_sha,
-        ):
+        )):
             self.save(
                 job_id,
                 token,
@@ -329,8 +472,36 @@ class CheckPublisher:
                 lease_until=None,
             )
             return
+        version = None
+        if phase_a:
+            job, row = self.snapshot(job_id)
+            retiring = not self.current(job, pr)
+            if retiring:
+                self.retire(job_id, token)
+                job, row = self.snapshot(job_id)
+                if not check_id:
+                    self.save(job_id, token, status='STALE', error_code='PR_REVISION_NOT_CURRENT',
+                              lease_token=None, lease_until=None)
+                    return
+                if remote.get('status') == 'completed':
+                    self.preserve_completed_history(job_id, token)
+                    return
+            result = (EvaluationResult.model_validate_json(job.result_json)
+                      if job.result_json and job.stage == 'EVALUATED' and
+                      row.desired_state == 'completed' else None)
+            payload = lifecycle_payload(job, row, result, repo.full_name, retiring=retiring,
+                                        details_base=self.details_base if 'details_url' in payload else None)
+            # A previously completed remote Check must never regress to progress,
+            # including when a compatibility-mode publisher delivered completion.
+            if check_id and remote.get('status') == 'completed' and payload['status'] != 'completed':
+                raise PublicationChanged('Remote Check already completed')
+            version = row.desired_version
+            fresh_repo = self.github.store.get_repository(job.repository_id)
+            if (fresh_repo.installation_id, fresh_repo.github_repository_id, fresh_repo.full_name) != (
+                    repo.installation_id, repo.github_repository_id, repo.full_name):
+                raise ValueError('Repository binding changed during publication')
         if check_id:
-            self.save(job_id, token)  # fence immediately before idempotent PATCH
+            self.save(job_id, token, expected_version=version)  # fence before PATCH
             payload.pop("head_sha")
             response = await self.github.request(
                 "PATCH",
@@ -339,7 +510,7 @@ class CheckPublisher:
                 json=payload,
             )
         else:
-            self.save(job_id, token, create_started_at=self.store.clock())
+            self.save(job_id, token, expected_version=version, create_started_at=self.store.clock())
             try:
                 response = await self.github.request(
                     "POST", f"{prefix}/check-runs", credential.token, json=payload
@@ -355,6 +526,9 @@ class CheckPublisher:
             or (check_id and str(response["id"]) != check_id)
         ):
             raise ValueError("GitHub returned mismatched Check identity")
+        if phase_a:
+            self.acknowledge(job_id, token, version, response, payload)
+            return
         self.save(
             job_id,
             token,

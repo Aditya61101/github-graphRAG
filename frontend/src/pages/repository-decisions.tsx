@@ -1,17 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Loader, Search, Upload } from "lucide-react";
+import { Loader, Search, Upload } from "lucide-react";
+import { ADRDocumentEntry } from "@/components/repositories/adr-document";
 import { knowledgeService } from "@/api/knowledge-service";
 import { useRepositoryOverview } from "@/layouts/repository-layout";
 import { useAuth } from "@/contexts/auth-context";
-import { getApiErrorMessage } from "@/lib/api-error";
+import {
+  ContentLoading,
+  RefreshButton,
+} from "@/components/core/query-feedback";
+import {
+  isAuthoritativeAccessError,
+  getApiErrorMessage,
+} from "@/lib/api-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KnowledgeDetailModal } from "@/components/repositories/knowledge-detail-modal";
-import type { ADRUploadResult, KnowledgeItem } from "@/types/knowledge";
+import type {
+  ADRDocument,
+  ADRUploadResult,
+  KnowledgeItem,
+} from "@/types/knowledge";
 import { currentDecisionRiskIndicators } from "@/lib/decision-risk-indicators";
+import {
+  isGraphReadinessError,
+  canDeleteADR,
+  fetchADRDocuments,
+  readADRState,
+  reconcileADRDocuments,
+} from "@/lib/adr-reconciliation";
 
 const queryOptions = {
   retry: false,
@@ -50,11 +69,11 @@ export default function RepositoryDecisionsPage() {
   const { user, token } = useAuth();
   const scope = [user?.id, token, id];
   const canManage = overview.permissions.can_manage_source_documents === true;
+  const canDelete = canDeleteADR(overview.permissions);
   const riskIndicators = currentDecisionRiskIndicators(
     overview.decisions_needing_attention.items ?? [],
     overview.decisions_needing_attention.availability.status === "available"
   );
-  const [tab, setTab] = useState<"knowledge" | "sources">("knowledge");
   const [uploading, setUploading] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -62,6 +81,15 @@ export default function RepositoryDecisionsPage() {
   const [offset, setOffset] = useState(0);
   const [recordParams, setRecordParams] = useSearchParams();
   const selected = recordParams.get("record");
+  const tab = recordParams.get("tab") === "sources" ? "sources" : "knowledge";
+  const setTab = (nextTab: "knowledge" | "sources") => {
+    setRecordParams((params) => {
+      const next = new URLSearchParams(params);
+      if (nextTab === "sources") next.set("tab", "sources");
+      else next.delete("tab");
+      return next;
+    });
+  };
   const setSelected = (record: string | null) => {
     setRecordParams((params) => {
       const next = new URLSearchParams(params);
@@ -71,11 +99,13 @@ export default function RepositoryDecisionsPage() {
     });
   };
   const detailTrigger = useRef<HTMLButtonElement>(null);
+  const activeTab = canManage ? tab : "knowledge";
   const knowledge = useQuery({
     ...queryOptions,
     queryKey: ["architectural-knowledge", ...scope, search, kind, offset],
     queryFn: ({ signal }) =>
       knowledgeService.list(id, search, kind, offset, signal),
+    enabled: activeTab === "knowledge",
   });
   const detail = useQuery({
     ...queryOptions,
@@ -83,7 +113,6 @@ export default function RepositoryDecisionsPage() {
     queryFn: ({ signal }) => knowledgeService.detail(id, selected!, signal),
     enabled: selected !== null,
   });
-  const activeTab = canManage ? tab : "knowledge";
   return (
     <div className="space-y-6">
       <section className="space-y-2">
@@ -155,9 +184,12 @@ export default function RepositoryDecisionsPage() {
       </div>
       {activeTab === "sources" ? (
         <SourceDocuments
+          key={scope.join(":")}
           repositoryId={id}
           scope={scope}
           onProcessingChange={setUploading}
+          canDelete={canDelete}
+          focusUpload={selected === null}
         />
       ) : (
         <section
@@ -220,6 +252,7 @@ export default function RepositoryDecisionsPage() {
               variant="outline"
               className="ml-auto"
               disabled={knowledge.isFetching}
+              aria-busy={knowledge.isFetching}
               onClick={() => {
                 void queryClient.invalidateQueries({
                   queryKey: ["architectural-knowledge", ...scope],
@@ -229,23 +262,37 @@ export default function RepositoryDecisionsPage() {
                 });
               }}
             >
-              Refresh knowledge
+              {knowledge.isFetching && (
+                <Loader
+                  aria-hidden="true"
+                  className="size-4 animate-spin motion-reduce:animate-none"
+                />
+              )}
+              {knowledge.isFetching ? "Refreshing…" : "Refresh knowledge"}
             </Button>
           </div>
-          {knowledge.isError ? (
+          {knowledge.isError &&
+            knowledge.data &&
+            !(
+              isAuthoritativeAccessError(knowledge.error) ||
+              isGraphReadinessError(knowledge.error)
+            ) && (
+              <p role="alert" className="text-sm text-muted-foreground">
+                Unable to refresh knowledge. Previously loaded entries are
+                shown. Try Refresh knowledge again.
+              </p>
+            )}
+          {knowledge.isError &&
+          (!knowledge.data ||
+            isAuthoritativeAccessError(knowledge.error) ||
+            isGraphReadinessError(knowledge.error)) ? (
             <Failure
               error={knowledge.error}
-              retry={() => void knowledge.refetch()}
+              retry={() => void knowledge.refetch({ cancelRefetch: false })}
             />
           ) : knowledge.isPending ? (
-            <p
-              role="status"
-              aria-busy="true"
-              className="text-sm text-muted-foreground"
-            >
-              Loading architectural knowledge...
-            </p>
-          ) : knowledge.data.items.length === 0 ? (
+            <ContentLoading label="Loading architectural knowledge..." />
+          ) : knowledge.data!.items.length === 0 ? (
             <div className="rounded-xl border border-dashed p-8 text-center">
               <p className="font-medium">
                 {search || kind !== "all"
@@ -261,11 +308,11 @@ export default function RepositoryDecisionsPage() {
           ) : (
             <>
               <p role="status" className="text-xs text-muted-foreground">
-                Showing {offset + 1}–{offset + knowledge.data.items.length} of{" "}
-                {knowledge.data.total} entries
+                Showing {offset + 1}–{offset + knowledge.data!.items.length} of{" "}
+                {knowledge.data!.total} entries
               </p>
               <div className="space-y-3">
-                {knowledge.data.items.map((item) => (
+                {knowledge.data!.items.map((item) => (
                   <article
                     key={item.id}
                     className="rounded-xl border bg-card p-5"
@@ -329,7 +376,8 @@ export default function RepositoryDecisionsPage() {
                 <Button
                   variant="outline"
                   disabled={
-                    offset + knowledge.data.items.length >= knowledge.data.total
+                    offset + knowledge.data!.items.length >=
+                    knowledge.data!.total
                   }
                   onClick={() => setOffset(offset + 20)}
                 >
@@ -349,7 +397,10 @@ export default function RepositoryDecisionsPage() {
         detail={detail.data}
         error={detail.isError}
         failure={
-          <Failure error={detail.error} retry={() => void detail.refetch()} />
+          <Failure
+            error={detail.error}
+            retry={() => void detail.refetch({ cancelRefetch: false })}
+          />
         }
       />
     </div>
@@ -360,25 +411,49 @@ function SourceDocuments({
   repositoryId,
   scope,
   onProcessingChange,
+  canDelete,
+  focusUpload,
 }: {
   repositoryId: string;
   scope: (string | null | undefined)[];
   onProcessingChange: (processing: boolean) => void;
+  canDelete: boolean;
+  focusUpload: boolean;
 }) {
   const queryClient = useQueryClient();
   const documents = useQuery({
     ...queryOptions,
+    staleTime: 0,
     queryKey: ["adr-documents", ...scope],
-    queryFn: ({ signal }) => knowledgeService.documents(repositoryId, signal),
+    queryFn: ({ signal }) =>
+      fetchADRDocuments(
+        queryClient,
+        scope,
+        (requestSignal) =>
+          knowledgeService.documents(repositoryId, requestSignal),
+        signal
+      ),
   });
   const [files, setFiles] = useState<File[]>([]);
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<ADRUploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleted, setDeleted] = useState<string | null>(null);
   const locked = useRef(false);
   const request = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
-  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => {
+    if (focusUpload) input.current?.focus();
+  }, [focusUpload]);
+  useEffect(
+    () => () => {
+      request.current?.abort();
+      // URL-driven Back/Forward can leave this panel while an upload is pending.
+      // Release the parent tab lock as well as cancelling this panel's request.
+      onProcessingChange(false);
+    },
+    [onProcessingChange]
+  );
   const upload = async () => {
     if (locked.current || !files.length) return;
     locked.current = true;
@@ -388,6 +463,7 @@ function SourceDocuments({
     setResult(null);
     const controller = new AbortController();
     request.current = controller;
+    const started = readADRState(queryClient, scope);
     try {
       const response = await knowledgeService.upload(
         repositoryId,
@@ -395,6 +471,28 @@ function SourceDocuments({
         controller.signal
       );
       if (!controller.signal.aborted) {
+        await queryClient.cancelQueries({
+          queryKey: ["adr-documents", ...scope],
+        });
+        if (controller.signal.aborted) return;
+        const accepted = reconcileADRDocuments(
+          queryClient,
+          scope,
+          response.results.flatMap((item) => (item.adr ? [item.adr] : [])),
+          started
+        );
+        queryClient.setQueryData<ADRDocument[]>(
+          ["adr-documents", ...scope],
+          (current) => {
+            const entries = new Map(
+              (current ?? []).map((entry) => [entry.id, entry])
+            );
+            accepted.forEach((item) => {
+              entries.set(item.id, item);
+            });
+            return [...entries.values()];
+          }
+        );
         setResult(response);
         setFiles([]);
         if (input.current) input.current.value = "";
@@ -409,18 +507,25 @@ function SourceDocuments({
         );
     } finally {
       // A failed or cancelled HTTP request does not imply a server rollback.
-      // Mark both inventories stale even if this panel was unmounted.
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["adr-documents", ...scope],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["architectural-knowledge", ...scope],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["architectural-knowledge-detail", ...scope],
-        }),
-      ]);
+      // Mark inventories stale on navigation, but never let an upload begun
+      // before deletion/session replacement invalidate the recovered state.
+      const current = readADRState(queryClient, scope);
+      if (
+        current?.session === started?.session &&
+        current?.epoch === started?.epoch
+      ) {
+        await Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: ["adr-documents", ...scope],
+          }),
+          queryClient.invalidateQueries({
+            queryKey: ["architectural-knowledge", ...scope],
+          }),
+          queryClient.invalidateQueries({
+            queryKey: ["architectural-knowledge-detail", ...scope],
+          }),
+        ]);
+      }
       if (!controller.signal.aborted) {
         setProcessing(false);
         onProcessingChange(false);
@@ -438,8 +543,8 @@ function SourceDocuments({
       <div className="space-y-4 rounded-xl border bg-card p-5">
         <h2 className="font-semibold">Upload ADR source documents</h2>
         <p className="text-sm text-muted-foreground">
-          Upload Markdown, text, PDF, or Word documents. Processing completes
-          within this request.
+          Upload Markdown, text, PDF, or Word documents. Accepted documents are
+          processed in the background. Use Check Status to see progress.
         </p>
         <Label htmlFor="adr-files">ADR files</Label>
         <Input
@@ -453,14 +558,18 @@ function SourceDocuments({
         />
         <Button
           disabled={processing || files.length === 0}
+          aria-busy={processing}
           onClick={() => void upload()}
         >
           {processing ? (
-            <Loader aria-hidden="true" className="animate-spin" />
+            <Loader
+              aria-hidden="true"
+              className="animate-spin motion-reduce:animate-none"
+            />
           ) : (
             <Upload aria-hidden="true" />
           )}
-          {processing ? "Processing documents..." : "Upload documents"}
+          {processing ? "Uploading…" : "Upload documents"}
         </Button>
         {processing && (
           <p
@@ -468,8 +577,8 @@ function SourceDocuments({
             aria-busy="true"
             className="text-sm text-muted-foreground"
           >
-            Extracting architectural knowledge. Keep this page open until
-            processing finishes.
+            Saving documents for background processing. Ingestion continues
+            after the upload is accepted.
           </p>
         )}
         {error && (
@@ -487,8 +596,8 @@ function SourceDocuments({
             className="space-y-2 text-sm"
           >
             <p>
-              {result.completed} processed · {result.duplicates} duplicate ·{" "}
-              {result.failed} failed
+              {result.accepted ?? 0} accepted · {result.completed} processed ·{" "}
+              {result.duplicates} duplicate · {result.failed} failed
             </p>
             {result.results.map((item) => (
               <p key={item.index}>
@@ -500,52 +609,50 @@ function SourceDocuments({
       </div>
       <div className="flex items-center justify-between gap-3">
         <h2 className="font-semibold">Uploaded ADR documents</h2>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={documents.isFetching}
-          onClick={() => void documents.refetch()}
-        >
-          Refresh documents
-        </Button>
+        <RefreshButton
+          busy={documents.isFetching}
+          label="Refresh documents"
+          onRefresh={() => {
+            void documents.refetch({ cancelRefetch: false });
+          }}
+        />
       </div>
-      {documents.isError ? (
+      {deleted && (
+        <p role="status" className="text-sm">
+          Deleted {deleted}.
+        </p>
+      )}
+      {documents.isError &&
+        documents.data &&
+        !isAuthoritativeAccessError(documents.error) && (
+          <p role="alert" className="text-sm text-muted-foreground">
+            Unable to refresh documents. Previously loaded documents are shown.
+            Try Refresh documents again.
+          </p>
+        )}
+      {documents.isError &&
+      (!documents.data || isAuthoritativeAccessError(documents.error)) ? (
         <Failure
           error={documents.error}
-          retry={() => void documents.refetch()}
+          retry={() => void documents.refetch({ cancelRefetch: false })}
         />
       ) : documents.isPending ? (
-        <p role="status">Loading source documents...</p>
-      ) : documents.data.length === 0 ? (
+        <ContentLoading label="Loading source documents..." />
+      ) : documents.data!.length === 0 ? (
         <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
           No ADR source documents have been uploaded.
         </p>
       ) : (
         <div className="space-y-3">
-          {documents.data.map((document) => (
-            <article
+          {documents.data!.map((document) => (
+            <ADRDocumentEntry
               key={document.id}
-              className="space-y-2 rounded-xl border bg-card p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <h3 className="font-medium break-all">
-                  <FileText aria-hidden="true" className="mr-2 inline size-4" />
-                  {document.source_name}
-                </h3>
-                <span className="rounded-full border px-2 py-1 text-xs">
-                  {document.status}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {document.source_type} · Uploaded{" "}
-                {document.created_at
-                  ? new Date(document.created_at).toLocaleString()
-                  : "date unavailable"}
-              </p>
-              {document.error && (
-                <p className="text-sm text-destructive">{document.error}</p>
-              )}
-            </article>
+              document={document}
+              repositoryId={repositoryId}
+              scope={scope}
+              canDelete={canDelete}
+              onDeleted={setDeleted}
+            />
           ))}
         </div>
       )}

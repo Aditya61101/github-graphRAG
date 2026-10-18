@@ -1,291 +1,147 @@
-import { useState } from "react";
-
-import {
-  BlocksIcon,
-  GlobeIcon,
-  MailIcon,
-  Settings2Icon,
-  ShieldCheckIcon,
-} from "lucide-react";
-
+import { Link, useNavigate } from "react-router";
+import { ExternalLink, LogOut, ShieldCheck, TriangleAlert } from "lucide-react";
 import { AppHeader } from "@/components/core/app-header";
 import { GithubIcon } from "@/components/icons";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/auth-context";
-
-const SETTINGS_NAVIGATION = [
-  {
-    id: "general",
-    label: "General",
-    icon: Settings2Icon,
-  },
-  {
-    id: "connected-apps",
-    label: "Connected apps",
-    icon: BlocksIcon,
-  },
-] as const;
-
-const CONNECTED_APPS = [
-  {
-    name: "Confluence",
-    description:
-      "Import architecture decision records and internal engineering documentation.",
-    icon: GlobeIcon,
-    connected: true,
-    status: "24 synced pages",
-  },
-  {
-    name: "Google Drive",
-    description:
-      "Connect shared folders containing ADRs, RFCs, and technical specifications.",
-    icon: GlobeIcon,
-    connected: false,
-    status: "Not connected",
-  },
-];
+import { useGitHubAuth } from "@/hooks/use-github-auth";
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] =
-    useState<(typeof SETTINGS_NAVIGATION)[number]["id"]>("general");
-
-  const { user } = useAuth();
-
-  const headerCrumbs = [
-    { label: "Settings", pathname: "/settings" },
-    {
-      label: SETTINGS_NAVIGATION.find((s) => s.id === activeTab)!.label,
-      pathname: "/settings",
-    },
-  ];
-
-  const displayName = user?.username ?? "User";
-  const email = user?.email ?? "";
-
+  const { user, status, logout } = useAuth();
+  const github = useGitHubAuth();
+  const navigate = useNavigate();
+  const username = user?.username ?? "GitHub user";
+  const reconnect = status?.reconnect_required === true;
   return (
     <>
-      <AppHeader crumbs={headerCrumbs} />
-
-      <div className="flex flex-1 flex-col gap-6 p-4 pt-0">
-        <section className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+      <AppHeader
+        crumbs={[
+          { label: "All Repositories", pathname: "/projects" },
+          { label: "My Profile", pathname: "/settings" },
+        ]}
+      />
+      <main className="mx-auto w-full max-w-3xl space-y-6 p-4 sm:p-6">
+        <header className="space-y-2">
+          <h1 className="text-3xl font-semibold tracking-tight">My Profile</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your account, profile preferences, and connected
-            integrations.
+            Your identity is supplied by GitHub. Manage repository access
+            through your GitHub connection.
           </p>
-        </section>
-
-        <section className="grid gap-6 lg:grid-cols-[220px_1fr]">
-          <aside className="space-y-2">
-            {SETTINGS_NAVIGATION.map((item) => {
-              const Icon = item.icon;
-
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActiveTab(item.id)}
-                  className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left text-sm transition-colors ${
-                    activeTab === item.id
-                      ? "bg-muted font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                  }`}
-                >
-                  <Icon className="size-4" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </aside>
-
-          <div className="space-y-6">
-            {activeTab === "general" && (
-              <section className="rounded-xl border bg-background">
-                <div className="border-b px-6 py-4">
-                  <h2 className="text-xl font-semibold tracking-tight">
-                    General
-                  </h2>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Manage your profile information and account preferences.
-                  </p>
-                </div>
-
-                <div className="space-y-6 p-6">
-                  <div className="flex items-center gap-4 rounded-xl border p-4">
-                    <Avatar className="size-16 rounded-full border">
-                      <AvatarImage src={user?.avatarUrl} alt={displayName} />
-
-                      <AvatarFallback className="rounded-full bg-primary/10 text-primary">
-                        {displayName.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-
-                    <div>
-                      <h3 className="text-lg font-semibold">{displayName}</h3>
-
-                      <p className="text-sm text-muted-foreground">
-                        Authenticated GitHub account
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-5 lg:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="full-name">Full name</Label>
-                      <Input id="full-name" value={displayName} readOnly />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="display-name">Display name</Label>
-                      <Input id="display-name" value={displayName} readOnly />
-                    </div>
-                  </div>
-
-                  <div className="grid gap-5 lg:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="email">Email address</Label>
-
-                      <div className="relative">
-                        <MailIcon className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-
-                        <Input
-                          id="email"
-                          value={email}
-                          className="pl-9"
-                          readOnly
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="role">Workspace role</Label>
-                      <Input id="role" value="Administrator" readOnly />
-                    </div>
-                  </div>
-
-                  <div className="grid gap-4 sm:grid-cols-3">
-                    <div className="rounded-xl border p-4">
-                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                        Projects
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold">5</p>
-                    </div>
-
-                    <div className="rounded-xl border p-4">
-                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                        Repositories
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold">12</p>
-                    </div>
-
-                    <div className="rounded-xl border p-4">
-                      <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                        Indexed entities
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold">82K</p>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end gap-3">
-                    <Button variant="outline">Cancel</Button>
-                    <Button>Save changes</Button>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {activeTab === "connected-apps" && (
-              <section className="rounded-xl border bg-background">
-                <div className="border-b px-6 py-4">
-                  <h2 className="text-xl font-semibold tracking-tight">
-                    Connected apps
-                  </h2>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Manage integrations connected to your GraphRAG workspace.
-                  </p>
-                </div>
-
-                <div className="space-y-6 p-6">
-                  <div>
-                    <div className="mb-4 flex items-center gap-2">
-                      <BlocksIcon className="size-4 text-primary" />
-                      <h3 className="font-semibold">ADR integrations</h3>
-                    </div>
-
-                    <div className="space-y-4">
-                      {CONNECTED_APPS.map((app) => {
-                        const Icon = app.icon;
-
-                        return (
-                          <div
-                            key={app.name}
-                            className="flex flex-col gap-4 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between"
-                          >
-                            <div className="flex items-start gap-3">
-                              <div className="flex size-11 items-center justify-center rounded-lg bg-muted">
-                                <Icon className="size-5" />
-                              </div>
-
-                              <div>
-                                <h4 className="font-medium">{app.name}</h4>
-
-                                <p className="mt-1 text-sm text-muted-foreground">
-                                  {app.description}
-                                </p>
-
-                                <p className="mt-3 text-xs font-medium text-muted-foreground">
-                                  {app.status}
-                                </p>
-                              </div>
-                            </div>
-
-                            <Button
-                              variant={app.connected ? "outline" : "default"}
-                            >
-                              {app.connected ? "Manage" : "Connect"}
-                            </Button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="mb-4 flex items-center gap-2">
-                      <ShieldCheckIcon className="size-4 text-emerald-500" />
-                      <h3 className="font-semibold">Authenticated provider</h3>
-                    </div>
-
-                    <div className="flex flex-col gap-4 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="flex items-start gap-3">
-                        <div className="flex size-11 items-center justify-center rounded-lg bg-violet-500/15 text-violet-500">
-                          <GithubIcon className="size-5" />
-                        </div>
-
-                        <div>
-                          <h4 className="font-medium">
-                            GitHub ({displayName})
-                          </h4>
-                          <p className="text-sm text-muted-foreground">
-                            Connected through GitHub OAuth for repositories,
-                            commits, PRs, and GraphRAG ingestion workflows.
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                        Connected
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
+        </header>
+        <section
+          aria-label="GitHub profile"
+          className="space-y-6 rounded-xl border bg-card p-5 sm:p-6"
+        >
+          <div className="flex min-w-0 items-center gap-4">
+            <Avatar className="size-16 shrink-0 border">
+              <AvatarImage
+                src={user?.avatarUrl}
+                alt={`${username}'s GitHub avatar`}
+              />
+              <AvatarFallback className="bg-muted text-xl">
+                {username.charAt(0).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0 space-y-1">
+              <h2 className="text-xl font-semibold break-all">{username}</h2>
+              <p className="text-sm text-muted-foreground">
+                Authenticated GitHub account
+              </p>
+            </div>
           </div>
+          <dl className="grid gap-4 border-t pt-5 sm:grid-cols-2">
+            <div className="space-y-1">
+              <dt className="text-sm text-muted-foreground">GitHub username</dt>
+              <dd className="font-medium break-all">{username}</dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="text-sm text-muted-foreground">Email address</dt>
+              <dd className="font-medium break-all">
+                {user?.email?.trim() || "Not provided by GitHub"}
+              </dd>
+            </div>
+          </dl>
+          {user?.username && (
+            <Button
+              nativeButton={false}
+              variant="outline"
+              render={
+                <a
+                  href={`https://github.com/${encodeURIComponent(user.username)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                />
+              }
+            >
+              <GithubIcon aria-hidden="true" /> View GitHub account{" "}
+              <ExternalLink aria-hidden="true" />
+            </Button>
+          )}
         </section>
-      </div>
+        <section
+          aria-labelledby="github-connection-title"
+          className="space-y-4 rounded-xl border bg-card p-5 sm:p-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="github-connection-title" className="font-semibold">
+              GitHub connection
+            </h2>
+            <span
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm ${reconnect ? "text-amber-700 dark:text-amber-300" : "text-foreground"}`}
+            >
+              {reconnect ? (
+                <TriangleAlert aria-hidden="true" className="size-4" />
+              ) : (
+                <ShieldCheck aria-hidden="true" className="size-4" />
+              )}
+              {reconnect ? "Reconnection required" : "Connected"}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {reconnect
+              ? "Renew your GitHub authorization to check repository access. Your DecisionGuard account remains signed in."
+              : "Your GitHub authorization is connected. Repository grants are managed separately through the GitHub App."}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            {reconnect && (
+              <Button disabled={github.pending} onClick={() => github.start()}>
+                {github.pending ? "Waiting for GitHub..." : "Reconnect GitHub"}
+              </Button>
+            )}
+            <Button
+              nativeButton={false}
+              variant="outline"
+              render={<Link to="/install" />}
+            >
+              Manage repository access
+            </Button>
+          </div>
+          {github.error && (
+            <p role="alert" className="text-sm text-destructive">
+              {github.error}
+            </p>
+          )}
+        </section>
+        <footer className="flex flex-wrap items-center justify-between gap-3">
+          <Button
+            nativeButton={false}
+            variant="ghost"
+            render={<Link to="/projects" />}
+          >
+            All Repositories
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              logout();
+              navigate("/auth/login", { replace: true });
+            }}
+          >
+            <LogOut aria-hidden="true" /> Log out
+          </Button>
+        </footer>
+      </main>
     </>
   );
 }

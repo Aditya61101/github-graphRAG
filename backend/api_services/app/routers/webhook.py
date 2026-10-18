@@ -13,6 +13,8 @@ from ai_services.github_app.service import GitHubAppError
 from ai_services.ingestion.pr.models import PullRequestEvent
 from api_services.app.config import GITHUB_APP_WEBHOOK_SECRET
 from api_services.app.utils.github_app_access import get_github_app
+from api_services.app import config
+from api_services.app.utils.processing import require_processing_enabled
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,6 +30,7 @@ def verify_github_signature(raw_body, signature_header, secret):
 
 
 async def _process_push_in_background(service, payload):
+    require_processing_enabled()
     try:
         await service.handle_github_push_webhook(payload)
     except Exception:
@@ -146,6 +149,7 @@ async def _handle_installation(app_service, payload, event, installation_id):
 
 
 async def _queue_pr(request, background_tasks, normalized_pr, tracked):
+    require_processing_enabled()
     if (
         normalized_pr.base_repository_id != normalized_pr.github_repository_id
         or normalized_pr.repository_full_name.lower() != tracked.full_name.lower()
@@ -155,9 +159,14 @@ async def _queue_pr(request, background_tasks, normalized_pr, tracked):
     if orchestrator is None:
         raise HTTPException(503, "PR evaluation orchestration is not initialized")
     from sqlalchemy.exc import SQLAlchemyError
+    from ai_services.decision_guard.orchestration.profiles import (
+        EvaluationConfigurationError,
+    )
 
     try:
         job_id = await orchestrator.accept(tracked.id, normalized_pr, background_tasks)
+    except EvaluationConfigurationError as error:
+        raise HTTPException(503, str(error)) from None
     except SQLAlchemyError:
         # Never acknowledge a job whose durable transaction did not commit.
         raise HTTPException(
@@ -178,7 +187,7 @@ async def _queue_pr(request, background_tasks, normalized_pr, tracked):
     )
 
 
-def _queue_push(request, background_tasks, payload, tracked):
+async def _queue_push(request, background_tasks, payload, tracked):
     ref = payload.get("ref")
     if (
         not isinstance(ref, str)
@@ -187,13 +196,12 @@ def _queue_push(request, background_tasks, payload, tracked):
         or payload["after"] == "0" * 40
     ):
         return {"status": "ignored", "event": "push"}
-    service = getattr(request.app.state, "ingestion_service", None)
-    if service is None:
-        raise HTTPException(503, "Repository ingestion service is not initialized")
-    # Execution-time ingestion reacquires and rechecks installation credentials.
-    background_tasks.add_task(_process_push_in_background, service, payload)
+    require_processing_enabled()
+    from api_services.app.utils.ingestion import accept
+    run_id = await accept(request, background_tasks, tracked, target=payload["after"],
+        trigger="webhook_push", delivery_id=request.headers.get("X-GitHub-Delivery"))
     return JSONResponse(
-        status_code=202, content={"status": "accepted", "event": "push"}
+        status_code=202, content={"status": "accepted", "event": "push", "run_id": run_id}
     )
 
 
@@ -234,6 +242,7 @@ async def github_webhook(
         if tracked is None:
             return {"status": "ignored", "event": event}
         if normalized_pr is not None:
+            require_processing_enabled()
             # Metadata is synchronized from GitHub, never from arrival order.
             from ai_services.decision_guard.orchestration.projections import (
                 request_sync,
@@ -256,7 +265,14 @@ async def github_webhook(
                     pass  # both metadata and evaluation now have durable recovery
             return await _queue_pr(request, background_tasks, normalized_pr, tracked)
         if event == "push":
-            return _queue_push(request, background_tasks, payload, tracked)
+            return await _queue_push(request, background_tasks, payload, tracked)
+        if not config.ENABLE_BACKGROUND_PROCESSING:
+            pr = payload.get("pull_request") or {}
+            return {
+                "status": "acknowledged" if pr.get("merged") is True else "ignored",
+                "event": event,
+                "message": "Processing is disabled; no synchronization was queued.",
+            }
         from ai_services.decision_guard.orchestration.projections import (
             request_sync,
             synchronize,

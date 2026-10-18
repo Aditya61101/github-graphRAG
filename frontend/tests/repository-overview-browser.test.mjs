@@ -312,9 +312,12 @@ test("sidebar collapse, keyboard tooltip, active route and nested placeholders p
       contains("No observed pull requests") +
       " && document.querySelector('main h1')?.textContent === 'Pull Requests'"
   );
-  await clickLink("Settings");
-  await browser.waitFor(at("/projects/repo_101/settings"));
-  await browser.waitFor(contains("Coming later"));
+  assert.equal(
+    await browser.evaluate(
+      "!!document.querySelector('a[aria-label=Settings]')"
+    ),
+    false
+  );
   assert.equal(
     fixture.calls.filter((c) => c.url.endsWith("/overview")).length,
     1
@@ -380,7 +383,7 @@ test("loading, authorization, unknown repository and temporary failure with retr
   );
 });
 
-test("settings is hidden and direct settings navigation is denied without verified permission", async () => {
+test("settings is hidden and its legacy URL redirects to Overview without requiring admin", async () => {
   fixture.overview.permissions.can_view_settings = false;
   await visit();
   await ready();
@@ -391,9 +394,7 @@ test("settings is hidden and direct settings navigation is denied without verifi
     false
   );
   await visit("/projects/repo_101/settings");
-  await browser.waitFor(
-    contains("Repository administration permission has not been verified")
-  );
+  await ready();
   assert.equal(await browser.evaluate(contains("Coming later")), false);
 });
 
@@ -484,9 +485,9 @@ test("profile menu and logout preserve existing behavior and clear workspace con
   await browser.evaluate(
     "document.querySelector('[aria-label=\"Open profile menu\"]').click()"
   );
-  await browser.waitFor(contains("My profile"));
+  await browser.waitFor(contains("My Profile"));
   await browser.evaluate(
-    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e=>e.innerText.trim()==='My profile').click()"
+    "Array.from(document.querySelectorAll('[role=menuitem]')).find(e=>e.innerText.trim()==='My Profile').click()"
   );
   await browser.waitFor(at("/settings"));
   await visit();

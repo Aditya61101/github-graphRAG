@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate } from "react-router";
-import { lazy, Suspense } from "react";
+import { LazyPage } from "@/components/core/lazy-page";
+import { lazy } from "react";
 
 import { authRoutes } from "@/routers/auth-routes";
 import ProtectedRouter from "@/components/core/protected-route";
@@ -8,19 +9,33 @@ import { NotFound } from "@/pages/not-found";
 import ProjectsPage from "@/pages/projects";
 import RepositoryLayout from "@/layouts/repository-layout";
 import RepositoryOverviewPage from "@/pages/repository-overview";
-import RepositoryComingLater from "@/pages/repository-coming-later";
-import RepositoryDecisionsPage from "@/pages/repository-decisions";
-import RepositoryPullRequestsPage from "@/pages/repository-pull-requests";
-import RepositoryPullRequestDetailPage from "@/pages/repository-pull-request-detail";
+const RepositoryDecisionsPage = lazy(
+  () => import("@/pages/repository-decisions")
+);
+const RepositoryPullRequestsPage = lazy(
+  () => import("@/pages/repository-pull-requests")
+);
+const RepositoryPullRequestDetailPage = lazy(
+  () => import("@/pages/repository-pull-request-detail")
+);
 const ExplorePage = lazy(() => import("@/pages/explore"));
-import SettingsPage from "@/pages/settings";
-import InstallPage from "@/pages/install";
+const SettingsPage = lazy(() => import("@/pages/settings"));
+const InstallPage = lazy(() => import("@/pages/install"));
 
 export const appRouter = createBrowserRouter([
   ...authRoutes,
   {
     element: <ProtectedRouter requireInstallation={false} />,
-    children: [{ path: "/install", element: <InstallPage /> }],
+    children: [
+      {
+        path: "/install",
+        element: (
+          <LazyPage label="Loading repository access...">
+            <InstallPage />
+          </LazyPage>
+        ),
+      },
+    ],
   },
   {
     element: <ProtectedRouter />,
@@ -36,23 +51,39 @@ export const appRouter = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
           { path: "overview", element: <RepositoryOverviewPage /> },
-          { path: "decisions", element: <RepositoryDecisionsPage /> },
+          {
+            path: "decisions",
+            element: (
+              <LazyPage label="Loading Decisions...">
+                <RepositoryDecisionsPage />
+              </LazyPage>
+            ),
+          },
           {
             path: "explore",
             element: (
-              <Suspense
-                fallback={<p role="status">Loading Knowledge Explorer...</p>}
-              >
+              <LazyPage label="Loading Knowledge Explorer...">
                 <ExplorePage />
-              </Suspense>
+              </LazyPage>
             ),
           },
-          { path: "pull-requests", element: <RepositoryPullRequestsPage /> },
+          {
+            path: "pull-requests",
+            element: (
+              <LazyPage label="Loading pull requests...">
+                <RepositoryPullRequestsPage />
+              </LazyPage>
+            ),
+          },
           {
             path: "pull-requests/:prNumber",
-            element: <RepositoryPullRequestDetailPage />,
+            element: (
+              <LazyPage label="Loading pull request review...">
+                <RepositoryPullRequestDetailPage />
+              </LazyPage>
+            ),
           },
-          { path: "settings", element: <RepositoryComingLater /> },
+          { path: "settings", element: <Navigate to="../overview" replace /> },
         ],
       },
       {
@@ -61,8 +92,12 @@ export const appRouter = createBrowserRouter([
         children: [
           {
             path: "/settings",
-            element: <SettingsPage />,
-            handle: { breadcrumb: "Settings" },
+            element: (
+              <LazyPage label="Loading My Profile...">
+                <SettingsPage />
+              </LazyPage>
+            ),
+            handle: { breadcrumb: "My Profile" },
           },
         ],
       },

@@ -57,8 +57,23 @@ before(async () => {
                 reconnect_required: false,
                 installation_onboarding_required: false,
               });
-            if (url.pathname === "/repositories/repo_1120610241/overview")
+            if (url.pathname === "/repositories/repo_1120610241/overview") {
+              if (current.overviewDelay)
+                await new Promise((resolve) =>
+                  setTimeout(resolve, current.overviewDelay)
+                );
+              if (current.overviewFailure)
+                return json(
+                  {
+                    detail:
+                      current.overviewFailure === 503
+                        ? "Repository graph update or repair is in progress; retry later"
+                        : "Unavailable",
+                  },
+                  current.overviewFailure
+                );
               return json(current.overview);
+            }
             if (url.pathname === "/repositories/repo_1120610241/knowledge")
               return json({ items: [], total: 0, offset: 0, limit: 20 });
             if (
@@ -196,6 +211,11 @@ async function visit(path) {
   await browser.navigate(base + path);
 }
 async function link(text) {
+  // A title may already be visible in Overview while the PR list is loading.
+  // Wait for the actual navigation target before exercising it.
+  await browser.waitFor(
+    `Array.from(document.querySelectorAll('a')).some(a => a.textContent.includes(${JSON.stringify(text)}))`
+  );
   await browser.evaluate(
     `Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes(${JSON.stringify(text)})).click()`
   );
@@ -718,4 +738,157 @@ test("Stage 4.5.1 five tabs, finding navigation, evidence provenance and respons
     1
   );
   assert.ok(state.calls.every((call) => call.method === "GET"));
+});
+
+async function refreshBurst(label) {
+  await browser.evaluate(`(() => {
+    const b = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === ${JSON.stringify(label)});
+    b.click(); b.click(); b.click();
+  })()`);
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Refreshing') && b.disabled && b.getAttribute('aria-busy') === 'true')"
+  );
+}
+const callCount = (part) =>
+  state.calls.filter((c) => c.url.includes(part)).length;
+
+test("Batch 3 Overview refresh shares the layout query, retains safe content and fails closed", async () => {
+  state.overviewDelay = 700;
+  await visit(root + "/overview");
+  await browser.waitFor(
+    "document.querySelector('[role=status][aria-busy=true] [data-slot=skeleton]') !== null"
+  );
+  await browser.waitFor(contains("Architecture Overview"));
+  const before = state.calls.length;
+  const reads = callCount("/overview");
+  await browser.evaluate(
+    "void (window.overviewNode = document.querySelector('h1'))"
+  );
+  await refreshBurst("Refresh");
+  assert.equal(
+    await browser.evaluate(
+      "window.overviewNode === document.querySelector('h1')"
+    ),
+    true
+  );
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Refresh' && !b.disabled)"
+  );
+  assert.equal(callCount("/overview"), reads + 1);
+  assert.ok(
+    state.calls.slice(before).every((c) => c.url.endsWith("/overview"))
+  );
+  state.overviewFailure = 500;
+  await refreshBurst("Refresh");
+  await browser.waitFor(contains("Unable to refresh repository information"));
+  assert.equal(await browser.evaluate(contains("Architecture Overview")), true);
+  state.overviewFailure = 503;
+  await browser.click("Retry refresh");
+  await browser.waitFor(contains("Updating repository knowledge"));
+  assert.equal(
+    await browser.evaluate(contains("Architecture Overview")),
+    false
+  );
+  state.overviewFailure = null;
+  await browser.click("Refresh repository knowledge");
+  await browser.waitFor(contains("Architecture Overview"));
+  state.overviewFailure = 403;
+  await browser.click("Refresh");
+  await browser.waitFor(contains("Repository access denied"));
+  assert.equal(
+    await browser.evaluate(contains("Architecture Overview")),
+    false
+  );
+});
+
+test("Batch 3 PR refresh retains pagination, blocks duplicates, preserves safe rows and hides denied data", async () => {
+  state.delay = 600;
+  await visit(root + "/pull-requests");
+  await browser.waitFor(
+    "document.querySelector('[role=status][aria-busy=true] [data-slot=skeleton]') !== null"
+  );
+  await browser.waitFor(contains(actual.detail.pull_request.title));
+  await browser.click("Next");
+  await browser.waitFor(contains("Previous PR"));
+  const reads = callCount("/pull-requests?");
+  await refreshBurst("Refresh reviews");
+  assert.equal(await browser.evaluate(contains("Previous PR")), true);
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Refresh reviews') && !b.disabled)"
+  );
+  assert.equal(callCount("/pull-requests?"), reads + 1);
+  assert.ok(
+    state.calls
+      .filter((c) => c.url.includes("/pull-requests?"))
+      .at(-1)
+      .url.includes("offset=20")
+  );
+  state.failure = 500;
+  await refreshBurst("Refresh reviews");
+  await browser.waitFor(contains("Unable to refresh reviews"));
+  assert.equal(await browser.evaluate(contains("Previous PR")), true);
+  state.failure = 403;
+  await browser.click("Refresh reviews");
+  await browser.waitFor(
+    contains("You do not have access to this repository's reviews.")
+  );
+  assert.equal(await browser.evaluate(contains("Previous PR")), false);
+  assert.ok(state.calls.every((c) => c.method === "GET"));
+});
+
+test("Batch 3 detail refresh preserves selected historical revision without evaluation writes", async () => {
+  state.history = true;
+  state.delay = 600;
+  await visit(root + "/pull-requests/2");
+  await browser.waitFor(contains("Key architectural findings"));
+  await browser.click("History");
+  await browser.click("Next");
+  await browser.waitFor(
+    "document.querySelector('code[title=\"" + "a".repeat(40) + "\"]') !== null"
+  );
+  await browser.click("Inspect evaluation evidence");
+  await browser.waitFor(contains("Selected historical evaluation"));
+  await browser.waitFor(contains("Key architectural findings"));
+  const historyReads = callCount("/evaluations/");
+  const reads = callCount("/pull-requests/2?");
+  await browser.evaluate(
+    "void (window.reviewNode = document.querySelector('[data-testid=pr-review]'))"
+  );
+  await refreshBurst("Refresh review");
+  assert.equal(
+    await browser.evaluate(
+      "window.reviewNode === document.querySelector('[data-testid=pr-review]')"
+    ),
+    true
+  );
+  await browser.waitFor(
+    "Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Refresh review') && !b.disabled)"
+  );
+  assert.equal(callCount("/pull-requests/2?"), reads + 1);
+  assert.equal(callCount("/evaluations/"), historyReads);
+  assert.equal(
+    await browser.evaluate(contains("Selected historical evaluation")),
+    true
+  );
+  assert.equal(
+    await browser.evaluate(contains("Historical or stale evidence")),
+    true
+  );
+  state.failure = 500;
+  await refreshBurst("Refresh review");
+  await browser.waitFor(contains("Unable to refresh this review"));
+  assert.equal(
+    await browser.evaluate(contains("Selected historical evaluation")),
+    true
+  );
+  state.failure = 404;
+  await browser.click("Refresh review");
+  await browser.waitFor(
+    contains("This pull request or evaluation could not be found.")
+  );
+  assert.equal(
+    await browser.evaluate(contains("Selected historical evaluation")),
+    false
+  );
+  assert.ok(state.calls.every((c) => c.method === "GET"));
 });

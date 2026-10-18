@@ -58,7 +58,7 @@ def _hits(items, key):
 
 async def hybrid_retrieve(
     query: str, driver, database: str | None, embedder, entity_retriever,
-    community_retriever, reranker: Reranker, chunk_retriever=None,
+    community_retriever, reranker: Reranker | None = None, chunk_retriever=None,
     repository_id: str | None = None, settings: RetrievalSettings | None = None,
 ) -> HybridRetrievalResult:
     settings = settings or RetrievalSettings.from_env()
@@ -98,11 +98,22 @@ async def hybrid_retrieve(
     unique = deduplicate_candidates(candidates, repository_id)
     budgeted = budget_candidates(unique, settings.rerank_max_candidates)
     started = perf_counter()
-    reranked = await asyncio.to_thread(reranker.rerank, query, budgeted) if budgeted else []
-    selected = select_evidence(
-        reranked, budgeted, min_score=settings.rerank_min_score,
-        max_evidence=settings.rerank_max_evidence,
-    )
+    reranked = []
+    if reranker is None:
+        # Preserve vector discovery order and scores, without a relevance cutoff
+        # or the reranker's output cap. Never compare scores across indexes.
+        selected = [
+            RerankedEvidence(candidate, candidate.discovery_signals[0].score
+                             if candidate.discovery_signals else None, rank,
+                             score_type="vector_similarity")
+            for rank, candidate in enumerate(unique, 1)
+        ]
+    else:
+        reranked = await asyncio.to_thread(reranker.rerank, query, budgeted) if budgeted else []
+        selected = select_evidence(
+            reranked, budgeted, min_score=settings.rerank_min_score,
+            max_evidence=settings.rerank_max_evidence,
+        )
     duration_ms = (perf_counter() - started) * 1000
 
     # Only selected chunk IDs cross the provenance/output boundary.

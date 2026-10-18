@@ -1,4 +1,5 @@
 from __future__ import annotations
+from types import SimpleNamespace
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -79,6 +80,11 @@ def test_fastapi_query_endpoints_return_graph_context():
     mock_repo.github_connection = None
     mock_store.get_repository.return_value = mock_repo
 
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def ready_graph(repo_id):
+        yield (repo_id, 'mock-published-epoch')
+    app.state.graph_barrier = SimpleNamespace(read=ready_graph)
     app.state.rag_agent = mock_rag_agent
     app.state.sqlite_store = mock_store
     app.state.github_app = MagicMock()

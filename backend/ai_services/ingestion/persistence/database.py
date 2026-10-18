@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base, PullRequestRevisionModel
@@ -26,9 +28,28 @@ _sessionmaker = None
 def get_engine():
     global _engine
     if _engine is None:
-        url = get_database_url()
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        _engine = create_engine(url, connect_args=connect_args, echo=False)
+        try:
+            url = make_url(get_database_url())
+            options = {"connect_args": {}, "echo": False, "hide_parameters": True}
+            if url.get_backend_name() == "sqlite":
+                options["connect_args"] = {"check_same_thread": False}
+            elif url.get_backend_name() == "postgresql":
+                if url.drivername != "postgresql+psycopg":
+                    raise ValueError("PostgreSQL requires the psycopg dialect")
+                options.update(
+                    pool_size=3, max_overflow=2, pool_pre_ping=True,
+                    # Existing timestamp-without-time-zone columns store UTC.
+                    # psycopg sends aware datetimes; PostgreSQL must cast them
+                    # in UTC rather than the server's local timezone.
+                    pool_timeout=30, connect_args={"connect_timeout": 10, "options": "-c timezone=UTC"},
+                )
+            _engine = create_engine(url, **options)
+        except (SQLAlchemyError, ValueError, ImportError):
+            # Parser/driver errors can include the supplied URL. Do not expose it.
+            raise RuntimeError(
+                "Unable to configure application database; check DATABASE_URL "
+                "and the installed driver (PostgreSQL requires postgresql+psycopg)."
+            ) from None
     return _engine
 
 
@@ -40,8 +61,12 @@ def get_session_factory() -> sessionmaker[Session]:
 
 
 def init_db() -> None:
-    """Create all relational tables if they do not already exist."""
+    """Initialize local SQLite; validate explicitly initialized PostgreSQL."""
     engine = get_engine()
+    if engine.dialect.name == "postgresql":
+        from .postgres_schema import validate_postgresql_schema
+        validate_postgresql_schema(engine)
+        return
     with engine.begin() as conn:
         tables = inspect(conn).get_table_names()
         if tables and "app_schema_version" not in tables:
@@ -76,9 +101,15 @@ def init_db() -> None:
                 "CREATE TABLE app_schema_version (version INTEGER NOT NULL)"
             )
             conn.exec_driver_sql("INSERT INTO app_schema_version VALUES (3)")
+        from .migrate_ingestion import upgrade as upgrade_ingestion
+        upgrade_ingestion(conn)
         from .migrate_pr_orchestration import upgrade
 
         upgrade(conn)
         from .migrate_frontend_checks import upgrade as upgrade_frontend_checks
 
         upgrade_frontend_checks(conn)
+        from .migrate_adr_ingestion import upgrade as upgrade_adr
+        upgrade_adr(conn)
+        from .migrate_github_auth_state import upgrade as upgrade_auth
+        upgrade_auth(conn)
