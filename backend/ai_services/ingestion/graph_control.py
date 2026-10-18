@@ -73,12 +73,16 @@ class GraphControl:
                         "SET g.lease_until=$lease", repo=run.repository_id, lease=lease))
 
     def seal(self, run):
+        from shared.ai.space import assert_vector_space
+        assert_vector_space(FencedDriver(self, run), self.database, run.repository_id)
         with self.transaction(run) as tx:
             list(tx.run("MATCH (g:RepositoryGraphState {repository_id:$repo}) "
                         "SET g.state='COMPLETE'", repo=run.repository_id))
 
     def seal_adr(self, run, adr_id):
         """Graph publication only; SQL ADR COMPLETED is committed with run completion."""
+        from shared.ai.space import assert_vector_space
+        assert_vector_space(FencedDriver(self, run), self.database, run.repository_id)
         with self.transaction(run) as tx:
             rows = list(tx.run("MATCH (a:ADR {id:$adr, repository:$repo}) "
                 "SET a.status='PUBLISHED' RETURN a.id", adr=adr_id, repo=run.repository_id))

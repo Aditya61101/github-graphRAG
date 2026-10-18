@@ -66,13 +66,16 @@ async def test_fastapi_lifespan_needs_no_local_model(monkeypatch, processing):
     driver = MagicMock()
     monkeypatch.setattr(main, "GraphDatabase", SimpleNamespace(driver=MagicMock(return_value=driver)))
     for name in (
-        "AsyncAzureOpenAI", "AzureOpenAIEmbedder", "AzureChatOpenAI", "AzureOpenAILLM",
         "SqliteApplicationStore", "GitHubAppService", "GitHubOAuth", "GitHubRepositorySource",
         "RepositoryIngestionService", "PullRequestIngestionService", "ADRNeo4jWriter", "ADRProcessingService",
         "ADRChunker", "ADRArchitecturalExtractor", "ADREntityResolver", "ADRService",
         "Neo4jGraphRepository", "RepositoryGraphService",
     ):
         monkeypatch.setattr(main, name, MagicMock())
+    provider = SimpleNamespace(client=object(), embedder=SimpleNamespace(dimensions=3072),
+        llm=SimpleNamespace(client=object(), deployment="offline"),
+        chat_model=MagicMock(return_value=object()), aclose=AsyncMock())
+    monkeypatch.setattr(main, "create_provider", MagicMock(return_value=provider))
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(main, "create_retrievers", MagicMock(return_value=(object(), object(), object())))
     agent_factory = MagicMock()

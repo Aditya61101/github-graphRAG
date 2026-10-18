@@ -1,73 +1,41 @@
-import os
 from pathlib import Path
+import hashlib
+import json
+from shared.ai.provider import LLM
 
-from dotenv import load_dotenv
-from openai import AsyncAzureOpenAI
-
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
-
-from ..batching import BatchConfig, TokenBudgetBatcher
+from ..batching import TokenBudgetBatcher, extraction_batch_config
 from ..candidate_generation import RelationshipCandidateGenerator
 from ..canonicalization import EntityCanonicalizer
 from ..cross_chunk import CrossChunkReasoner
 from ..llm_adapters import (
-    AzureOpenAILLM,
-    AzureOpenAIExtractor,
-    AzureOpenAIRelationshipValidator,
-    # SentenceTransformerEmbedder,
+    ExtractionOutput,
+    StructuredExtractor,
+    StructuredRelationshipValidator,
 )
 from ..pipeline import PipelineConfig, RepositoryKnowledgePipeline
 from ..store import JsonlCandidateKnowledgeStore
 from ..token_estimation import rough_token_count
+from ..prompts import LOCAL_EXTRACTION_SYSTEM_PROMPT, LOCAL_EXTRACTION_USER_PROMPT
 
-load_dotenv()
-
-
-def _required_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-def build_extractor(azure_llm: AzureOpenAILLM):
-    return AzureOpenAIExtractor(azure_llm)
+def build_extractor(azure_llm: LLM):
+    return StructuredExtractor(azure_llm)
 
 
-def build_relationship_validator(*, azure_llm: AzureOpenAILLM):
-    return AzureOpenAIRelationshipValidator(azure_llm, minimum_confidence=0.70)
+def build_relationship_validator(*, azure_llm: LLM):
+    return StructuredRelationshipValidator(azure_llm, minimum_confidence=0.70)
 
 
-def build_knowledge_pipeline(candidates_path: str | Path, examples: str = ""):
-    api_version = _required_env("AZURE_OPENAI_API_VERSION")
-    # _validate_structured_output_api_version(api_version)
-    
-    client = AsyncAzureOpenAI(
-        azure_endpoint=_required_env("AZURE_OPENAI_ENDPOINT"),
-        api_key=_required_env("AZURE_OPENAI_API_KEY"),
-        api_version=api_version,
-    )
-    
-    azure_llm = AzureOpenAILLM(
-        client=client,
-        deployment=_required_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
-    )
-    
-    embedding_dimensions = int(
-        os.environ.get("AZURE_OPENAI_EMBEDDING_DIMENSIONS", "3072")
-    )
-    if embedding_dimensions <= 0:
-        raise RuntimeError(
-            "AZURE_OPENAI_EMBEDDING_DIMENSIONS must be a positive integer."
-        )
-
-    embedder = AzureOpenAIEmbedder(
-        client,
-        deployment=_required_env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
-        dimensions=embedding_dimensions,
-        batch_size=128,
-    )
-
-    # embedder = SentenceTransformerEmbedder(model_name="all-MiniLM-L6-v2")
+def build_knowledge_pipeline(candidates_path: str | Path, examples: str = "", *, llm=None, embedder=None):
+    if llm is None or embedder is None:
+        raise ValueError("Knowledge pipeline requires the application provider adapters")
+    azure_llm = llm  # historical parameter name; transport selected at the boundary
+    embedding_dimensions = embedder.dimensions
+    identity = getattr(llm, "identity", "azure-legacy")
+    candidates_path = Path(candidates_path)
+    if identity != "azure-legacy":
+        identity = hashlib.sha256(json.dumps([identity, LOCAL_EXTRACTION_SYSTEM_PROMPT,
+            LOCAL_EXTRACTION_USER_PROMPT, ExtractionOutput.model_json_schema(), examples], sort_keys=True).encode()).hexdigest()
+        candidates_path = candidates_path.with_name(candidates_path.stem + "_" + identity + candidates_path.suffix)
     store = JsonlCandidateKnowledgeStore(candidates_path)
 
     relationship_validator = build_relationship_validator(azure_llm=azure_llm)
@@ -80,8 +48,8 @@ def build_knowledge_pipeline(candidates_path: str | Path, examples: str = ""):
         candidate_generator=RelationshipCandidateGenerator(),
         cross_chunk_reasoner=CrossChunkReasoner(relationship_validator),
         batcher=TokenBudgetBatcher(
-            rough_token_count,
-            BatchConfig(max_tokens=12_000, max_chunks=32),
+            (lambda text: len(text.encode("utf-8"))) if getattr(llm, "provider", None) == "google" else rough_token_count,
+            extraction_batch_config(getattr(llm, "provider", None)),
         ),
         config=PipelineConfig(
             examples=examples,

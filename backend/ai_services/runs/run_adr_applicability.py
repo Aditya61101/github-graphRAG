@@ -11,13 +11,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
-from openai import AsyncAzureOpenAI
 
 from ai_services.ingestion.adr.applicability_store import ADRApplicabilityStore
 from ai_services.ingestion.adr.enrichment import ADRApplicabilityEnricher
 from ai_services.ingestion.adr.preview import SavedPreviewReport
 from ai_services.ingestion.adr.scope_resolver import ADRScopeResolver
-from shared.utils.llm_utils import AzureOpenAILLM
+from shared.ai.provider import create_provider, ProviderConfig
 
 
 def required_env(name: str) -> str:
@@ -105,24 +104,18 @@ async def main(argv=None) -> int:
             required_env("NEO4J_PASSWORD"),
         ),
     )
-    client = None
+    services = None
     try:
         driver.verify_connectivity()
-        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        deployment = ProviderConfig.from_env().model
         llm = None
         if (
             (args.apply or args.preview)
             and not args.refresh_associations
             and not args.from_preview
         ):
-            client = AsyncAzureOpenAI(
-                azure_endpoint=required_env("AZURE_OPENAI_ENDPOINT"),
-                api_key=required_env("AZURE_OPENAI_API_KEY"),
-                api_version=required_env("AZURE_OPENAI_API_VERSION"),
-            )
-            llm = AzureOpenAILLM(
-                client=client, deployment=required_env("AZURE_OPENAI_DEPLOYMENT_NAME")
-            )
+            services = create_provider()
+            llm = services.llm
         enricher = ADRApplicabilityEnricher(
             ADRApplicabilityStore(driver, database),
             ADRScopeResolver(driver, database),
@@ -151,8 +144,8 @@ async def main(argv=None) -> int:
             args.report.write_text(output + "\n", encoding="utf-8")
         return 1 if report.failed else 0
     finally:
-        if client:
-            await client.close()
+        if services:
+            await services.aclose()
         driver.close()
 
 

@@ -317,7 +317,7 @@ class RequestBudget:
         )
 
     def count(self, request, phase):
-        count = self.counter(wire_text(request, phase))
+        count = self.counter(wire_text(request, phase, self.settings.provider))
         if type(count) is not int or count < 0:
             raise EvaluationInputError("Tokenizer must return a nonnegative integer")
         return count + self.settings.provider_reserve
@@ -660,6 +660,9 @@ class _Runner(RequestBudget):
                         denied_reservation_tokens=reserve if denied else 0,
                         elapsed_ms=max(0, int((self.clock() - start) * 1000)),
                         request_id=reply.request_id if reply else None,
+                        **({name: getattr(reply, name) for name in (
+                            "provider", "provider_identity", "model_version", "thinking_tokens", "cached_input_tokens"
+                        )} if reply else {}),
                     )
                 if status == "OK" and output is not None:
                     return output, "OK"

@@ -71,6 +71,7 @@ class EvaluationStore:
                         raise ValueError(
                             "Webhook delivery identity was reused with different metadata"
                         )
+                    self._same_provider(job, settings)
                     if lifecycle_enabled():
                         lifecycle_intent(session, job, now)
                     return job.id
@@ -81,6 +82,8 @@ class EvaluationStore:
                     EvaluationJob.revision_key == event.revision_key,
                 )
             )
+            if job is not None:
+                self._same_provider(job, settings)
             if job is None:
                 job = EvaluationJob(
                     id=uuid.uuid4().hex,
@@ -178,6 +181,13 @@ class EvaluationStore:
             if lifecycle_enabled():
                 lifecycle_intent(session, job, now)
             return job.id
+
+    @staticmethod
+    def _same_provider(job, settings):
+        previous = EvaluationSettings.model_validate_json(job.settings_json)
+        if (previous.provider, previous.provider_identity, previous.evaluation_profile) != (
+                settings.provider, settings.provider_identity, settings.evaluation_profile):
+            raise ValueError("Existing revision belongs to a different provider; use an isolated evaluation history")
 
     @staticmethod
     def _advance(session, head, job_id, now):
@@ -781,6 +791,7 @@ class EvaluationStore:
                     "This evaluation was superseded by a different revision"
                 )
             if settings:
+                self._same_provider(job, settings)
                 previous = EvaluationSettings.model_validate_json(job.settings_json)
                 # These fields affect context pruning, source preparation or the
                 # coherent singleton feasibility probe. Reusing that checkpoint

@@ -26,7 +26,10 @@ Attribution = Literal[
 
 
 class EvaluationSettings(Contract):
-    token_encoding: Literal["o200k_base"] | None = None
+    provider: Literal["azure", "google"] = "azure"
+    provider_identity: str | None = None
+    evaluation_profile: str = "azure-legacy-v1"
+    token_encoding: Literal["o200k_base", "gemini-utf8-bound-v1"] | None = None
     profile: Literal["DEFAULT", "EXPANDED", "CUSTOM"] = "DEFAULT"
     max_attempts: int = Field(default=8, ge=1)
     max_tokens: int = Field(default=60000, ge=1)
@@ -69,6 +72,11 @@ class EvaluationSettings(Contract):
 
     @model_validator(mode="after")
     def valid(self):
+        if self.provider == "google" and (not self.provider_identity or
+                self.token_encoding != "gemini-utf8-bound-v1" or self.evaluation_profile != "gemini-v1"):
+            raise ValueError("Google evaluation requires persisted provider identity and Gemini sizing profile")
+        if self.provider == "azure" and self.token_encoding == "gemini-utf8-bound-v1":
+            raise ValueError("Gemini sizing cannot be used for Azure")
         if self.max_output_tokens + self.provider_reserve >= self.model_window:
             raise ValueError("Model window cannot hold output and provider reserves")
         rates = (self.input_rate_per_million, self.output_rate_per_million)
@@ -386,6 +394,11 @@ class ModelReply(Contract):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     request_id: str | None = None
+    provider: Literal["azure", "google"] = "azure"
+    provider_identity: str | None = None
+    model_version: str | None = None
+    thinking_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
     wire_output_json: str | None = None
     response_diagnostics: tuple[ResponseDiagnostic, ...] = Field(
         default=(), max_length=8
@@ -414,6 +427,11 @@ class CallRecord(Contract):
     denied_reservation_tokens: int = Field(default=0, ge=0)
     elapsed_ms: int = Field(ge=0)
     request_id: str | None = None
+    provider: Literal["azure", "google"] = "azure"
+    provider_identity: str | None = None
+    model_version: str | None = None
+    thinking_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def denial_is_not_usage(self):

@@ -1,5 +1,6 @@
 """ADR intents reuse repository ingestion ownership, without target coalescing."""
 import uuid
+from shared.ai.provider import ingestion_identity, validate_ingestion_identity
 from types import SimpleNamespace
 from sqlalchemy import select
 from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
@@ -44,6 +45,7 @@ class ADRJobs(IngestionJobs):
                 raise ValueError('ADR cleanup identity conflict')
             if run is None:
                 run = IngestionRunModel(id=adr_id, repository_id=repo.id,
+                    provider_identity=ingestion_identity(),
                     # Cleanup does not check out this target. Claim fills the
                     # current baseline before writing; legacy pre-baseline ADRs
                     # remain hidden while waiting for initial repository repair.
@@ -56,6 +58,7 @@ class ADRJobs(IngestionJobs):
                 run.status, run.attempts, run.next_attempt_at = 'QUEUED', 0, self._now(s)
                 run.error, run.completed_at = None, None
             adr.status, adr.error, adr.updated_at = 'DELETED', None, utc_now()
+            validate_ingestion_identity(run)
             mapping = s.get(ADRIngestionRun, adr_id)
             old = s.get(IngestionRunModel, mapping.run_id) if mapping else None
             if old and old.status in {'QUEUED', 'RETRY'}:
@@ -86,6 +89,7 @@ class ADRJobs(IngestionJobs):
             now = self._now(s)
             if mapping:
                 run = s.get(IngestionRunModel, mapping.run_id)
+                validate_ingestion_identity(run)
                 if run.status in {"QUEUED", "RETRY", "INDEXING", "COMPLETED"}:
                     return run.id
                 if not retry:
@@ -97,6 +101,7 @@ class ADRJobs(IngestionJobs):
                 if adr.status == "COMPLETED":
                     return None  # Existing pre-async document; never re-extract automatically.
                 run = IngestionRunModel(id="run_" + uuid.uuid4().hex,
+                    provider_identity=ingestion_identity(),
                     repository_id=repo.id, target_commit_sha=repo.indexed_commit_sha,
                     branch=repo.tracked_branch, installation_id=repo.installation_id,
                     trigger="adr", status="QUEUED", next_attempt_at=now)
@@ -111,6 +116,7 @@ class ADRJobs(IngestionJobs):
             candidate = s.get(IngestionRunModel, run_id)
             if not candidate or candidate.trigger not in {"adr", "adr_delete"}:
                 return None
+            validate_ingestion_identity(candidate)
             state = self._lock(s, candidate.repository_id)
             s.refresh(candidate)
             mapping = (SimpleNamespace(adr_id=run_id) if candidate.trigger == 'adr_delete'

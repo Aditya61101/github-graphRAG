@@ -113,9 +113,26 @@ class IngestionWorker:
         credential = await self.github.indexing_credential(repo.id, run.installation_id)
         current = await self._fresh(run, repo, credential)
         if current != run.target_commit_sha:
+            if run.trigger == "vector_backfill":
+                raise ValueError("Vector migration target changed; no repository ingestion will be scheduled")
             self.jobs.enqueue(repo.id, current, branch=run.branch,
                 installation_id=run.installation_id, trigger="branch_refresh", force_full=True)
             self.jobs.fail(run.id, run.owner, "TargetSuperseded", superseded=True)
+            return
+        if run.trigger == "vector_backfill":
+            if repo.indexed_commit_sha != run.target_commit_sha:
+                raise ValueError("Vector migration cannot change the indexed graph revision")
+            from ai_services.embeddings.backfill import VectorBackfill, Neo4jVectorBackfillStore
+            from shared.ai.provider import ProviderConfig
+            driver = FencedDriver(self.control, run)
+            store = Neo4jVectorBackfillStore(driver, ProviderConfig.from_env())
+            await VectorBackfill(store, self.embedder).run()
+            await self.github.indexing_credential(repo.id, run.installation_id)
+            if await self._fresh(run, repo, credential) != run.target_commit_sha:
+                raise ValueError("Repository revision changed during vector migration")
+            self.jobs.heartbeat(run.id, run.owner)
+            await asyncio.to_thread(self.control.seal, run)
+            self.jobs.finish(run.id, run.owner, run.target_commit_sha)
             return
         ref = self.source.resolve_ref(repo.full_name, branch=run.branch)
         async with self.source.open_workspace(ref, run.target_commit_sha,

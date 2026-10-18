@@ -24,23 +24,26 @@ class DurableEvaluationModel:
     def key(self, request, phase):
         # Includes original identities, expanded evidence, authority, prompts,
         # schema and deployment revision. No reuse across a changed request.
-        return digest(
-            json.dumps(
-                [
+        identity = [
                     request.model_dump(mode="json"),
-                    wire_text(request, phase),
+                    wire_text(request, phase, self.settings.provider),
                     self.deployment_revision,
                     self.settings.max_output_tokens,
-                ],
-                sort_keys=True,
-            )
-        )
+                ]
+        if self.settings.provider == "google":
+            identity.extend([self.settings.provider, self.settings.provider_identity,
+                             self.settings.evaluation_profile, self.settings.token_encoding])
+        return digest(json.dumps(identity, sort_keys=True))
 
     async def cached_reply(self, request, phase):
         raw = self.store.cached_packet(
             self.job_id, self.token, self.key(request, phase)
         )
-        return ModelReply.model_validate_json(raw) if raw else None
+        reply = ModelReply.model_validate_json(raw) if raw else None
+        if reply and self.settings.provider == "google" and (
+                reply.provider != "google" or reply.provider_identity != self.settings.provider_identity):
+            raise ValueError("Cached packet provider identity mismatch")
+        return reply
 
     @staticmethod
     def validate_reply(request, phase, reply):
@@ -75,7 +78,7 @@ class DurableEvaluationModel:
             return cached
         if not getattr(self.model, "dispatch_allowed", True):
             raise DispatchDenied("AUTHORIZATION_DENIED")
-        inp = self.counter(wire_text(request, phase)) + self.settings.provider_reserve
+        inp = self.counter(wire_text(request, phase, self.settings.provider)) + self.settings.provider_reserve
         reserve = inp + max_output_tokens
         cost = (
             inp * (self.settings.input_rate_per_million or 0)
@@ -98,6 +101,9 @@ class DurableEvaluationModel:
             reply = await method(
                 request, max_output_tokens=max_output_tokens, timeout=timeout
             )
+            if self.settings.provider == "google" and (
+                    reply.provider != "google" or reply.provider_identity != self.settings.provider_identity):
+                raise ValueError("Model response provider identity mismatch")
             reply, state = self.validate_reply(request, phase, reply)
         except DispatchDenied:
             self.store.void_packet(self.job_id, self.token, key)

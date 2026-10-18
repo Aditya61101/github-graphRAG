@@ -10,14 +10,14 @@ from langchain.agents.middleware import (
     ContextEditingMiddleware,
     SummarizationMiddleware,
 )
-from langchain_openai import AzureChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 from neo4j import Driver
 
 from ai_services.agents.rag_agent.dataclasses.result import RAGAgentResult
 from ai_services.agents.rag_agent.state.agent_state import RAGAgentState
 from ai_services.agents.rag_agent.tools.query_tool import create_query_graph_rag_tool
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from shared.ai.provider import Embedder
 from ai_services.graph.context import GraphContext
 from ai_services.retrievers.reranker import Reranker
 from ai_services.retrievers.settings import RetrievalSettings
@@ -33,11 +33,11 @@ class RAGQueryAgent:
         *,
         driver: Driver,
         database: str | None,
-        embedder: AzureOpenAIEmbedder,
+        embedder: Embedder,
         entity_retriever: Any,
         community_retriever: Any,
         chunk_retriever: Any,
-        llm: AzureChatOpenAI,
+        llm: BaseChatModel,
         reranker: Reranker | None = None,
         retrieval_settings: RetrievalSettings | None = None,
         barrier=None,
@@ -140,7 +140,10 @@ class RAGQueryAgent:
         )
 
         return RAGAgentResult(
-            answer=final_message.content,
+            answer=(final_message.content if isinstance(final_message.content, str) else
+                    "".join(block if isinstance(block, str) else block.get("text", "")
+                            for block in final_message.content if isinstance(block, str)
+                            or isinstance(block, dict) and block.get("type") == "text")),
             sources=sources,
             graph_context=graph_context,
         )

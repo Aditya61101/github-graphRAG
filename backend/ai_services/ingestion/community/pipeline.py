@@ -243,6 +243,7 @@ def build_community_pipeline(
 ) -> CommunityPipeline:
     """Convenience builder constructing a standard CommunityPipeline with dependency injection."""
     cfg = config or CommunityConfig()
+    cfg.embedding_space = getattr(embedder, "identity", "azure-legacy")
     projection_mgr = GDSProjectionManager(config=cfg)
     detector = GDSLeidenDetector(
         config=cfg,

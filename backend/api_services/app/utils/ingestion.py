@@ -1,5 +1,6 @@
 """HTTP acceptance commits existing ingestion history before remote dispatch."""
 import logging
+import time
 import httpx
 from fastapi import HTTPException
 from ai_services.ingestion.persistence.ingestion_jobs import IngestionJobs
@@ -35,10 +36,17 @@ async def accept(request, tasks, repo, *, target=None, force_full=False,
         except RepositorySourceError:
             raise HTTPException(503, "Tracked branch could not be resolved; retry later") from None
     try:
-        run_id = IngestionJobs(store.session_factory).enqueue(repo.id, target,
+        jobs = IngestionJobs(store.session_factory)
+        run_id = jobs.enqueue(repo.id, target,
             branch=repo.tracked_branch, installation_id=repo.installation_id,
             trigger=trigger, force_full=force_full, delivery_id=delivery_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    tasks.add_task(dispatch_one, run_id)
+    run = jobs.get(run_id)
+    now = int(time.time())
+    # A duplicate transport launch cannot acquire a second SQL owner, but avoid
+    # launching it at all when the existing run is live or still in backoff.
+    if run.next_attempt_at <= now and not (
+            run.status == "INDEXING" and run.lease_until and run.lease_until > now):
+        tasks.add_task(dispatch_one, run_id)
     return run_id

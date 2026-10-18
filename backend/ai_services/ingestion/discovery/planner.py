@@ -2,6 +2,8 @@ import json
 from typing import Callable
 from ai_services.models.ingestion_plan import IngestionPlan
 
+# Compatibility-only transport below is explicitly blocked in Google mode.
+# Production Vertex planning always uses the configured llm.deployment.
 MODEL = "openai/gpt-oss-120b"
 
 SYSTEM_PROMPT = """
@@ -158,6 +160,8 @@ def create_ingestion_plan(
     *,
     on_response: Callable[[str | None, dict], None] | None = None,
 ) -> IngestionPlan:
+    from shared.ai.provider import assert_legacy_allowed
+    assert_legacy_allowed()
     # Older direct runners supply serialized JSON; validate the same manifest.
     if isinstance(manifest, str):
         manifest = json.loads(manifest)
@@ -204,3 +208,17 @@ def create_ingestion_plan(
     if on_response:
         on_response(content, metadata)
     return IngestionPlan.model_validate_json(content)
+
+
+async def create_vertex_ingestion_plan(llm, architectural_objective, manifest, *, on_response=None):
+    """Google production planner; deterministic fallback remains in the service."""
+    if getattr(llm, "provider", None) != "google":
+        raise ValueError("Vertex planner requires a Google provider")
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+    prompt = build_planner_prompt(architectural_objective=architectural_objective, manifest=manifest)
+    result = await llm.extract_structured(prompt, IngestionPlan, system=SYSTEM_PROMPT)
+    if on_response:
+        on_response(result.model_dump_json(), {"requested_model": llm.deployment,
+            "source": "vertex", "provider_identity": llm.identity})
+    return result

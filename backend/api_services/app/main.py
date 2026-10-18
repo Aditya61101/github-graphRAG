@@ -6,13 +6,10 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_openai import AzureChatOpenAI
 from neo4j import GraphDatabase
-from openai import AsyncAzureOpenAI
 from starlette.middleware.sessions import SessionMiddleware
 
 from ai_services.agents.rag_agent.agent import RAGQueryAgent
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
 from ai_services.github_app.service import GitHubAppService
 from ai_services.github_app.settings import GitHubAppSettings
 from ai_services.graph import Neo4jGraphRepository, RepositoryGraphService
@@ -47,7 +44,7 @@ from api_services.app.routers.query import router as query_router
 from api_services.app.routers.repositories import router as repositories_router
 from api_services.app.routers.webhook import router as webhook_router
 from shared.utils.env_helper import require_env
-from shared.utils.llm_utils import AzureOpenAILLM
+from shared.ai.provider import create_provider
 from api_services.app import config
 from api_services.app.utils.auth_logging import configure_auth_logging
 
@@ -77,32 +74,9 @@ async def lifespan(app: FastAPI):
         ),
     )
 
-    client = AsyncAzureOpenAI(
-        azure_endpoint=require_env("AZURE_OPENAI_ENDPOINT"),
-        api_key=require_env("AZURE_OPENAI_API_KEY"),
-        api_version=require_env("AZURE_OPENAI_API_VERSION"),
-    )
-
-    embedder = AzureOpenAIEmbedder(
-        client=client,
-        deployment=require_env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
-        dimensions=int(require_env("AZURE_OPENAI_EMBEDDING_DIMENSIONS", "3072")),
-    )
-
-    # LangChain chat model for create_agent/SummarizationMiddleware.
-    chat_llm = AzureChatOpenAI(
-        azure_endpoint=require_env("AZURE_OPENAI_ENDPOINT"),
-        api_key=require_env("AZURE_OPENAI_API_KEY"),
-        api_version=require_env("AZURE_OPENAI_API_VERSION"),
-        azure_deployment=require_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
-    )
-
-    # Keep the existing SDK-backed LLM for components that use the raw
-    # AsyncAzureOpenAI client/wrapper.
-    llm = AzureOpenAILLM(
-        client=client,
-        deployment=require_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
-    )
+    services = create_provider()
+    client, embedder, llm = services.client, services.embedder, services.llm
+    chat_llm = services.chat_model()
 
     entity_retriever, community_retriever, chunk_retriever = create_retrievers(
         driver=driver,
@@ -116,18 +90,6 @@ async def lifespan(app: FastAPI):
         storage_dir=REPOS_STORAGE_DIR,
     )
 
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    groq_client = None
-    if groq_api_key:
-        try:
-            from groq import Groq
-
-            groq_client = Groq(api_key=groq_api_key)
-        except Exception as error:  # noqa: BLE001 -- optional planner falls back to the existing classifier
-            logging.getLogger(__name__).debug(
-                "Optional Groq planner unavailable error_type=%s", type(error).__name__
-            )
-
     ingestion_service = RepositoryIngestionService(
         repository_source=repo_source,
         metadata_store=sqlite_store,
@@ -135,7 +97,6 @@ async def lifespan(app: FastAPI):
         database=database,
         embedder=embedder,
         llm=llm,
-        groq_client=groq_client,
         github_app=github_app,
     )
     if config.ENABLE_BACKGROUND_PROCESSING:
@@ -290,6 +251,7 @@ async def lifespan(app: FastAPI):
         await app.state.evaluation_orchestrator.close()
         driver.close()
         await github_client.aclose()
+        await services.aclose()
 
 
 app = FastAPI(

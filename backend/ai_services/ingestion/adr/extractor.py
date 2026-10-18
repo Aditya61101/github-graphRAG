@@ -119,6 +119,9 @@ class ADRArchitecturalExtractor:
 
             # If llm has a direct extract or callable method
             if hasattr(self.llm, "extract_structured"):
+                if getattr(self.llm, "provider", None) == "google":
+                    return validated(await self.llm.extract_structured(
+                        user_prompt, ADRExtractionResult, system=ADR_EXTRACTION_SYSTEM_PROMPT))
                 return validated(
                     await self.llm.extract_structured(
                         ADR_EXTRACTION_SYSTEM_PROMPT + "\nINPUT:\n" + user_prompt,

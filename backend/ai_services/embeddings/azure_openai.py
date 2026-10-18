@@ -15,6 +15,8 @@ class AzureOpenAIEmbedder:
         dimensions: int,
         batch_size: int = 128,
     ) -> None:
+        from shared.ai.provider import assert_legacy_allowed
+        assert_legacy_allowed()
         if not deployment:
             raise ValueError("deployment must not be empty")
         if dimensions <= 0:
@@ -32,6 +34,8 @@ class AzureOpenAIEmbedder:
         return self._dimensions
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        from shared.ai.provider import assert_legacy_allowed
+        assert_legacy_allowed()
         texts = list(texts)
 
         if not texts:

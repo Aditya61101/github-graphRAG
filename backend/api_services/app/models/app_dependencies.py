@@ -1,12 +1,11 @@
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_openai import AzureChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from neo4j import Driver
-from openai import AsyncAzureOpenAI
 
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
-from shared.utils.llm_utils import AzureOpenAILLM
+from shared.ai.provider import Embedder
+from shared.ai.provider import LLM
 from ai_services.retrievers.reranker import Reranker
 from ai_services.retrievers.settings import RetrievalSettings
 
@@ -16,10 +15,10 @@ class AppDependencies:
     """Application-scoped infrastructure shared by services and agents."""
 
     driver: Driver
-    client: AsyncAzureOpenAI
-    embedder: AzureOpenAIEmbedder
-    llm: AzureOpenAILLM
-    chat_llm: AzureChatOpenAI
+    client: Any
+    embedder: Embedder
+    llm: LLM
+    chat_llm: BaseChatModel
     entity_retriever: Any
     chunk_retriever: Any
     community_retriever: Any

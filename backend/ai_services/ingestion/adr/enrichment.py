@@ -93,6 +93,8 @@ class ADRApplicabilityEnricher:
         self.batch_size, self.context_max_chars = batch_size, context_max_chars
         self.input_max_chars = input_max_chars
         self.model_version = model_version or getattr(llm, "deployment", "unknown")
+        if getattr(llm, "provider", None) == "google":
+            self.model_version += ":" + llm.identity
 
     def _current(self, requirement: ADRRequirement) -> bool:
         p = requirement.properties
@@ -124,6 +126,9 @@ class ADRApplicabilityEnricher:
                 raise ValueError("LLM returned no structured enrichment")
             return EnrichmentResult.model_validate(result)
         if hasattr(self.llm, "extract_structured"):
+            if getattr(self.llm, "provider", None) == "google":
+                return EnrichmentResult.model_validate(await self.llm.extract_structured(
+                    prompt, EnrichmentResult, system=ENRICHMENT_SYSTEM_PROMPT))
             return EnrichmentResult.model_validate(
                 await self.llm.extract_structured(
                     ENRICHMENT_SYSTEM_PROMPT + "\nINPUT:\n" + prompt,

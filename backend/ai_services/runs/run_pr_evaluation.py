@@ -11,12 +11,11 @@ from contextlib import asynccontextmanager
 
 import httpx
 from neo4j import GraphDatabase
-from openai import AsyncAzureOpenAI
 
 from ai_services.decision_guard.evaluation import UploadAuthority
 from ai_services.decision_guard.graph import Neo4jArchitectureGraphReader
 from ai_services.decision_guard.orchestration.runtime import (
-    ConfiguredAzureModel,
+    configured_evaluation_model,
     ProductionRuntime,
 )
 from ai_services.decision_guard.orchestration.store import EvaluationStore
@@ -24,7 +23,7 @@ from ai_services.decision_guard.orchestration.worker import EvaluationWorker
 from ai_services.github_app.service import GitHubAppService
 from ai_services.github_app.settings import GitHubAppSettings
 from ai_services.ingestion.persistence.sqlite_store import SqliteApplicationStore
-from shared.utils.llm_utils import AzureOpenAILLM
+from shared.ai.provider import create_provider
 
 
 async def run(job_id):
@@ -46,13 +45,9 @@ async def run(job_id):
             auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD']),
         )
         try:
-            async with AsyncAzureOpenAI(
-                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                api_key=os.environ["AZURE_OPENAI_API_KEY"],
-                api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-                max_retries=0,
-            ) as client:
-                llm = AzureOpenAILLM(client, os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"])
+            services = create_provider()
+            try:
+                llm = services.llm
                 yield ProductionRuntime(
                     store,
                     github,
@@ -61,11 +56,13 @@ async def run(job_id):
                     ),
                     lambda key: locks.setdefault(key, asyncio.Lock()),
                     UploadAuthority(store, ADRS_STORAGE_DIR),
-                    ConfiguredAzureModel(
+                    configured_evaluation_model(
                         llm,
                         deployment_revision=os.environ["PR_EVALUATION_DEPLOYMENT_REVISION"],
                     ),
                 )
+            finally:
+                await services.aclose()
         finally:
             driver.close()
     async with httpx.AsyncClient(timeout=30) as http:

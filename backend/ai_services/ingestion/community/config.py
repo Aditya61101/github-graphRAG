@@ -11,6 +11,7 @@ _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class CommunityConfig(BaseModel):
+    embedding_space: str = "azure-legacy"
     """Configuration settings for community detection, summarization, and vector indexing."""
 
     graph_name: str = Field(

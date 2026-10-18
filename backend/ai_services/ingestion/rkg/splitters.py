@@ -4,11 +4,16 @@ from .models import ChunkStrategy, EvidenceChunk
 class RepositoryTextSplitter:
     """Deterministic strategy dispatcher. Never calls an LLM."""
 
-    def __init__(self, *, max_chunk_chars: int = 24_000):
+    def __init__(self, *, max_chunk_chars: int = 24_000, max_chunk_bytes: int | None = None):
+        if max_chunk_chars < 1 or (max_chunk_bytes is not None and max_chunk_bytes < 4):
+            raise ValueError("Invalid repository chunk bounds")
         self.max_chunk_chars = max_chunk_chars
+        self.max_chunk_bytes = max_chunk_bytes
 
     def split(self, repository, commit, file_path, text, strategy, language=None):
         strategy = ChunkStrategy(strategy)
+        if not text.strip():
+            return []
         if strategy == ChunkStrategy.SYMBOL:
             chunks = self._symbol(repository, commit, file_path, text, language)
         elif strategy == ChunkStrategy.MARKDOWN_SECTION:
@@ -145,44 +150,41 @@ class RepositoryTextSplitter:
         ]
 
     def _cap_chunks(self, chunks):
+        from shared.ai.embedding_inputs import text_windows
         result: list[EvidenceChunk] = []
         for chunk in chunks:
-            if len(chunk.text) <= self.max_chunk_chars:
+            if not chunk.text.strip():
+                continue
+            if (len(chunk.text) <= self.max_chunk_chars and (self.max_chunk_bytes is None
+                    or len(chunk.text.encode("utf-8")) <= self.max_chunk_bytes)):
+                # Earlier symbols may have expanded into multiple windows. Keep
+                # file order unambiguous when readers sort by chunk_index.
+                if chunk.chunk_index != len(result):
+                    chunk = EvidenceChunk.create(chunk.repository, chunk.commit,
+                        chunk.file_path, len(result), chunk.text, chunk.strategy,
+                        dict(chunk.metadata, reindexed_from_chunk=chunk.chunk_id))
                 result.append(chunk)
                 continue
-
-            lines = chunk.text.splitlines(keepends=True)
-            part: list[str] = []
-            size = 0
-            part_index = 0
-            for line in lines:
-                if part and size + len(line) > self.max_chunk_chars:
-                    result.append(
-                        self._overflow_chunk(chunk, len(result), part_index, "".join(part))
-                    )
-                    part_index += 1
-                    part = []
-                    size = 0
-                part.append(line)
-                size += len(line)
-            if part:
-                result.append(
-                    self._overflow_chunk(chunk, len(result), part_index, "".join(part))
-                )
+            for part_index, (start, end, part) in enumerate(text_windows(chunk.text,
+                    max_bytes=self.max_chunk_bytes or self.max_chunk_chars * 4,
+                    max_chars=self.max_chunk_chars)):
+                if part.strip():
+                    result.append(self._overflow_chunk(chunk, len(result), part_index, part, start, end))
         return result
 
     @staticmethod
-    def _overflow_chunk(source: EvidenceChunk, index: int, part_index: int, text: str):
+    def _overflow_chunk(source: EvidenceChunk, index: int, part_index: int, text: str, start: int, end: int):
+        metadata = dict(source.metadata, overflow_part=part_index,
+            overflow_of_chunk=source.chunk_id, source_char_start=start, source_char_end=end)
+        if "start_line" in source.metadata:
+            metadata["start_line"] = source.metadata["start_line"] + source.text[:start].count("\n")
+            metadata["end_line"] = metadata["start_line"] + text.count("\n") - int(text.endswith("\n"))
         return EvidenceChunk.create(
             repository=source.repository,
             commit=source.commit,
             file_path=source.file_path,
             chunk_index=index,
-            text=text.strip(),
+            text=text,
             strategy=source.strategy,
-            metadata={
-                **source.metadata,
-                "overflow_part": part_index,
-                "overflow_of_chunk": source.chunk_id,
-            },
+            metadata=metadata,
         )

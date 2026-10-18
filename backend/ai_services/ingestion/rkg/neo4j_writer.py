@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import re
+from shared.ai.space import current_space, vector_metadata
 
 
 _REL_TYPE_RE = re.compile(r"[^A-Z0-9_]")
@@ -113,7 +114,9 @@ class Neo4jRepositoryWriter:
                 ch.strategy = item.strategy,
                 ch.contentHash = item.content_hash,
                 ch.text = item.text,
-                ch.embedding = item.embedding
+                ch.embedding = item.embedding,
+                ch.embeddingSpace = item.embedding_space
+            SET ch += item.vector_metadata
             MERGE (f)-[:HAS_CHUNK]->(ch)
             """,
             repo=repository,
@@ -133,6 +136,8 @@ class Neo4jRepositoryWriter:
                     "content_hash": c.content_hash,
                     "text": c.text,
                     "embedding": c.embedding,
+                    "embedding_space": current_space(),
+                    "vector_metadata": vector_metadata(c.text),
                 }
                 for c in chunks
             ],
@@ -151,6 +156,7 @@ class Neo4jRepositoryWriter:
                 key: value
                 for key, value in dict(entity.properties).items()
                 if key not in {"id", "name", "label", "aliases", "repository"}
+                and not key.startswith("embedding")
                 and value is not None
             }
             if entity.embedding is None:
@@ -170,6 +176,7 @@ class Neo4jRepositoryWriter:
                 "label": entity.label,
                 "aliases": list(entity.aliases),
                 "embedding": [float(value) for value in entity.embedding],
+                **vector_metadata(),
             }
             if repository:
                 entity_props["repository"] = repository

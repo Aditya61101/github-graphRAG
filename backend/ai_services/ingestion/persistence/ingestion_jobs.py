@@ -2,6 +2,7 @@
 import re
 import time
 import uuid
+from shared.ai.provider import ingestion_identity, validate_ingestion_identity
 from sqlalchemy import select, update, or_, text
 from .models import (
     RepositoryModel, IngestionRunModel, RepositoryIngestionState as State,
@@ -52,26 +53,48 @@ class IngestionJobs:
                 if previous:
                     if (previous.repository_id, previous.target_sha) != (repo_id, target):
                         raise ValueError("Webhook delivery identity mismatch")
+                    prior_run = s.get(IngestionRunModel, previous.run_id)
+                    if prior_run is None:
+                        raise ValueError("Webhook delivery has no ingestion run")
+                    validate_ingestion_identity(prior_run)
                     return previous.run_id
-            # Coalesce duplicate targets while preserving manual retries of failed runs.
+            # Failure promotes a run to full ingestion. A Sync without an explicit
+            # full flag can still be fulfilled by that same full retry. Match the
+            # effective mode under the repository lock, never reset its budget.
+            effective_full = bool(force_full) or state.state != "READY"
+            statuses = ["QUEUED", "RETRY", "INDEXING"]
+            if trigger == "manual_sync":
+                statuses.append("FAILED")
             run = s.scalar(select(IngestionRunModel).where(
                 IngestionRunModel.repository_id == repo_id,
                 IngestionRunModel.target_commit_sha == target,
-                IngestionRunModel.status.in_(["QUEUED", "RETRY", "INDEXING"]),
-                IngestionRunModel.force_full == int(force_full),
+                IngestionRunModel.status.in_(statuses),
+                IngestionRunModel.branch == branch,
+                IngestionRunModel.installation_id == str(installation_id),
+                # Full work satisfies an ordinary Sync; explicitly full work
+                # cannot join an incremental run against a READY baseline.
+                or_(IngestionRunModel.force_full == 1,
+                    not effective_full, state.state != "READY"),
                 IngestionRunModel.trigger == trigger,
             ).order_by(IngestionRunModel.started_at).limit(1))
+            if run is not None:
+                validate_ingestion_identity(run)
+                live = run.status == "INDEXING" and run.lease_until and run.lease_until > now
+                if run.status == "FAILED" or (not live and run.attempts >= self.max_attempts):
+                    raise ValueError("Ingestion retry limit reached; an explicit new ingestion is required")
             if run is None:
                 run = IngestionRunModel(id="run_" + uuid.uuid4().hex,
+                    provider_identity=ingestion_identity(),
                     repository_id=repo_id, target_commit_sha=target,
                     status="QUEUED", trigger=trigger, is_incremental=0,
-                    force_full=int(force_full), branch=branch,
+                    force_full=int(effective_full), branch=branch,
                     installation_id=str(installation_id), next_attempt_at=now)
                 s.add(run)
                 s.flush()
             if delivery_id:
                 s.add(IngestionDelivery(delivery_id=delivery_id, repository_id=repo_id,
                     target_sha=target, run_id=run.id))
+            validate_ingestion_identity(run)
             return run.id
 
     def get(self, run_id):
@@ -94,6 +117,7 @@ class IngestionJobs:
             candidate = s.get(IngestionRunModel, run_id)
             if candidate is None:
                 return None
+            validate_ingestion_identity(candidate)
             state = self._lock(s, candidate.repository_id)
             now = self._now(s)
             s.refresh(candidate)
@@ -147,6 +171,7 @@ class IngestionJobs:
         run = s.get(IngestionRunModel, run_id)
         if run is None:
             raise LostIngestionLease("Unknown ingestion")
+        validate_ingestion_identity(run)
         state = self._lock(s, run.repository_id)
         s.refresh(run)
         if (state.active_run_id != run_id or state.epoch != run.token
@@ -194,6 +219,7 @@ class IngestionJobs:
             run = s.get(IngestionRunModel, run_id)
             if run is None:
                 return False
+            validate_ingestion_identity(run)
             state = self._lock(s, run.repository_id)
             s.refresh(run)
             repo = s.get(RepositoryModel, run.repository_id)

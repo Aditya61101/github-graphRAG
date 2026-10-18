@@ -11,7 +11,7 @@ def whole_file_chunks(
     chunk_metadata["chunk_strategy"] = strategy
 
     return TextChunks(
-        chunks=[
+        chunks=[] if not text.strip() else [
             TextChunk(
                 text=text,
                 index=0,

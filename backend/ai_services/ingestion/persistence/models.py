@@ -215,6 +215,7 @@ class IngestionRunModel(Base):
     """Tracks operational state and history for repository ingestion jobs."""
 
     __tablename__ = "ingestion_runs"
+    provider_identity = Column(String(64), nullable=True)
 
     id = Column(String(64), primary_key=True, default=lambda: f"run_{uuid.uuid4().hex[:12]}")
     repository_id = Column(String(64), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
