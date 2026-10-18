@@ -483,10 +483,11 @@ class Neo4jCommunityStore(CommunityStore):
         UNWIND $items AS item
         MATCH (c:{c_label} {{communityId: item.community_id}})
         SET c.{emb_prop} = item.embedding,
-            c.embeddedSummaryHash = item.summary_hash
+            c.embeddedSummaryHash = item.summary_hash,
+            c.embeddingSpace = $embedding_space
         """
         try:
-            await _execute_query(self.driver, query, database=db, items=items)
+            await _execute_query(self.driver, query, database=db, items=items, embedding_space=self.config.embedding_space)
             logger.info("Persisted embeddings for %d communities", len(embeddings))
         except Exception as exc:
             raise CommunityPersistenceError(

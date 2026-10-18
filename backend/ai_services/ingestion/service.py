@@ -9,7 +9,7 @@ from typing import Any
 
 from neo4j import Driver
 
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
+from shared.ai.provider import Embedder
 from ai_services.ingestion.community import CommunityConfig, build_community_pipeline
 from ai_services.ingestion.discovery.git_tree import get_repository_files
 from ai_services.ingestion.discovery.planner import MODEL as PLANNER_MODEL, create_ingestion_plan
@@ -35,7 +35,7 @@ from ai_services.ingestion.sources.interface import (
     RepositorySource,
 )
 from ai_services.models.ingestion_plan import IngestionPlan
-from shared.utils.llm_utils import AzureOpenAILLM
+from shared.ai.provider import LLM
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,8 @@ class RepositoryIngestionService:
         metadata_store: SqliteApplicationStore,
         neo4j_driver: Driver,
         database: str | None = None,
-        embedder: AzureOpenAIEmbedder | None = None,
-        llm: AzureOpenAILLM | None = None,
+        embedder: Embedder | None = None,
+        llm: LLM | None = None,
         groq_client: Any | None = None,
         state_dir: Path | str = ".state",
         github_app=None,
@@ -215,40 +215,41 @@ class RepositoryIngestionService:
             audit.counts.discovered = len(files)
             audit.save_counts()
 
-            # 2. Planning (use Groq planner if client available, otherwise fallback to classifier)
+            # 2. Google planner or explicit historical planner; deterministic classifier fallback.
             architectural_objective = (
                 "Build an architectural knowledge graph for DecisionGuard. "
                 "Prioritize production components, services, APIs, databases, "
                 "events, contracts, and configuration."
             )
             planner_metadata = {
-                "source": "groq" if self.groq_client else "classifier",
+                "source": "vertex" if getattr(self.llm, "provider", None) == "google" else "groq" if self.groq_client else "classifier",
                 "objective": architectural_objective, "scope": "complete_manifest",
-                "requested_model": PLANNER_MODEL if self.groq_client else None,
+                "requested_model": self.llm.deployment if getattr(self.llm, "provider", None) == "google" else PLANNER_MODEL if self.groq_client else None,
             }
             def record_response(content, metadata):
                 audit.record_planner_response(content, metadata)
                 planner_metadata.update(metadata)
 
-            if self.groq_client:
+            if getattr(self.llm, "provider", None) == "google" or self.groq_client:
                 try:
-                    plan = await asyncio.to_thread(
-                        create_ingestion_plan,
-                        client=self.groq_client,
-                        architectural_objective=architectural_objective,
-                        manifest=manifest.to_dict(),
-                        on_response=record_response,
-                    )
+                    if getattr(self.llm, "provider", None) == "google":
+                        from ai_services.ingestion.discovery.planner import create_vertex_ingestion_plan
+                        plan = await create_vertex_ingestion_plan(self.llm, architectural_objective,
+                            manifest.to_dict(), on_response=record_response)
+                    else:
+                        plan = await asyncio.to_thread(create_ingestion_plan,
+                            client=self.groq_client, architectural_objective=architectural_objective,
+                            manifest=manifest.to_dict(), on_response=record_response)
                     validate_ingestion_plan(plan, manifest.to_dict())
                 except Exception as exc:
                     error = sanitize_sensitive_text(str(exc))
                     if isinstance(exc, PlannerCoverageError):
                         logger.warning(
-                            "Groq planner coverage invalid counts=%s; falling back to deterministic classifier.",
+                            "AI planner coverage invalid counts=%s; falling back to deterministic classifier.",
                             {key: len(value) for key, value in exc.details.items()},
                         )
                     else:
-                        logger.warning("Groq planner failed (%s); falling back to deterministic classifier.", error)
+                        logger.warning("AI planner failed (%s); falling back to deterministic classifier.", error)
                     planner_metadata.update(source="classifier_fallback", fallback_reason=error)
                     if isinstance(exc, PlannerCoverageError):
                         planner_metadata["coverage_errors"] = exc.details
@@ -267,6 +268,7 @@ class RepositoryIngestionService:
                 commit=snapshot.commit_sha,
                 neo4j_driver=self.neo4j_driver,
                 candidates_path=candidates_path,
+                llm=self.llm, embedder=self.embedder,
                 full_name=metadata.full_name,
                 owner=metadata.owner,
                 progress_callback=audit.record_result,
@@ -424,6 +426,7 @@ class RepositoryIngestionService:
                 commit=snapshot.commit_sha,
                 neo4j_driver=self.neo4j_driver,
                 candidates_path=candidates_path,
+                llm=self.llm, embedder=self.embedder,
                 full_name=metadata.full_name,
                 owner=metadata.owner,
                 progress_callback=audit.record_result,
@@ -508,6 +511,7 @@ class RepositoryIngestionService:
                 # Recheck after every retry: a prior refresh may have failed after
                 # committing memberships or summaries, before embedding publication.
                 from ai_services.ingestion.community.embedder import compute_embedding_version_hash
+                from ai_services.ingestion.community.summarizer import generation_context_hash
                 result = await asyncio.to_thread(self.neo4j_driver.execute_query, """
                     MATCH (c:Community {repository:$repo})
                     RETURN c.communityId AS community_id
@@ -530,9 +534,10 @@ class RepositoryIngestionService:
                         and all((state := states.get(ctx.community_id)) is not None
                             and state.has_summary and state.summary is not None
                             and state.architectural_role is not None and state.summary_hash is not None
-                            and state.context_hash == ctx.context_hash() and state.has_embedding
+                            and state.context_hash == generation_context_hash(ctx, self.llm) and state.has_embedding
                             and state.embedded_summary_hash == compute_embedding_version_hash(
-                                state.summary_hash, config.include_key_entities_in_embedding)
+                                state.summary_hash, config.include_key_entities_in_embedding,
+                                getattr(self.embedder, "identity", "azure-legacy"))
                             for ctx in contexts)):
                         return None
             return await community_pipeline.run(force_refresh=False)

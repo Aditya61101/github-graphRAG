@@ -122,6 +122,8 @@ def collect_chunk_vectors(
                 "embedding_text_hash",
             )
             observed = {k: c[k] for k in fields if c.get(k) is not None}
+            if manifest.identity.provider == "google-vertex" and len(observed) != len(fields):
+                raise ValueError("Google hybrid vectors require full verified provider metadata")
             basis = (
                 "MOCK_FIXTURE"
                 if manifest.confirmation == "MOCK_FIXTURE"

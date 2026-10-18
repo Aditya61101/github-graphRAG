@@ -29,9 +29,13 @@ def build_embedding_text(
     return "\n".join(lines)
 
 
-def compute_embedding_version_hash(summary_hash: str, include_key_entities: bool) -> str:
+def compute_embedding_version_hash(summary_hash: str, include_key_entities: bool, embedding_space: str = "azure-legacy") -> str:
     """Derive an embedding state hash incorporating both the summary hash and embedding configuration."""
     raw = f"{summary_hash}:inkeys={include_key_entities}"
+    if embedding_space != "azure-legacy":
+        raw += f":{embedding_space}:community-text-v1"
+        from shared.ai.embedding_inputs import EMBEDDING_INPUT_POLICY
+        raw += ":" + EMBEDDING_INPUT_POLICY
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -59,6 +63,7 @@ class CommunityEmbeddingGenerator:
         return compute_embedding_version_hash(
             summary_hash,
             self.config.include_key_entities_in_embedding,
+            getattr(self.embedder, "identity", "azure-legacy"),
         )
 
     async def generate_embeddings(

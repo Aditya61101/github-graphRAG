@@ -4,6 +4,8 @@ from typing import Sequence
 from pydantic import BaseModel, ConfigDict, Field
 import warnings
 
+from shared.ai.provider import LLM
+# Retain historical utility imports; construction is blocked in Google mode.
 from shared.utils.llm_utils import AzureOpenAILLM
 
 from .interfaces import LocalExtractor, RelationshipValidator
@@ -98,10 +100,10 @@ def _format_chunks(chunks: Sequence[EvidenceChunk]) -> tuple[str, dict[str, str]
         )
     return "\n\n".join(blocks), refs
 
-class AzureOpenAIExtractor(LocalExtractor):
+class StructuredExtractor(LocalExtractor):
     """Extract candidate architectural knowledge directly from raw chunks."""
 
-    def __init__(self, llm: AzureOpenAILLM):
+    def __init__(self, llm: LLM):
         self.llm = llm
 
     async def extract(
@@ -123,19 +125,13 @@ class AzureOpenAIExtractor(LocalExtractor):
                 + user_prompt
             )
 
-        response = await self.llm.client.beta.chat.completions.parse(
-            model=self.llm.deployment,
-            messages=[
-                {"role": "system", "content": LOCAL_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format=ExtractionOutput,
-            temperature=0,
-        )
-
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            raise RuntimeError("Azure OpenAI returned no structured extraction output.")
+        observation = {}
+        if getattr(self.llm, "provider", None) == "google":
+            observation["observation"] = dict(operation="repository_extraction",
+                chunk_count=len(chunks),
+                raw_bytes=sum(len(chunk.text.encode("utf-8")) for chunk in chunks))
+        parsed = await self.llm.extract_structured(user_prompt, ExtractionOutput,
+            system=LOCAL_EXTRACTION_SYSTEM_PROMPT, **observation)
 
         by_chunk: dict[str, CandidateKnowledge] = {
             chunk.chunk_id: CandidateKnowledge(chunk_id=chunk.chunk_id)
@@ -194,8 +190,8 @@ class AzureOpenAIExtractor(LocalExtractor):
         return list(by_chunk.values())
 
 
-class AzureOpenAIRelationshipValidator(RelationshipValidator):
-    def __init__(self, llm: AzureOpenAILLM, minimum_confidence: float = 0.70):
+class StructuredRelationshipValidator(RelationshipValidator):
+    def __init__(self, llm: LLM, minimum_confidence: float = 0.70):
         self.llm = llm
         self.minimum_confidence = minimum_confidence
 
@@ -227,25 +223,8 @@ class AzureOpenAIRelationshipValidator(RelationshipValidator):
             neighborhood=neighborhood or "(no existing graph neighborhood)",
         )
 
-        response = await self.llm.client.beta.chat.completions.parse(
-            model=self.llm.deployment,
-            messages=[
-                {"role": "system", "content": CROSS_CHUNK_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format=RelationshipValidationOutput,
-            temperature=0,
-        )
-
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            print(
-                "REJECT: parsed=None",
-                candidate.source_id,
-                candidate.relationship_type,
-                candidate.target_id,
-            )
-            return None
+        parsed = await self.llm.extract_structured(prompt, RelationshipValidationOutput,
+            system=CROSS_CHUNK_SYSTEM_PROMPT)
 
         if not parsed.supported:
             print(
@@ -274,4 +253,9 @@ class AzureOpenAIRelationshipValidator(RelationshipValidator):
             evidence_chunk_ids=candidate.evidence_chunk_ids,
             rationale=parsed.rationale,
         )
+
+
+# Historical import compatibility; both adapters delegate only to the injected LLM.
+AzureOpenAIExtractor = StructuredExtractor
+AzureOpenAIRelationshipValidator = StructuredRelationshipValidator
 

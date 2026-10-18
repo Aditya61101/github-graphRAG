@@ -101,6 +101,17 @@ class VectorCompatibilityManifest(Contract):
         return fingerprint(self.model_dump(mode="json"))
 
 
+def google_manifest(config):
+    if config.provider != "google":
+        raise ValueError("Google manifest requires explicit Vertex configuration")
+    return VectorCompatibilityManifest(configuration_id=config.identity,
+        identity=EmbeddingIdentity(provider="google-vertex", model=config.embedding_model,
+            dimensions=config.dimensions, revision=config.embedding_space),
+        confirmation="CONFIGURATION_CONFIRMED",
+        confirmation_source=("fresh-reset-google-config:" + config.installation_id
+            if config.data_mode == "fresh-reset" else "isolated-google-config:" + config.isolated_data_id))
+
+
 def confirmed_legacy_manifest():
     return VectorCompatibilityManifest.model_validate_json(
         Path(__file__)

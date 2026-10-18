@@ -79,6 +79,12 @@ class DerivedIndexBuilder:
             repository_lock,
             mode,
         )
+        from shared.ai.provider import ProviderConfig
+        if ProviderConfig.from_env().provider == "google":
+            # Optional derived semantic snapshots need an explicitly verified
+            # Google manifest and full per-vector metadata; never inherit Azure.
+            if compatibility_manifest is None or compatibility_manifest.identity.provider != "google-vertex":
+                raise ValueError("Google hybrid retrieval requires an explicit Google compatibility manifest")
         self.manifest = compatibility_manifest or confirmed_legacy_manifest()
         self.chunk_verifier, self.store = chunk_verifier, store
         if mode not in {"LIVE", "ARCHIVED"}:

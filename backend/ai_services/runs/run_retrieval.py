@@ -3,11 +3,10 @@ import asyncio
 import json
 
 from neo4j import GraphDatabase
-from openai import AsyncAzureOpenAI
 
 from ai_services.retrievers.hybrid_retrievers import hybrid_retrieve
 from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
-from ai_services.ingestion.rkg.llm_adapters import AzureOpenAILLM
+from shared.ai.provider import create_provider, LLM
 from ai_services.retrievers.retriever_factory import create_retrievers
 from shared.utils.env_helper import require_env
 from ai_services.retrievers.settings import RetrievalSettings
@@ -109,21 +108,9 @@ async def main() -> None:
         require_env("NEO4J_URI"),
         auth=(require_env("NEO4J_USERNAME"), require_env("NEO4J_PASSWORD")),
     )
+    services = create_provider()
     try:
-        client = AsyncAzureOpenAI(
-            azure_endpoint=require_env("AZURE_OPENAI_ENDPOINT"),
-            api_key=require_env("AZURE_OPENAI_API_KEY"),
-            api_version=require_env("AZURE_OPENAI_API_VERSION"),
-        )
-        embedder = AzureOpenAIEmbedder(
-            client=client,
-            deployment=require_env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"),
-            dimensions=int(require_env("AZURE_OPENAI_EMBEDDING_DIMENSIONS", "3072")),
-        )
-        llm = AzureOpenAILLM(
-            client=client,
-            deployment=require_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        )
+        llm, embedder = services.llm, services.embedder
 
         driver.verify_connectivity()
         entity_retriever, community_retriever, chunk_retriever = create_retrievers(
@@ -145,6 +132,7 @@ async def main() -> None:
 
         print(json.dumps(result, indent=2))
     finally:
+        await services.aclose()
         driver.close()
 
 if __name__ == "__main__":

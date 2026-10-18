@@ -46,12 +46,14 @@ class EmbeddingRunner:
         identity: EmbeddingIdentity,
         limits=None,
         token_counter=conservative_tokens,
+        request_counter=None,
     ):
         if embedder.dimensions != identity.dimensions:
             raise ValueError("Embedding model/dimension mismatch")
         self.embedder, self.identity = embedder, identity
         self.limits = limits or EmbeddingLimits()
         self.counter = token_counter
+        self.request_counter = request_counter
         self.cache = {}
         self.requests = self.estimated_tokens = 0
         self.semaphore = asyncio.Semaphore(self.limits.concurrency)
@@ -65,11 +67,15 @@ class EmbeddingRunner:
         if any(len(text) > self.limits.max_text_chars for text in texts):
             raise ValueError("Embedding query length budget")
         missing = list(dict.fromkeys(text for text in texts if text not in self.cache))
+        if self.request_counter is not None and self.requests + sum(
+                self.request_counter(text) for text in missing) > self.limits.max_requests:
+            raise ValueError("Embedding request budget")
 
         async def batch(items):
             async with self.semaphore:
                 for attempt in range(self.limits.retries + 1):
-                    if self.requests >= self.limits.max_requests:
+                    request_cost = sum(self.request_counter(text) for text in items) if self.request_counter else 1
+                    if self.requests + request_cost > self.limits.max_requests:
                         raise ValueError("Embedding request budget")
                     remaining = (
                         deadline - time.monotonic()
@@ -78,7 +84,7 @@ class EmbeddingRunner:
                     )
                     if remaining <= 0:
                         raise TimeoutError("Embedding deadline")
-                    self.requests += 1
+                    self.requests += request_cost
                     counts = [self.counter(text) for text in items]
                     if any(type(n) is not int or n < 0 for n in counts):
                         raise ValueError("Invalid embedding token estimator")
@@ -119,6 +125,8 @@ class EmbeddingRunner:
 
 
 def azure_runner(client, deployment, dimensions=3072, *, limits=None, revision=None):
+    from shared.ai.provider import assert_legacy_allowed
+    assert_legacy_allowed()
     from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
 
     limits = limits or EmbeddingLimits()
@@ -137,3 +145,15 @@ def azure_runner(client, deployment, dimensions=3072, *, limits=None, revision=N
         ),
         limits,
     )
+
+
+def google_runner(embedder, *, limits=None):
+    if getattr(embedder, "provider", None) != "google":
+        raise ValueError("Google runner requires a Google embedder")
+    limits = limits or EmbeddingLimits()
+    # One native request per input, counted by the existing request ceiling.
+    from dataclasses import replace
+    return EmbeddingRunner(embedder, EmbeddingIdentity(provider="google-vertex",
+        model=embedder.config.embedding_model, dimensions=embedder.dimensions,
+        revision=embedder.identity), replace(limits, batch_size=1),
+        request_counter=getattr(embedder, "request_count", None))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from typing import Any
+from shared.ai.space import current_space, vector_metadata
 
 from ai_services.ingestion.adr.applicability import applicability_properties
 from ai_services.ingestion.adr.models import (
@@ -265,6 +266,8 @@ class ADRNeo4jWriter:
                     "text": c.text,
                     "content_hash": c.content_hash,
                     "embedding": c.embedding,
+                    "embedding_space": current_space(),
+                    "vector_metadata": vector_metadata(c.text),
                 }
                 for c in chunks
             ]
@@ -281,7 +284,8 @@ class ADRNeo4jWriter:
                 c.contentHash = item.content_hash,
                 c.strategy = 'adr_section'
             FOREACH (_ IN CASE WHEN item.embedding IS NOT NULL THEN [1] ELSE [] END |
-                SET c.embedding = item.embedding
+                SET c.embedding = item.embedding, c.embeddingSpace = item.embedding_space
+                SET c += item.vector_metadata
             )
             MERGE (adr)-[:HAS_CHUNK]->(c)
             """
@@ -305,6 +309,8 @@ class ADRNeo4jWriter:
                     "label": e.label,
                     "aliases": list(e.aliases),
                     "embedding": e.embedding,
+                    "embedding_space": current_space(),
+                    "vector_metadata": vector_metadata(),
                 }
                 for e in adr_originated_entities
             ]
@@ -318,7 +324,8 @@ class ADRNeo4jWriter:
                 e.source_id = $adr_id,
                 e.aliases = item.aliases
             FOREACH (_ IN CASE WHEN item.embedding IS NOT NULL THEN [1] ELSE [] END |
-                SET e.embedding = item.embedding
+                SET e.embedding = item.embedding, e.embeddingSpace = item.embedding_space
+                SET e += item.vector_metadata
             )
             """
             self._run_query_or_tx(

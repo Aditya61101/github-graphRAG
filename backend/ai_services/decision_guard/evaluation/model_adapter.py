@@ -114,9 +114,15 @@ class EvaluationModel(Protocol):
     ) -> ModelReply: ...
 
 
-def wire_text(request, phase):
+def wire_text(request, phase, provider="azure"):
     schema = WireAssessment if phase == "ASSESS" else WireChallenge
     prompt = ASSESS_PROMPT if phase == "ASSESS" else CHALLENGE_PROMPT
+    if provider == "google":
+        from shared.ai.vertex import vertex_schema
+        return json.dumps({"system_instruction": prompt,
+            "contents": provider_request_json(request, phase),
+            "response_mime_type": "application/json", "response_json_schema": vertex_schema(schema)},
+            sort_keys=True, separators=(",", ":"))
     return (
         prompt
         + provider_request_json(request, phase)
@@ -133,6 +139,8 @@ class AzureEvaluationModel:
         temperature: float | None = None,
         output_parameter: str = "max_completion_tokens",
     ):
+        from shared.ai.provider import assert_legacy_allowed
+        assert_legacy_allowed()
         if output_parameter not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError("Unsupported output token parameter")
         self.client, self.deployment = llm.client, llm.deployment
@@ -140,6 +148,8 @@ class AzureEvaluationModel:
         self.temperature, self.output_parameter = temperature, output_parameter
 
     async def _call(self, request, phase, max_output_tokens, timeout):
+        from shared.ai.provider import assert_legacy_allowed
+        assert_legacy_allowed()
         schema = WireAssessment if phase == "ASSESS" else WireChallenge
         options = {self.output_parameter: max_output_tokens}
         if self.temperature is not None:

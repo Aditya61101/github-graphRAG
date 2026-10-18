@@ -412,8 +412,8 @@ async def test_standalone_main_starts_without_local_model(monkeypatch, capsys):
     monkeypatch.setattr(runner, "require_env", lambda name, default=None: default or "test")
     driver = MagicMock()
     monkeypatch.setattr(runner, "GraphDatabase", SimpleNamespace(driver=MagicMock(return_value=driver)))
-    for name in ("AsyncAzureOpenAI", "AzureOpenAIEmbedder", "AzureOpenAILLM"):
-        monkeypatch.setattr(runner, name, MagicMock())
+    provider = SimpleNamespace(llm=object(), embedder=object(), aclose=AsyncMock())
+    monkeypatch.setattr(runner, "create_provider", MagicMock(return_value=provider))
     monkeypatch.setattr(runner, "create_retrievers", MagicMock(return_value=(object(), object(), object())))
     query = AsyncMock(return_value={"answer": "answer", "sources": {"chunks": []}})
     monkeypatch.setattr(runner, "query_graph_rag", query)

@@ -108,6 +108,13 @@ class DatabaseReadiness:
 
 
 class ProductionRuntime:
+    def validate_job(self, job):
+        settings = EvaluationSettings.model_validate_json(job.settings_json)
+        provider = getattr(self.model, "provider", "azure")
+        if settings.provider != provider or (provider == "google" and
+                settings.provider_identity != self.model.provider_identity):
+            raise ValueError("Durable evaluation provider identity mismatch; create a fresh job")
+
     def __init__(
         self, application_store, github_app, graph, repository_lock, authority, model
     ):
@@ -183,7 +190,9 @@ class ProductionRuntime:
             revision_source = GitRevisionSourceReader(repo.id, root, reader)
             settings = EvaluationSettings.model_validate_json(job.settings_json)
             token_counter = conservative_tokens
-            if settings.token_encoding:
+            if settings.token_encoding == "gemini-utf8-bound-v1":
+                token_counter = ModelTokenCounter("gemini-utf8-bound-v1", lambda text: len(text.encode("utf-8")))
+            elif settings.token_encoding:
                 import tiktoken
 
                 token_counter = ModelTokenCounter.from_encoding(
@@ -276,7 +285,7 @@ def production_runtime(app, *, deployment_revision):
         ),
         app.state.ingestion_service._get_lock,
         UploadAuthority(app.state.sqlite_store, ADRS_STORAGE_DIR),
-        ConfiguredAzureModel(
+        configured_evaluation_model(
             app.state.deps.llm,
             deployment_revision=deployment_revision or "UNCONFIGURED",
         ),
@@ -292,3 +301,10 @@ class ConfiguredAzureModel(AzureEvaluationModel):
         if not self.dispatch_allowed:
             raise DispatchDenied("AUTHORIZATION_DENIED")
         return await super()._call(request, phase, max_output_tokens, timeout)
+
+
+def configured_evaluation_model(llm, *, deployment_revision):
+    if getattr(llm, "provider", "azure") == "google":
+        from ai_services.decision_guard.evaluation.vertex_adapter import VertexEvaluationModel
+        return VertexEvaluationModel(llm, deployment_revision=deployment_revision)
+    return ConfiguredAzureModel(llm, deployment_revision=deployment_revision)

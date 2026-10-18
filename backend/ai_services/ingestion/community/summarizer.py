@@ -64,6 +64,17 @@ def _extract_json_content(raw_text: str) -> str:
     return text
 
 
+def generation_context_hash(context, llm):
+    value = context.context_hash()
+    identity = getattr(llm, "identity", None)
+    if identity:
+        import hashlib
+        return hashlib.sha256(json.dumps([value, identity, "community-summary-v1",
+            COMMUNITY_SUMMARIZER_SYSTEM_PROMPT, COMMUNITY_SUMMARIZER_USER_PROMPT,
+            CommunitySummaryOutput.model_json_schema()], sort_keys=True).encode()).hexdigest()
+    return value
+
+
 class LLMCommunitySummarizer(CommunitySummarizer):
     """Generates structured architectural summaries for communities using an LLM."""
 
@@ -75,6 +86,9 @@ class LLMCommunitySummarizer(CommunitySummarizer):
         self.llm = llm
         self.config = config or CommunityConfig()
 
+    def context_hash(self, context):
+        return generation_context_hash(context, self.llm)
+
     async def summarize(self, context: CommunityContext) -> CommunitySummary:
         """Generate an architectural summary for a single community context."""
         context_text = context.format_text()
@@ -82,16 +96,14 @@ class LLMCommunitySummarizer(CommunitySummarizer):
         full_prompt = f"{COMMUNITY_SUMMARIZER_SYSTEM_PROMPT}\n\n{user_prompt}"
 
         try:
-            raw_response = await self.llm.ainvoke(full_prompt)
-            response_text = (
-                raw_response.content
-                if hasattr(raw_response, "content")
-                else str(raw_response)
-            )
-
-            json_text = _extract_json_content(response_text)
-            data = json.loads(json_text)
-            output = CommunitySummaryOutput.model_validate(data)
+            if getattr(self.llm, "provider", None) == "google":
+                output = await self.llm.extract_structured(user_prompt, CommunitySummaryOutput,
+                    system=COMMUNITY_SUMMARIZER_SYSTEM_PROMPT)
+            else:
+                raw_response = await self.llm.ainvoke(full_prompt)
+                response_text = raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+                json_text = _extract_json_content(response_text)
+                output = CommunitySummaryOutput.model_validate(json.loads(json_text))
 
             # Validate that key_entities belong to the community
             valid_names = {m.entity_name for m in context.members}
@@ -110,7 +122,7 @@ class LLMCommunitySummarizer(CommunitySummarizer):
             return CommunitySummary.create(
                 community_id=context.community_id,
                 output=output,
-                context_hash=context.context_hash(),
+                context_hash=self.context_hash(context),
             )
         except Exception as exc:
             raise CommunitySummaryError(
@@ -140,7 +152,7 @@ class LLMCommunitySummarizer(CommunitySummarizer):
 
         for ctx in contexts:
             state = states.get(ctx.community_id)
-            c_hash = ctx.context_hash()
+            c_hash = self.context_hash(ctx)
 
             if (
                 not force_refresh

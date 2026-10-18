@@ -62,6 +62,11 @@ async def hybrid_retrieve(
     repository_id: str | None = None, settings: RetrievalSettings | None = None,
 ) -> HybridRetrievalResult:
     settings = settings or RetrievalSettings.from_env()
+    if getattr(embedder, "provider", None) == "google":
+        if not repository_id:
+            raise ValueError("Google retrieval requires an authorized repository")
+        from shared.ai.space import assert_vector_space
+        await asyncio.to_thread(assert_vector_space, driver, database, repository_id, global_indexes=True)
     vectors = await embedder.embed([query])
     if len(vectors) != 1:
         raise RuntimeError("Embedder must return exactly one vector for a query.")

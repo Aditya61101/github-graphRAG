@@ -24,15 +24,21 @@ def build_repository_ingestion_pipeline(
     examples: str = "",
     progress_callback=None,
     publication_guard=None,
+    llm=None,
+    embedder=None,
 ):
     database = os.environ.get("NEO4J_DATABASE", "neo4j")
 
     knowledge_pipeline = build_knowledge_pipeline(
         candidates_path=candidates_path,
         examples=examples,
+        llm=llm, embedder=embedder,
     )
 
-    splitter = RepositoryTextSplitter()
+    from shared.ai.embedding_inputs import EMBEDDING_MAX_BYTES
+    from ..batching import GEMINI_EXTRACTION_MAX_BYTES
+    splitter = RepositoryTextSplitter(max_chunk_bytes=min(EMBEDDING_MAX_BYTES, GEMINI_EXTRACTION_MAX_BYTES)
+        if getattr(embedder, "provider", None) == "google" else None)
     neo4j_writer = Neo4jRepositoryWriter(
         driver=neo4j_driver,
         database=database,

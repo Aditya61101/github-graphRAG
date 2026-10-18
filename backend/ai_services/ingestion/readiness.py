@@ -74,6 +74,12 @@ class GraphReadBarrier:
         if not seal or (seal["state"], seal["run_id"], seal["token"], seal["target"]) != (
                 "COMPLETE", expected[1], expected[2], expected[3]):
             raise GraphUnavailable()
+        from shared.ai.space import assert_vector_space, current_space
+        try:
+            if current_space() != "azure-legacy":
+                assert_vector_space(self.control.driver, self.control.database, repo_id, global_indexes=True)
+        except Exception:
+            raise GraphUnavailable() from None
         return expected
 
     @asynccontextmanager

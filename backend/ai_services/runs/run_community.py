@@ -12,14 +12,12 @@ import os
 import sys
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
-from openai import AsyncAzureOpenAI
 
 from ai_services.ingestion.community import (
     CommunityConfig,
     build_community_pipeline,
 )
-from ai_services.embeddings.azure_openai import AzureOpenAIEmbedder
-from ai_services.ingestion.rkg.llm_adapters import AzureOpenAILLM
+from shared.ai.provider import create_provider
 
 load_dotenv()
 
@@ -83,31 +81,10 @@ async def main() -> None:
 
     driver = GraphDatabase.driver(uri, auth=(username, password))
 
-    # 2. Azure OpenAI configuration
-    azure_endpoint = _required_env("AZURE_OPENAI_ENDPOINT")
-    azure_api_key = _required_env("AZURE_OPENAI_API_KEY")
-    azure_api_version = _required_env("AZURE_OPENAI_API_VERSION")
-    llm_deployment = _required_env("AZURE_OPENAI_DEPLOYMENT_NAME")
-    embedding_deployment = _required_env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME")
-    embedding_dimensions = int(os.getenv("AZURE_OPENAI_EMBEDDING_DIMENSIONS", "3072"))
-
-    azure_client = AsyncAzureOpenAI(
-        azure_endpoint=azure_endpoint,
-        api_key=azure_api_key,
-        api_version=azure_api_version,
-    )
-
-    llm = AzureOpenAILLM(
-        client=azure_client,
-        deployment=llm_deployment,
-    )
-
-    embedder = AzureOpenAIEmbedder(
-        client=azure_client,
-        deployment=embedding_deployment,
-        dimensions=embedding_dimensions,
-        batch_size=int(os.getenv("COMMUNITY_EMBEDDING_BATCH_SIZE", "32")),
-    )
+    services = create_provider()
+    llm, embedder = services.llm, services.embedder
+    llm_deployment, embedding_deployment = services.config.model, services.config.embedding_model
+    embedding_dimensions = embedder.dimensions
 
     try:
         driver.verify_connectivity()
@@ -153,6 +130,7 @@ async def main() -> None:
         print(f"\n[ERROR] Community pipeline failed: {exc}", file=sys.stderr)
         raise
     finally:
+        await services.aclose()
         driver.close()
 
 

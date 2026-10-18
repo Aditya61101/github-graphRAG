@@ -74,7 +74,7 @@ class ADREntityResolver:
                 """
                 MATCH (e:Entity {repository: $repo})
                 RETURN e.id AS id, e.name AS name, e.label AS label,
-                       coalesce(e.aliases, []) AS aliases, e.embedding AS embedding
+                       coalesce(e.aliases, []) AS aliases, e.embedding AS embedding, e.embeddingSpace AS embedding_space
                 """,
                 repo=repository_id,
                 database_=self.database,
@@ -88,7 +88,8 @@ class ADREntityResolver:
                         "name": row.get("name"),
                         "label": row.get("label"),
                         "aliases": list(row.get("aliases") or []),
-                        "embedding": row.get("embedding"),
+                        "embedding": (row.get("embedding") if getattr(self.embedder, "provider", None) != "google"
+                                      or row.get("embedding_space") == self.embedder.identity else None),
                     }
         except Exception as exc:
             logger.exception("Failed to load existing repository entities from Neo4j")
@@ -287,6 +288,11 @@ class ADREntityResolver:
                     )
                     resolved_canonical[new_cid] = new_entity
                     new_entities_to_embed.append(new_entity)
+
+        # Reuse canonical identities, never incompatible vectors from the cloned corpus.
+        for entity in resolved_canonical.values():
+            if entity.embedding is None and entity not in new_entities_to_embed:
+                new_entities_to_embed.append(entity)
 
         # Generate embeddings for newly created ADR entities
         if new_entities_to_embed and self.embedder:

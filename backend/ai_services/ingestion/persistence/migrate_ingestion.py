@@ -5,6 +5,7 @@ from .models import RepositoryIngestionState, IngestionDelivery
 version_table = Table("ingestion_schema_version", MetaData(),
                       Column("version", Integer, nullable=False))
 EXTRA_COLUMNS = {
+    "provider_identity": "VARCHAR(64)",
     "attempts": "INTEGER NOT NULL DEFAULT 0",
     "next_attempt_at": "INTEGER NOT NULL DEFAULT 0",
     "owner": "VARCHAR(64)", "token": "INTEGER", "lease_until": "INTEGER",

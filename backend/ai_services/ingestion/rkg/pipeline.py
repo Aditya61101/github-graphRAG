@@ -51,7 +51,15 @@ class RepositoryKnowledgePipeline:
         batch_size = max(1, self.config.embedding_batch_size)
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
-            vectors.extend(await self.embedder.embed([chunk.text for chunk in batch]))
+            invalid = [dict(file=chunk.file_path, chunk_id=chunk.chunk_id,
+                strategy=chunk.strategy.value, utf8_bytes=len(chunk.text.encode("utf-8")))
+                for chunk in batch if not chunk.text.strip()]
+            if invalid:
+                raise ValueError(f"Empty source chunks reached embedding boundary: {invalid}")
+            embedded = await self.embedder.embed([chunk.text for chunk in batch])
+            if len(embedded) != len(batch):
+                raise ValueError("Chunk embedder returned a different number of vectors than inputs")
+            vectors.extend(embedded)
         return vectors
 
     @staticmethod
@@ -117,6 +125,9 @@ class RepositoryKnowledgePipeline:
                 "relationship_candidates": [],
             }
 
+        # Reject invalid singletons before any billable embedding request. The
+        # producer must split these losslessly, preserving source provenance.
+        self.batcher.batches(chunks)
         embeddings = await self._embed_chunks(chunks)
         embedded_chunks = [
             chunk.__class__(

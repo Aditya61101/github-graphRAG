@@ -245,7 +245,7 @@ async def test_cli_preview_import_needs_no_azure_client_or_settings(
     azure = MagicMock(
         side_effect=AssertionError("import must not create an Azure client")
     )
-    monkeypatch.setattr(cli, "AsyncAzureOpenAI", azure)
+    monkeypatch.setattr(cli, "create_provider", azure)
     importer = MagicMock()
     importer.apply_preview.return_value = EnrichmentReport(updated=3, llm_calls=0)
     factory = MagicMock(return_value=importer)

@@ -1,18 +1,17 @@
 import json
 import os
 from dotenv import load_dotenv
-from groq import Groq
+from shared.ai.provider import create_provider
 load_dotenv()
 
-from backend.ai_services.ingestion.discovery.read_write_plan import save_manifest, save_plan
+from ai_services.ingestion.discovery.read_write_plan import save_manifest, save_plan
 
-from backend.ai_services.ingestion.discovery.planner import create_ingestion_plan
-from backend.ai_services.ingestion.discovery.plan_validation import validate_ingestion_plan
-from backend.ai_services.ingestion.discovery.repo import Repository
-from backend.ai_services.ingestion.discovery.git_tree import get_head_commit, get_repository_files
-from backend.ai_services.ingestion.discovery.repo_manifest import build_repository_manifest
+from ai_services.ingestion.discovery.planner import create_vertex_ingestion_plan
+from ai_services.ingestion.discovery.plan_validation import validate_ingestion_plan
+from ai_services.ingestion.discovery.repo import Repository
+from ai_services.ingestion.discovery.git_tree import get_head_commit, get_repository_files
+from ai_services.ingestion.discovery.repo_manifest import build_repository_manifest
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 repo = Repository.from_path(r"E:\Studies\Dev\Projects\claimIQ")
 
 async def main():
@@ -27,9 +26,7 @@ async def main():
     manifest = manifest.to_json()
     save_manifest(manifest)
 
-    client = Groq(
-        api_key=GROQ_API_KEY,
-    )
+    services = create_provider()
 
     architectural_objective = """
     Build an architectural knowledge graph for DecisionGuard.
@@ -43,11 +40,10 @@ async def main():
     future pull requests.
     """
 
-    plan = create_ingestion_plan(
-        client=client,
-        architectural_objective=architectural_objective,
-        manifest=manifest,
-    )
+    try:
+        plan = await create_vertex_ingestion_plan(services.llm, architectural_objective, manifest)
+    finally:
+        await services.aclose()
     validate_ingestion_plan(plan, json.loads(manifest))
     save_plan(plan)
     

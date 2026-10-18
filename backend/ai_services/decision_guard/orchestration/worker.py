@@ -79,6 +79,8 @@ class EvaluationWorker:
         return await self._execute_runtime(job, token, self.runtime)
 
     async def _execute_runtime(self, job, token, runtime):
+        if hasattr(runtime, "validate_job"):
+            runtime.validate_job(job)
         event = PullRequestEvent.model_validate_json(job.event_json)
         await self._current(job, token, event, runtime)
         # A durable final-stage checkpoint needs no checkout or model execution.

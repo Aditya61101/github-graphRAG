@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
+from shared.ai.provider import ingestion_identity
 
 from cryptography.fernet import Fernet
 from sqlalchemy import or_, select, update
@@ -506,6 +507,7 @@ class SqliteApplicationStore:
                 repo.updated_at = utc_now()
 
             run = IngestionRunModel(
+                provider_identity=ingestion_identity(),
                 repository_id=repo.id if repo else repository_id,
                 base_commit_sha=base_commit_sha,
                 target_commit_sha=target_commit_sha,
